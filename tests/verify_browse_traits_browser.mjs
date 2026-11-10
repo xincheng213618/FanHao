@@ -9,7 +9,7 @@ import { mediaClassificationSearch } from "../lib/work-traits.js";
 const root = fileURLToPath(new URL("../public/", import.meta.url));
 const specialTag = '剧情,组合/"[]<img>';
 const tags = ["单体作品", "美少女电影", specialTag, ...Array.from({ length: 15 }, (_, i) => `资料标签 ${i}`)];
-const fixtureClassifications = [["ltx", "LTX"], ["quality1080p", "1080p"], ["formatMkv", "MKV"]];
+const fixtureClassifications = [["ltx", "LTX"], ["ltxLocal", "LTX 本地"], ["quality1080p", "1080p"], ["formatMkv", "MKV"]];
 const requests = [];
 let legacyCollections = false;
 const works = Array.from({ length: 96 }, (_, id) => ({
@@ -229,6 +229,12 @@ try {
   assert(requests.some((url) => url.pathname === "/api/search" && url.searchParams.get("q") === "class:ltx ZZZ-195"));
   assert.equal(await page.locator(".work-card").count(), 1);
   await scopedSearch.press("Escape");
+  await page.waitForURL(`${address}/fanhao?classification=ltx`);
+  await classificationNav.getByRole("link", { name: "LTX 本地", exact: true }).click();
+  await page.waitForURL(`${address}/fanhao?classification=ltx-local`);
+  await page.locator(".work-card .info-chip").filter({ hasText: /^LTX 本地$/ }).waitFor();
+  assert(requests.some((url) => url.pathname === "/api/search" && url.searchParams.get("q") === "class:ltx-local"));
+  await classificationNav.getByRole("link", { name: "LTX", exact: true }).click();
   await page.waitForURL(`${address}/fanhao?classification=ltx`);
   if (screenshotDir) await page.screenshot({ path: path.join(screenshotDir, "classification-desktop.png"), fullPage: false });
   await page.setViewportSize({ width: 390, height: 844 });

@@ -119,6 +119,15 @@ check("compact version suffixes are independent from measured resolution and con
   assert.equal(deriveWorkTraits({ videos: [{ name: "ABC-123.mp4", width: 4096, height: 1716 }] }).flags.quality4k, true);
 });
 
+check("local LTX marker applies only to the tagged video copy", () => {
+  const traits = traitsForName("ABC-123-LTXC-4K [LTX 本地].mp4");
+  assert.deepEqual(activeFlags(traits), ["ltx", "ltxLocal", "quality4k", "subtitled"]);
+  assert.deepEqual(versionBadges(traits), ["subtitled", "ltxLocal", "quality4k"]);
+  assert.deepEqual(activeFlags(traitsForName("sample.C [LTX 本地].mp4")), ["ltx", "ltxLocal", "subtitled"]);
+  assert.equal(traitsForName("ABC-123-LTX.mp4").flags.ltxLocal, false);
+  assert.equal(deriveWorkTraits({ directoryName: "ABC-123 [LTX 本地]" }).flags.ltxLocal, false);
+});
+
 check("metadata edition labels are evidence, not genre chips or visual verification", () => {
   const traits = deriveWorkTraits({ tags: ["眼鏡", "無碼", "無碼破解", "ai去碼", "中文字幕", "4k"] });
   assert.deepEqual(traits.tags, ["眼镜"]);

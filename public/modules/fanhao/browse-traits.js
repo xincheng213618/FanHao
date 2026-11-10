@@ -2,12 +2,13 @@ const VERSION_FILTERS = [
   ["uncensored", "无码"],
   ["uncensoredAi", "无码破解"],
   ["subtitled", "中字"],
-  ["ltx", "LTX"]
+  ["ltx", "LTX"],
+  ["ltxLocal", "LTX 本地"]
 ];
 const QUALITY_FILTERS = [["quality4k", "4K"], ["quality1080p", "1080p"], ["quality720p", "720p"]];
 const FORMAT_FILTERS = [["formatMp4", "MP4"], ["formatMkv", "MKV"], ["formatWmv", "WMV"]];
 export const EDITION_FILTERS = [...VERSION_FILTERS, ...QUALITY_FILTERS, ...FORMAT_FILTERS];
-const CLASSIFICATION_LABELS = new Map([["ltx", "LTX"], ...[...QUALITY_FILTERS, ...FORMAT_FILTERS].map(([, label]) => [label.toLowerCase(), label])]);
+const CLASSIFICATION_LABELS = new Map([["ltx", "LTX"], ["ltx-local", "LTX 本地"], ...[...QUALITY_FILTERS, ...FORMAT_FILTERS].map(([, label]) => [label.toLowerCase(), label])]);
 
 const editionLabels = new Map(EDITION_FILTERS);
 

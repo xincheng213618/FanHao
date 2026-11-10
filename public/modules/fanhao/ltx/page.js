@@ -289,18 +289,26 @@ function setActor(actor) {
 
 function localStateView(item) {
   const row = element("div", "fanhao-local-state");
-  const { library, downloads, marked, folderMarked } = item.local;
+  const { library, downloads, marked, ltxLocal = 0, folderMarked } = item.local;
   if (!hasLocal(item)) {
     row.append(element("span", "", state.libraryChecked && state.downloadsChecked ? "本地未发现" : "本地状态不完整"));
     return row;
   }
   if (library) row.append(element("span", "fanhao-present", `馆藏 ${library}`));
   if (downloads) row.append(element("span", "fanhao-present", `下载盘 ${downloads}`));
-  const status = element("span", marked ? "fanhao-present" : "fanhao-pending", marked ? `已标 LTX ${marked}` : "未标 LTX");
-  status.title = marked ? `${marked} 份本地视频的文件名含 LTX 标记`
-    : folderMarked ? "视频文件名未标 LTX，目录带 LTX 标记" : "同番号本地视频的文件名未标 LTX";
-  if (!marked && folderMarked) status.textContent = "仅目录标 LTX";
-  row.append(status);
+  if (!ltxLocal || marked > ltxLocal) {
+    const otherMarked = marked - ltxLocal;
+    const status = element("span", otherMarked ? "fanhao-present" : "fanhao-pending",
+      otherMarked ? `已标 LTX ${otherMarked}` : folderMarked ? "仅目录标 LTX" : "未标 LTX");
+    status.title = otherMarked ? `${otherMarked} 份本地视频的文件名含 LTX 标记`
+      : folderMarked ? "视频文件名未标 LTX，目录带 LTX 标记" : "同番号本地视频的文件名未标 LTX";
+    row.append(status);
+  }
+  if (ltxLocal) {
+    const badge = element("span", "fanhao-present", `LTX 本地 ${ltxLocal}`);
+    badge.title = "本机 Jasna LTX 已完成的输出";
+    row.append(badge);
+  }
   return row;
 }
 
@@ -454,6 +462,7 @@ function renderResults(resetScroll = false) {
     if (state.actor && !item.actors.includes(state.actor)) return false;
     if (filter === "present") return hasLocal(item);
     if (filter === "marked") return item.local.marked > 0;
+    if (filter === "ltx-local") return item.local.ltxLocal > 0;
     if (filter === "unmarked") return hasLocal(item) && !item.local.marked;
     if (filter === "missing") return !hasLocal(item);
     return true;

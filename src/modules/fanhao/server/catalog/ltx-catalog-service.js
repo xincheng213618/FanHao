@@ -82,9 +82,9 @@ function addLocal(files, { key, file, size, source }) {
   const id = pathKey(file);
   if (group.has(id)) return;
   const name = path.basename(file);
-  const marked = deriveWorkTraits({ videos: [{ name }] }).flags.ltx;
+  const { ltx: marked, ltxLocal } = deriveWorkTraits({ videos: [{ name }] }).flags;
   const folderMarked = !marked && deriveWorkTraits({ directoryName: path.basename(path.dirname(file)) }).flags.ltx;
-  group.set(id, { size, source, marked, folderMarked });
+  group.set(id, { size, source, marked, ltxLocal, folderMarked });
 }
 
 async function collectLibrary(files, keys, getDb) {
@@ -206,6 +206,7 @@ export function createLtxCatalogService({ snapshotPath, getDb, incomingRoots, li
             library: copies.filter((file) => file.source === "library").length,
             downloads: copies.filter((file) => file.source === "download").length,
             marked: copies.filter((file) => file.marked).length,
+            ltxLocal: copies.filter((file) => file.ltxLocal).length,
             folderMarked: copies.filter((file) => file.folderMarked).length
           },
           links: links.map((link) => ({ ...link, sizeMatch: sizes.has(link.size) }))

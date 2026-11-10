@@ -2711,6 +2711,12 @@ function createWorkCard(work, index = 0) {
 
   const flags = document.createElement("div");
   flags.className = "work-card-flags";
+  if (!work.missingLocal && work.traits?.flags?.ltxLocal) {
+    const badge = document.createElement("span");
+    badge.className = "info-chip";
+    badge.textContent = "LTX 本地";
+    flags.append(badge);
+  }
   if (work.missingLocal && work.availability?.hasMagnet === true) {
     const magnet = document.createElement("span");
     magnet.className = "info-chip magnet";
