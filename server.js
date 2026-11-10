@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { ADMIN_SCRIPT_DEFINITIONS } from "./lib/admin-script-registry.js";
 import { normalizeWorkCode as parseNormalizedWorkCode, workCodeKey } from "./lib/code-parser.js";
+import { hasLocalWorkMarkerPrefix, stripLocalWorkMarkerPrefix } from "./lib/local-work-marker.js";
 import { decodeInfoBuffer, isSubtitleLikeInfoText, parseInfoMetadata, renderInfoMetadataText } from "./lib/info-metadata.js";
 import { SERVER_CONFIG } from "./src/bootstrap/server-config.js";
 import { discoverFanHaoModules } from "./src/fanhao/module-registry.js";
@@ -1491,17 +1492,7 @@ function localWorkMarkerKey(value) {
 }
 
 function localWorkMarkersFromName(value) {
-  const name = String(value || "").trim();
-  const markers = [];
-  if (/^\[A\](?:[.\s_-]*)/i.test(name)) markers.push("A");
-  return markers;
-}
-
-function stripLocalWorkMarkerPrefix(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^\[A\][.\s_-]*/i, "")
-    .trim();
+  return hasLocalWorkMarkerPrefix(value) ? ["A"] : [];
 }
 
 function localWorkMarkers(work) {
@@ -1522,7 +1513,7 @@ function markerDirectoryName(name, marker, enabled) {
   const key = localWorkMarkerKey(marker);
   if (!key) return String(name || "");
   const clean = stripLocalWorkMarkerPrefix(name);
-  if (enabled) return `[${key}].${clean || String(name || "").trim()}`;
+  if (enabled && clean) return `[${key}].${clean}`;
   return clean || String(name || "").trim();
 }
 

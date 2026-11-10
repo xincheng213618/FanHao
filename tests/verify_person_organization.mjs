@@ -89,6 +89,7 @@ try {
   assert.equal(organizationFolderName("UVW-555", "[A].UVW-555 Marked VR"), "[A].UVW-555 Marked VR");
   assert.equal(organizationFolderName("UVW-555", "UVW-555 [A].UVW-555 Marked VR"), "[A].UVW-555 Marked VR");
   assert.equal(organizationFolderName("UVW-555", "[A] UVW-555 Marked VR.mp4"), "[A].UVW-555 Marked VR");
+  assert.equal(organizationFolderName("UVW-555", "[A].[A.]UVW-555 [A.]UVW-555 Marked VR"), "[A].UVW-555 Marked VR");
   assert.equal(organizationFolderName("XYZ-557", "[A].XYZ-557 Title flag", "XYZ-557 Unmarked"), "XYZ-557 Title flag");
   const preview = service.preview("1");
   assert.equal(preview.workCount, 6);

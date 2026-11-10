@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { workCodeKey, extractWorkCodes } from "../../../../../lib/code-parser.js";
+import { splitLocalWorkTitle } from "../../../../../lib/local-work-marker.js";
 import { parseInfoMetadata, renderInfoMetadataText } from "../../../../../lib/info-metadata.js";
 import { applyParsedInfoToCoreWork } from "../../../../../lib/core-info-metadata.js";
 import { ensureRealPathWithinRoots } from "../../../../platform/server/library-path-safety.js";
@@ -22,13 +23,8 @@ export function organizationFolderName(code, title, localName = title) {
     ? `FC2[-_\\s.]*(?:PPV[-_\\s.]*)?${parts.at(-1)}` : parts.join("[-_\\s.]*");
   const codePrefix = `(?:\\d{2,6})?${codePattern}(?=$|[^a-z0-9])`;
   const leadingCode = new RegExp(`^${codePrefix}[.\\s_-]*`, "i");
-  const marker = /^\[A\][.\s_-]*/i;
-  // Keep the local marker at the front. Also recognize the duplicate prefix
-  // produced by earlier organization, so another pass repairs it idempotently.
-  const marked = marker.test(String(localName || ""))
-    || new RegExp(`^${codePrefix}[.\\s_-]*\\[A\\][.\\s_-]*${codePrefix}`, "i").test(String(localName || ""));
-  let suffix = clean.replace(marker, "").replace(leadingCode, "");
-  if (marker.test(suffix)) suffix = suffix.replace(marker, "").replace(leadingCode, "");
+  const { marked } = splitLocalWorkTitle(localName, leadingCode);
+  const { title: suffix } = splitLocalWorkTitle(clean, leadingCode);
   return `${marked ? "[A]." : ""}${code} ${suffix}`.replace(/[\\/:*?"<>|\u0000-\u001f]/g, " ")
     .replace(/\s+/g, " ").trim().slice(0, 120).replace(/[. ]+$/, "");
 }
