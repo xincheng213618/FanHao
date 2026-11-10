@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createInterface } from "node:readline";
 import { promisify } from "node:util";
+import { splitLocalWorkTitle } from "../../../../../lib/local-work-marker.js";
 import { ensureRealPathWithinRoots } from "../../../../platform/server/library-path-safety.js";
 
 const runFile = promisify(execFile);
@@ -236,7 +237,8 @@ export function nameWithIntakeMarks(file, tags, existing) {
 
 export function nameForIntake(folder, code, title, tags, ext, part = 0) {
   const escaped = code.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const clean = safeName(String(title || "").replace(new RegExp(`^${escaped}(?:[ ._-]+|$)`, "i"), ""), "");
+  const leadingCode = new RegExp("^" + escaped + "(?=$|[ ._\\s-]|\\[A\\.?\\])[ ._\\s-]*", "i");
+  const clean = safeName(splitLocalWorkTitle(title, leadingCode).title, "");
   const suffix = `${part ? `-CD${part}` : ""}${editionSuffix(tags)}${tags.quality4k ? "-4K" : ""}`;
   const length = Math.min(175, 244 - folder.length - suffix.length - ext.length);
   if (length < code.length) throw intakeError("目标目录路径过长，请先缩短目录");
@@ -297,15 +299,19 @@ public static class FanHaoFileCopy {
 exit ([FanHaoFileCopy]::Run($env:FANHAO_COPY_SOURCE, $env:FANHAO_COPY_TARGET, [int]$env:FANHAO_COPY_PARENT, $env:FANHAO_COPY_MUTEX))
 `, "utf16le").toString("base64");
 
-function copyWithWindows(item, onChunk) {
+function isWindowsCopyCrash(error) {
+  return typeof error.code === "number" && (error.code >>> 0) === 0xc0000005;
+}
+
+function copyWithWindows(item, onTransferred) {
   const size = item.sourceSignature[2];
   const lock = createHash("sha256").update(pathKey(item.temp)).digest("hex");
   let reported = 0;
   const report = (transferred) => {
     const next = Math.min(size, transferred);
     if (!Number.isSafeInteger(next) || next <= reported) return;
-    onChunk(next - reported);
     reported = next;
+    onTransferred(next);
   };
   return new Promise((resolve, reject) => {
     const child = execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", windowsCopyCommand], {
@@ -316,6 +322,8 @@ function copyWithWindows(item, onChunk) {
       if (!error) {
         report(size);
         resolve();
+      } else if (isWindowsCopyCrash(error)) {
+        reject(error);
       } else if ([39, 112].includes(error.code)) {
         reject(Object.assign(error, { code: "ENOSPC" }));
       } else {
@@ -349,7 +357,7 @@ async function verifyIntakeCopy(item, copiedHash, onChunk) {
   }
 }
 
-export async function stageIntakeFile(item, persist, onProgress = () => {}) {
+export async function stageIntakeFile(item, persist, onProgress = () => {}, windowsCopy = process.platform === "win32" ? copyWithWindows : null) {
   if (item.staged && same(signature(lstat(item.temp)), item.staged)) return;
   if (item.source && !same(signature(regular(item.source)), item.sourceSignature)) throw intakeError("源文件已改变，请重新核对");
   if (!item.tempIdentity) {
@@ -380,26 +388,44 @@ export async function stageIntakeFile(item, persist, onProgress = () => {}) {
   try {
     if (!same(identity(await handle.stat()), item.tempIdentity)) throw intakeError("暂存文件已被替换");
     if (item.source) {
-      let copied;
-      if (process.platform === "win32") {
-        await copyWithWindows(item, (size) => onProgress("copy", size));
-      } else {
+      let copiedHash;
+      let copiedWithHelper = false;
+      let reported = 0;
+      function reportCopy(transferred) {
+        if (transferred <= reported) return;
+        onProgress("copy", transferred - reported);
+        reported = transferred;
+      }
+      if (windowsCopy) {
+        try {
+          await windowsCopy(item, reportCopy);
+          copiedWithHelper = true;
+        } catch (error) {
+          if (!isWindowsCopyCrash(error)) throw error;
+          console.warn("[fanhao intake] Windows copy helper exited with 0xC0000005; retrying with streamed copy");
+          if (!same(signature(regular(item.source)), item.sourceSignature)) throw intakeError("源文件已改变，请重新核对");
+          if (!same(identity(regular(item.temp)), item.tempIdentity)) throw intakeError("暂存文件已被替换");
+        }
+      }
+      if (!copiedWithHelper) {
         await handle.truncate(0);
         const hash = createHash("sha256");
+        let transferred = 0;
         async function* chunks() {
           for await (const chunk of fs.createReadStream(item.source)) {
             hash.update(chunk);
-            onProgress("copy", chunk.length);
             yield chunk;
+            transferred += chunk.length;
+            reportCopy(transferred);
           }
         }
         await handle.writeFile(chunks());
-        copied = hash.digest("hex");
+        copiedHash = hash.digest("hex");
       }
       await handle.sync();
       const tempStat = regular(item.temp);
       if (!same(identity(tempStat), item.tempIdentity)) throw intakeError("暂存文件已被替换");
-      const [sourceHash, targetHash] = await verifyIntakeCopy(item, copied, (size) => onProgress("verify", size));
+      const [sourceHash, targetHash] = await verifyIntakeCopy(item, copiedHash, (size) => onProgress("verify", size));
       if (!same(signature(regular(item.source)), item.sourceSignature)) throw intakeError("传输期间源文件被改动，请等下载或其他程序结束后重试");
       if (sourceHash !== targetHash) throw intakeError("目标盘上的副本与源文件内容不一致，可重试传输");
       if (!same(signature(regular(item.temp)), signature(tempStat))) throw intakeError("校验期间暂存文件被改动，可重试传输");

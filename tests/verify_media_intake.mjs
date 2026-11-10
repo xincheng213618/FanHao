@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
 import { createCoreLibraryService } from "../src/modules/fanhao/server/library/core-library-service.js";
 import { createMediaIntakeService } from "../src/modules/fanhao/server/workflows/media-intake-service.js";
-import { classifyIntakeAds, stageIntakeFile, signature } from "../src/modules/fanhao/server/workflows/intake-files.js";
+import { classifyIntakeAds, nameForIntake, stageIntakeFile, signature } from "../src/modules/fanhao/server/workflows/intake-files.js";
 import { routeFileWorkflows } from "../src/modules/fanhao/server/workflows/routes.js";
 import { createStaticFileServer } from "../src/platform/server/static-files.js";
 import { readJsonBody } from "../src/platform/server/request-io.js";
@@ -52,9 +52,9 @@ db.exec(`
 db.prepare("INSERT INTO people VALUES(1,'Fixture Person','fixtureperson','Fixture Person',?,'ok','fixture',?,?)").run(actor, timestamp, timestamp);
 fs.mkdirSync(incoming); fs.mkdirSync(actor, { recursive: true });
 
-function oldVideo(id, code, marker, contents, actorDir = actor) {
+function oldVideo(id, code, marker, contents, actorDir = actor, folderPrefix = "") {
   const title = `${code} Fixture`;
-  const folder = path.join(actorDir, title);
+  const folder = path.join(actorDir, folderPrefix + title);
   const file = write(path.join(folder, `${title}${marker}.mp4`), contents);
   db.prepare("INSERT INTO works(id,code,code_search,title,source) VALUES(?,?,?,?,'fixture')").run(id, code, code.replace("-", "").toLowerCase(), title);
   db.prepare("INSERT INTO work_people VALUES(?,1,'actor',0,'fixture',?,?)").run(id, timestamp, timestamp);
@@ -91,7 +91,12 @@ async function settle(job) {
 }
 
 try {
-  const existing = oldVideo(1, "ABC-123", "-LTX", "fixture library old 1080p");
+  assert.equal(nameForIntake(actor, "ABC-123", "[A].[A.]ABC-123 [A.]ABC-123 Fixture", { ltx: true, c: true, quality4k: true }, ".mp4", 2),
+    "ABC-123 Fixture-CD2-LTXC-4K.mp4");
+  assert.equal(nameForIntake(actor, "ABC-123", "ABC-1234 Fixture mentions ABC-123", {}, ".mp4"),
+    "ABC-123 ABC-1234 Fixture mentions ABC-123.mp4");
+  const existing = oldVideo(1, "ABC-123", "-LTX", "fixture library old 1080p", actor, "[A.]");
+  db.prepare("UPDATE works SET title=? WHERE id=1").run("[A.]ABC-123 [A].ABC-123 Fixture");
   const replacement = source("ABC-123.mp4");
   const subtitle = source("ABC-123.zh.srt", "fixture subtitles");
   const stat = fs.statSync(replacement);
@@ -100,12 +105,14 @@ try {
   const compared = await service.compare({ path: replacement });
   assert.equal(compared.code, "ABC-123");
   assert.equal(compared.files[0].id, 1);
+  assert.equal(compared.files[0].a, true);
   await service.open({ path: replacement });
   await service.open({ path: existing, folder: true });
   assert.deepEqual(openCalls, [replacement, path.dirname(existing)]);
 
-  const plan = await service.prepare({ action: "replace", path: replacement, oldId: 1 });
+  const plan = await service.prepare({ action: "replace", path: replacement, oldId: 1, tags: { a: true } });
   assert.equal(plan.target, existing);
+  assert.equal(JSON.parse(db.prepare("SELECT plan_json FROM media_intake_jobs WHERE id=?").get(plan.id).plan_json).markFavorite, undefined);
   assert.equal(bytes(existing), "fixture library old 1080p");
   db.exec("CREATE TRIGGER fixture_refusal BEFORE UPDATE ON local_files BEGIN SELECT RAISE(ABORT,'fixture commit failure'); END");
   service.run(plan.id);
@@ -218,7 +225,11 @@ try {
   assert.equal(bytes(cross), "fixture incoming 1080p");
   const tempIdentity = item.tempIdentity;
   const moved = { copy: 0, verify: 0 };
-  await stageIntakeFile(item, () => {}, (phase, size) => { moved[phase] += size; });
+  await stageIntakeFile(item, () => {}, (phase, size) => { moved[phase] += size; }, async (file, report) => {
+    fs.writeFileSync(file.temp, "incomplete");
+    report(10);
+    throw Object.assign(new Error("fixture Windows copy crash"), { code: 3221225477 });
+  });
   assert.equal(bytes(item.temp), bytes(cross));
   assert.deepEqual(item.staged.slice(0, 2), tempIdentity);
   assert.deepEqual(moved, { copy: crossSize, verify: crossSize });
@@ -506,6 +517,54 @@ try {
   assert.equal(bytes(siblingAfter), "fixture following part");
   assert(!fs.existsSync(replacementPartDir) && !fs.existsSync(renamePart.target));
 
+  const wmvAlternate = oldVideo(100, "PGD-606", "", "fixture separate edition");
+  const wmvFolder = path.dirname(wmvAlternate);
+  const wmvVideoCount = db.prepare("SELECT count(*) AS count FROM local_files WHERE local_work_id=100 AND file_type='video'");
+  const insertWmv = db.prepare(`INSERT INTO local_files(id,work_id,local_work_id,file_id,file_type,file_path,name,size,sort_order)
+    VALUES(?,100,100,?,'video',?,?,?,?)`);
+  const wmvParts = [1, 2, 3, 4].map((part) => {
+    const file = write(path.join(wmvFolder, `[NoDRM]-pgd00606hhb${part}.wmv`), `fixture WMV part ${part}`);
+    insertWmv.run(100 + part, `wmv-${part}`, file, path.basename(file), fs.statSync(file).size, part);
+    return file;
+  });
+  const wmvSubtitle = write(path.join(wmvFolder, "[NoDRM]-pgd00606hhb2.zh.srt"), "fixture part subtitle");
+  const mergedSource = source("PGD-606-LTX.mp4");
+  const wmvComparison = await service.compare({ path: mergedSource });
+  const oldParts = [101, 102, 103, 104].map((id) => ({ id, signature: wmvComparison.files.find((file) => file.id === id).signature }));
+  assert.deepEqual(wmvComparison.files.find((file) => file.id === 102).partIds, oldParts.map(({ id }) => id));
+  const replaceWmvs = { action: "replace", path: mergedSource, oldId: 102, oldParts };
+  await assert.rejects(service.prepare({ ...replaceWmvs, oldParts: oldParts.slice(0, 2) }), /馆藏分段已改变/);
+  const wmvRollback = await service.prepare(replaceWmvs);
+  assert.deepEqual(wmvRollback.oldPaths, wmvParts);
+  db.exec("CREATE TRIGGER fixture_wmv_refusal BEFORE DELETE ON local_files WHEN old.id=104 BEGIN SELECT RAISE(ABORT,'fixture part commit failure'); END");
+  service.run(wmvRollback.id);
+  assert.equal((await settle(wmvRollback)).state, "blocked");
+  assert(wmvParts.every(fs.existsSync) && fs.existsSync(mergedSource));
+  assert.equal(wmvVideoCount.get().count, 5);
+  assert(!fs.existsSync(wmvRollback.target));
+  db.exec("DROP TRIGGER fixture_wmv_refusal");
+  service.cancel(wmvRollback.id);
+
+  const indexedFirst = oldVideo(110, "ABC-951", "-CD1-LTX", "first original");
+  const indexedSecond = write(path.join(path.dirname(indexedFirst), "ABC-951 Fixture-CD2-LTX.mp4"), "second original");
+  db.prepare(`INSERT INTO local_files(id,work_id,local_work_id,file_id,file_type,file_path,name,size,sort_order)
+    VALUES(111,110,110,'video-111','video',?,?,?,1)`).run(indexedSecond, path.basename(indexedSecond), fs.statSync(indexedSecond).size);
+  const indexedReplacement = source("ABC-951/ABC-951-1.mp4", "first replacement");
+  source("ABC-951/ABC-951-2.mp4", "second replacement");
+  const indexedComparison = await service.compare({ path: indexedReplacement, packageFolder: path.dirname(indexedReplacement) });
+  const indexedPlan = await service.prepare({ action: "replace", path: indexedReplacement, oldId: 110,
+    packageFolder: indexedComparison.package.folder, packageFingerprint: indexedComparison.package.fingerprint,
+    oldParts: indexedComparison.files.map(({ id, signature }) => ({ id, signature })) });
+  assert.deepEqual(indexedPlan.items.map((item) => item.target), [indexedFirst, indexedSecond]);
+  db.exec("CREATE TRIGGER fixture_cd_refusal BEFORE DELETE ON local_files WHEN old.id=111 BEGIN SELECT RAISE(ABORT,'fixture CD commit failure'); END");
+  service.run(indexedPlan.id);
+  assert.equal((await settle(indexedPlan)).state, "blocked");
+  assert.deepEqual([bytes(indexedFirst), bytes(indexedSecond)], ["first original", "second original"]);
+  db.exec("DROP TRIGGER fixture_cd_refusal");
+  service.run(indexedPlan.id);
+  assert.equal((await settle(indexedPlan)).state, "completed");
+  assert.deepEqual([bytes(indexedFirst), bytes(indexedSecond)], ["first replacement", "second replacement"]);
+
   const ambiguous = source("ABC-942/ABC-942.mp4");
   const unnumbered = source("ABC-942/活动直播.mp4");
   const genericAd = source(`ABC-942/${firstAd}`);
@@ -634,6 +693,23 @@ try {
   assert.equal(replacedUnknown.file_id, "video-79");
   assert.equal(bytes(replacedUnknown.file_path), "fixture incoming 1080p");
   assert(!fs.existsSync(unknownOld));
+
+  await desk.locator("#filePicker").setInputFiles(mergedSource);
+  await desk.locator("#versions label").nth(2).click();
+  await desk.getByRole("button", { name: "替换所选馆藏" }).click();
+  const confirmParts = desk.getByRole("dialog");
+  await confirmParts.getByText(/一起移除下列 4 段馆藏视频/).waitFor();
+  for (const file of wmvParts) await confirmParts.getByText(file, { exact: true }).waitFor();
+  assert.equal(await confirmParts.getByText(wmvAlternate, { exact: true }).count(), 0);
+  assert(wmvParts.every(fs.existsSync));
+  await confirmParts.getByRole("button", { name: "确认提交" }).click();
+  await desk.locator("#notice").filter({ hasText: /替换馆藏视频完成.*PGD-606/ }).waitFor();
+  assert(wmvParts.every((file) => !fs.existsSync(file)));
+  assert.equal(bytes(wmvAlternate), "fixture separate edition");
+  assert.equal(bytes(wmvSubtitle), "fixture part subtitle");
+  assert.equal(wmvVideoCount.get().count, 2);
+  assert.equal(bytes(db.prepare("SELECT file_path FROM local_files WHERE id=101").get().file_path), "fixture incoming 1080p");
+
   const deskMark = oldVideo(43, "ABC-934", "", "fixture library old 1080p");
   const markIncoming = source("ABC-934-LTX.mp4");
   await desk.locator("#filePicker").setInputFiles(markIncoming);

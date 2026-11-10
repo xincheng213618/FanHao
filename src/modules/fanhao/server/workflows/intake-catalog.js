@@ -45,6 +45,36 @@ export function catalogForIntake(db, code) {
   return { works, videos };
 }
 
+export function intakeLibraryPartGroups(videos) {
+  const series = new Map();
+  for (const video of videos) {
+    if (pathKey(path.dirname(video.file_path)) !== pathKey(video.folder)) continue;
+    const { name, ext } = path.parse(video.file_path.toLowerCase());
+    const tagged = /^(.*[-_. ](?:cd|disc|part)[-_. ]*)(\d{1,2})([-_. ].*)?$/.exec(name);
+    // Legacy NoDRM WMVs append hhb1, hhb2, ... to the padded work code.
+    const legacy = ext === ".wmv" && /^(?:\[nodrm\][-_ ]*)?([a-z]+)0*(\d+)hhb(\d{1,2})$/.exec(name);
+    let key, part;
+    if (tagged) {
+      key = [tagged[1], tagged[3] || "", ext];
+      part = Number(tagged[2]);
+    } else if (legacy && workCodeKey(`${legacy[1]}-${legacy[2]}`) === workCodeKey(video.work.code)) {
+      key = [legacy[1], legacy[2], "hhb", ext];
+      part = Number(legacy[3]);
+    } else continue;
+    const groupKey = JSON.stringify([video.work.id, video.local_work_id, ...key]);
+    if (!series.has(groupKey)) series.set(groupKey, []);
+    series.get(groupKey).push({ id: Number(video.id), part });
+  }
+  const groups = new Map();
+  for (const entries of series.values()) {
+    entries.sort((a, b) => a.part - b.part);
+    if (entries.length < 2 || !entries.every((entry, index) => entry.part === index + 1)) continue;
+    const ids = entries.map(({ id }) => id);
+    for (const id of ids) groups.set(id, ids);
+  }
+  return groups;
+}
+
 export function assertUnindexed(db, file) {
   if (db.prepare(`SELECT 1 FROM local_files WHERE lower(replace(file_path,char(92),'/'))=lower(?) LIMIT 1`).get(file.replaceAll("\\", "/"))) {
     throw intakeError("文件已被馆藏索引引用，请在对应作品里操作");
@@ -189,6 +219,16 @@ export function commitIntakeCatalog(db, plan, relativeFromRoot) {
       .run(workId, plan.folder, info.target, makeFileId("info", info.target), "local_scan", plan.files[0].staged[2],
         new Date(plan.files[0].staged[3]).toISOString(), plan.code, workCodeKey(plan.code), timestamp, timestamp).lastInsertRowid);
     applyParsedInfoToCoreWork(db, workId, parseInfoMetadata(info.content, { code: plan.code, title: plan.meta.title }), { now: timestamp });
+  }
+  const additionalOld = plan.additionalOld || [];
+  if (additionalOld.length) {
+    const remove = db.prepare("DELETE FROM local_files WHERE id=? AND local_work_id=? AND file_id=?");
+    const removeProbe = hasIdentityTable(db, "video_probe_cache")
+      ? db.prepare("DELETE FROM video_probe_cache WHERE file_path=? OR file_path=?") : null;
+    for (const old of additionalOld) {
+      if (remove.run(old.id, localId, old.fileId).changes !== 1) throw intakeError("馆藏分段索引已改变");
+      removeProbe?.run(old.path, old.dbPath);
+    }
   }
   let order = orderIntakeVideos(db, localId, plan, timestamp);
   for (const [index, item] of plan.files.entries()) {

@@ -3,13 +3,15 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { deriveWorkTraits } from "../../../../../lib/work-traits.js";
 import { workCodeKey } from "../../../../../lib/code-parser.js";
+import { hasLocalWorkMarkerPrefix } from "../../../../../lib/local-work-marker.js";
 import {
   VIDEO, assertFinished, checkedPath, collectIntakeFiles, identity, inside, intakeError, is4kOrHigher, lstat,
   nameForIntake, nameWithIntakeMarks, openIntakePath, pathKey, regular, same, signature, stageIntakeFile, subtitleFiles
 } from "./intake-files.js";
 import {
   assertNoIntakeConflict, assertUnindexed, catalogForIntake, cleanIntakeMetadata,
-  commitIntakeCatalog, describeIntakeFile, indexedMarkFile, intakeCode, intakeNameCode, libraryFilesForLocal, metadataInfo, personIntakeTargets
+  commitIntakeCatalog, describeIntakeFile, indexedMarkFile, intakeCode, intakeLibraryPartGroups, intakeNameCode,
+  libraryFilesForLocal, metadataInfo, personIntakeTargets
 } from "./intake-catalog.js";
 import {
   classifyIntakeVideoAds, inspectIntakePackage, packageMediaFingerprint, packageSubtitles, packageSummary,
@@ -35,6 +37,7 @@ function sourceIsLtx(source, folder) {
 }
 const sqliteBusy = (error) => [5, 6].includes(error.errcode & 255);
 const usesVolumeQueue = (plan) => ["replace", "keep", "new"].includes(plan.action);
+const oldFiles = (plan) => plan.old ? [plan.old, ...(plan.additionalOld || [])] : [];
 
 function discardDecision(input) {
   if (input === undefined) return null;
@@ -283,13 +286,15 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     const meta = currentMetadata(code, catalog);
     const sourceDetails = fileDetails(source, await probe(source), bundle ? path.basename(bundle.folder) : "");
     const candidates = catalog.videos.slice(0, 40);
+    const groups = intakeLibraryPartGroups(catalog.videos);
     const files = [];
     // Bounded batches avoid opening a stack of remote media simultaneously.
     for (let index = 0; index < candidates.length; index += 4) {
       checkOpen();
       files.push(...await Promise.all(candidates.slice(index, index + 4).map(async (row) => {
         const base = { id: Number(row.id), workId: row.work.id, title: row.work.title, name: row.name,
-          path: row.file_path, folder: row.folder, size: row.size, a: /^\[A\]/i.test(path.basename(row.folder || "")) };
+          path: row.file_path, folder: row.folder, size: row.size, a: hasLocalWorkMarkerPrefix(path.basename(row.folder || "")),
+          partIds: groups.get(Number(row.id)) };
         try {
           const file = checkedPath(row.file_path, targetRoots);
           const measured = await probe(file);
@@ -351,10 +356,12 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     const position = index < 0 ? 0 : waiting.slice(0, index).filter((entry) => sameDisk(entry.disk, waiting[index].disk)).length + 1;
     const running = active.get(job.id);
     const live = position > 0 || Boolean(running) || ownerAlive(job.owner);
+    const originals = oldFiles(plan);
     return { id: job.id, state: position ? "queued" : job.state === "working" && !live ? "interrupted" : job.state,
       active: live, position, progress: progressView(running?.progress), targetVolume: volumeLabel(plan.folder), action: plan.action, code: plan.code, source: plan.source, old: plan.old?.path || "",
-      target: job.result?.target || plan.files[0]?.target || "", tags: plan.tags, result: job.result, replaces4k: Boolean(plan.old?.quality4k),
-      oldQualityUnknown: Boolean(plan.old?.qualityUnknown),
+      target: job.result?.target || plan.files[0]?.target || "", tags: plan.tags, result: job.result,
+      oldPaths: plan.action === "replace" ? originals.map((old) => old.path) : undefined,
+      replaces4k: originals.some((old) => old.quality4k), oldQualityUnknown: originals.some((old) => old.qualityUnknown),
       items: plan.files.map((file) => ({ source: file.source, target: file.target, retainedSubtitle: file.retainedSubtitle })), package: packageSummary(plan.bundle),
       libraryRemoval: plan.libraryRemoval ? { folder: plan.folder, videos: plan.libraryRemoval.videos, files: plan.libraryRemoval.files } : null,
       discardLtx: plan.action === "discard" ? plan.discardDecision?.ltx ?? sourceIsLtx(plan.source, plan.bundle?.folder) : undefined,
@@ -405,7 +412,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
   }
 
   function assertSeparatePlans(plan, other) {
-    const pathsFor = (value) => [value.source, value.old?.path, value.retained?.path, value.bundle?.folder,
+    const pathsFor = (value) => [value.source, ...oldFiles(value).map((old) => old.path), value.retained?.path, value.bundle?.folder,
       ...value.files.flatMap((item) => [item.source, item.target])].filter(Boolean).map(pathKey);
     const paths = pathsFor(plan), otherPaths = pathsFor(other);
     if (otherPaths.some((file) => paths.includes(file) || (plan.bundle && inside(file, pathKey(plan.bundle.folder))))
@@ -437,10 +444,15 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     const oldPath = checkedPath(selected.file_path, targetRoots);
     if (pathKey(path.dirname(oldPath)) !== pathKey(folder)) throw intakeError("视频和作品文件夹的索引不一致");
     const stat = regular(oldPath);
-    const indexedOwners = database().prepare("SELECT id FROM local_files WHERE lower(replace(file_path,char(92),'/'))=lower(?)").all(oldPath.replaceAll("\\", "/"));
-    if (indexedOwners.length !== 1 || indexedOwners[0].id !== selected.id || stat.nlink !== 1 || stat.size !== selected.size) throw intakeError("馆藏视频的身份或索引归属已变，请先刷新馆藏");
+    assertVideoOwner(oldPath, selected.id);
+    if (stat.nlink !== 1 || stat.size !== selected.size) throw intakeError("馆藏视频的身份或索引归属已变，请先刷新馆藏");
     if (action !== "keep" && !selected.file_id) throw intakeError("馆藏视频缺少索引身份");
     return { selected, folder, oldPath, oldSignature: signature(stat) };
+  }
+
+  function assertVideoOwner(file, id) {
+    const owners = database().prepare("SELECT id FROM local_files WHERE lower(replace(file_path,char(92),'/'))=lower(?)").all(file.replaceAll("\\", "/"));
+    if (owners.length !== 1 || owners[0].id !== id) throw intakeError("馆藏视频的身份或索引归属已变，请先刷新馆藏");
   }
 
   async function prepare(input = {}) {
@@ -511,11 +523,23 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         plan.folderIdentity = identity(lstat(folder));
         if (input.oldSignature && !same(oldSignature, input.oldSignature)) throw intakeError("馆藏视频已改变，请重新对照");
         if (action === "replace") {
-          const oldProbe = await probe(oldPath);
-          plan.old = { id: Number(selected.id), path: oldPath, dbPath: selected.file_path, fileId: selected.file_id,
-            signature: oldSignature, quality4k: is4kOrHigher(oldProbe), qualityUnknown: !oldProbe };
+          const partIds = intakeLibraryPartGroups(catalog.videos).get(Number(selected.id));
+          const parts = input.oldParts;
+          if (partIds ? !Array.isArray(parts) || !same(partIds, parts.map((part) => part?.id)) : parts !== undefined) {
+            throw intakeError("馆藏分段已改变，请重新匹配后确认整组替换");
+          }
+          const originals = [];
+          for (const [index, oldId] of (partIds || [Number(selected.id)]).entries()) {
+            const entry = oldId === selected.id ? { selected, oldPath, oldSignature } : targetForExisting(catalog, { oldId }, action);
+            if (parts && !same(entry.oldSignature, parts[index].signature)) throw intakeError("馆藏分段已改变，请重新核对");
+            const oldProbe = await probe(entry.oldPath);
+            originals.push({ id: oldId, path: entry.oldPath, dbPath: entry.selected.file_path, fileId: entry.selected.file_id,
+              signature: entry.oldSignature, quality4k: is4kOrHigher(oldProbe), qualityUnknown: !oldProbe });
+          }
+          [plan.old] = originals;
+          if (originals.length > 1) plan.additionalOld = originals.slice(1);
         } else plan.retained = { id: Number(selected.id), path: oldPath, fileId: selected.file_id, signature: oldSignature };
-        if (plan.tags.a && !/^\[A\]/i.test(path.basename(folder))) {
+        if (plan.tags.a && !hasLocalWorkMarkerPrefix(path.basename(folder))) {
           const first = db.prepare("SELECT id FROM local_works WHERE work_id=? ORDER BY id LIMIT 1").get(plan.workId);
           if (first?.id !== plan.localId) throw intakeError("该作品有多个目录，请在目标作品详情中单独设置 [A]");
           plan.markFavorite = true;
@@ -538,8 +562,9 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
           name = nameForIntake(plan.folder, code, `${plan.meta.title} 版本 2`, videoTags, path.extname(video), part);
         }
         const target = checkedPath(path.join(plan.folder, name), targetRoots);
-        const old = index === 0 ? plan.old : null;
-        if (lstat(target) && (!old || pathKey(old.path) !== pathKey(target))) throw intakeError("目标文件已存在，请选择不同的版本标签");
+        const old = oldFiles(plan).find((file) => pathKey(file.path) === pathKey(target));
+        if (lstat(target) && !old) throw intakeError("目标文件已存在，请选择不同的版本标签");
+        if (old) old.backup = path.join(plan.folder, old === plan.old ? `.fh-${id}.old` : `.fh-${id}-${old.id}.old`);
         plan.files.push({ type: "video", source: video, target, sourceSignature: entry.signature, probe: videoProbe });
       }
       const target = plan.files[0].target;
@@ -554,7 +579,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         }
         plan.files.push({ type: "info", source: side.file, target: destination, sourceSignature: side.signature || signature(regular(side.file)) });
       }
-      if (plan.old && sources.length === 1) {
+      if (plan.old && !plan.additionalOld && sources.length === 1) {
         for (const side of subtitleFiles(plan.old.path, { legacy: true, exclusive: true })) {
           const destination = checkedPath(path.join(plan.folder, path.parse(target).name + side.suffix), targetRoots);
           if (lstat(destination) || plan.files.some((item) => pathKey(item.target) === pathKey(destination))
@@ -567,7 +592,6 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       }
       if (action === "new") plan.files.push({ type: "info", target: path.join(plan.folder, "info.txt"), content: metadataInfo(plan.meta, code) });
       for (const [index, item] of plan.files.entries()) item.temp = path.join(plan.folder, `.fh-${id}-${index}.part`);
-      if (plan.old && pathKey(plan.old.path) === pathKey(target)) plan.old.backup = path.join(plan.folder, `.fh-${id}.old`);
       assertNoIntakeConflict(db, plan.folder, plan.workId);
     }
     return registerPlan(id, plan, createdAt);
@@ -632,14 +656,23 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     if (plan.localId) {
       const current = database().prepare("SELECT work_id,local_path FROM local_works WHERE id=?").get(plan.localId);
       if (current?.work_id !== plan.workId || pathKey(current.local_path || "") !== pathKey(plan.folder)) throw intakeError("目标作品目录已改变");
-      const selected = plan.old || plan.retained;
-      if (selected && !libraryFilesForLocal(database(), plan.localId).some((row) => row.id === selected.id && row.file_id === selected.fileId && pathKey(row.file_path) === pathKey(selected.path))) throw intakeError("馆藏视频索引已改变");
+      const originals = plan.retained ? [plan.retained] : oldFiles(plan);
+      const indexed = libraryFilesForLocal(database(), plan.localId);
+      for (const original of originals) {
+        if (!indexed.some((row) => row.id === original.id && row.file_id === original.fileId && pathKey(row.file_path) === pathKey(original.path))) {
+          throw intakeError("馆藏视频索引已改变");
+        }
+      }
+      if (plan.additionalOld) {
+        const groups = intakeLibraryPartGroups(catalogForIntake(database(), plan.code).videos);
+        if (!same(groups.get(plan.old.id), originals.map((old) => old.id))) throw intakeError("馆藏分段已改变，请重新核对");
+      }
     }
     if (plan.retained) requireSame(checkedPath(plan.retained.path, targetRoots), plan.retained.signature);
-    if (plan.old) {
-      const original = plan.old.backup && lstat(plan.old.backup) ? plan.old.backup : plan.old.path;
+    for (const old of oldFiles(plan)) {
+      const original = old.backup && lstat(old.backup) ? old.backup : old.path;
       checkedPath(original, targetRoots);
-      requireSame(original, plan.old.signature);
+      requireSame(original, old.signature);
     }
     for (const item of plan.files) {
       checkedPath(item.target, targetRoots);
@@ -672,21 +705,22 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
   function publish(job) {
     const { plan } = job, db = database();
     const published = [];
-    let backup = false;
+    const backups = [];
     db.exec("BEGIN IMMEDIATE");
     try {
       revalidate(job);
+      const originals = oldFiles(plan);
+      if (plan.action === "replace") for (const old of originals) assertVideoOwner(old.path, old.id);
       for (const item of plan.files) requireSame(item.temp, item.staged);
       for (const item of plan.files) {
-        if (!plan.old?.backup || pathKey(item.target) !== pathKey(plan.old.path)) assertUnindexed(db, item.target);
+        if (!originals.some((old) => old.backup && pathKey(old.path) === pathKey(item.target))) assertUnindexed(db, item.target);
       }
-      if (plan.old?.backup) {
-        const owners = db.prepare("SELECT id FROM local_files WHERE lower(replace(file_path,char(92),'/'))=lower(?)").all(plan.old.path.replaceAll("\\", "/"));
-        if (owners.length !== 1 || owners[0].id !== plan.old.id) throw intakeError("已有其他索引引用目标文件");
-        if (!lstat(plan.old.backup)) fs.linkSync(plan.old.path, plan.old.backup);
-        requireSame(plan.old.backup, plan.old.signature);
-        backup = true;
-        if (same(signature(lstat(plan.old.path)), plan.old.signature)) fs.unlinkSync(plan.old.path);
+      for (const old of originals) {
+        if (!old.backup) continue;
+        if (!lstat(old.backup)) fs.linkSync(old.path, old.backup);
+        requireSame(old.backup, old.signature);
+        backups.push(old);
+        if (same(signature(lstat(old.path)), old.signature)) fs.unlinkSync(old.path);
       }
       for (const item of plan.files) {
         if (!lstat(item.target)) fs.linkSync(item.temp, item.target);
@@ -701,9 +735,11 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       db.exec("ROLLBACK");
       job.result = null; job.state = "working";
       for (const item of published.reverse()) if (same(signature(lstat(item.target)), item.staged)) fs.unlinkSync(item.target);
-      if (backup && !lstat(plan.old.path) && same(signature(lstat(plan.old.backup)), plan.old.signature)) {
-        fs.linkSync(plan.old.backup, plan.old.path);
-        fs.unlinkSync(plan.old.backup);
+      for (const old of backups.reverse()) {
+        if (!lstat(old.path) && same(signature(lstat(old.backup)), old.signature)) {
+          fs.linkSync(old.backup, old.path);
+          fs.unlinkSync(old.backup);
+        }
       }
       throw error;
     }
@@ -729,10 +765,12 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         }
         removeOwned(item.temp, item.staged, targetRoots);
       }
-      if (plan.action === "replace" && plan.old) {
-        const old = plan.old.backup || plan.old.path;
-        assertUnindexed(database(), old);
-        removeOwned(old, plan.old.signature, targetRoots);
+      if (plan.action === "replace") {
+        for (const old of oldFiles(plan)) {
+          const file = old.backup || old.path;
+          assertUnindexed(database(), file);
+          removeOwned(file, old.signature, targetRoots);
+        }
       }
       plan.cleaned = true;
       save(job);
@@ -997,7 +1035,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     if (plan.bundle && (plan.bundle.isolated || lstat(checkedPath(plan.bundle.quarantine, incomingRoots)))) {
       throw intakeError("下载包已隔离，请重试清理");
     }
-    if (plan.old?.backup && lstat(plan.old.backup)) throw intakeError("旧视频的备份还未恢复，这个任务只能重试");
+    if (oldFiles(plan).some((old) => old.backup && lstat(old.backup))) throw intakeError("旧视频的备份还未恢复，这个任务只能重试");
     for (const item of plan.files) {
       if (item.temp && lstat(checkedPath(item.temp, targetRoots))?.isFile()) fs.unlinkSync(item.temp);
       if (item.staged && same(signature(lstat(checkedPath(item.target, targetRoots))), item.staged)) {

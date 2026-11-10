@@ -409,6 +409,7 @@ function openMarkDialog(file) {
 
 function askConfirmation(job, fresh = false) {
   confirmation = { job, fresh };
+  const oldPaths = job.oldPaths || (job.old ? [job.old] : []);
   if ($("history").open) $("history").close();
   $("confirmTitle").textContent = actionLabel(job);
   $("confirmText").textContent = job.action === "discardBoth"
@@ -419,6 +420,10 @@ function askConfirmation(job, fresh = false) {
       : job.replaces4k ? "所选馆藏为 4K 或更高分辨率。新视频校验并写入馆藏后，会移除这份馆藏和源文件。"
       : job.action === "replace" ? "新视频校验并写入馆藏后，会移除所选旧视频和源文件。"
         : "校验并写入馆藏后，会移除源文件。";
+  if (oldPaths.length > 1) {
+    const incoming = job.package ? `校验并入库 ${job.package.videos.length} 份正片及配套字幕，随后清理已核对的下载包文件` : "校验并入库新视频，随后移除源文件";
+    $("confirmText").textContent = `${incoming}，并一起移除下列 ${oldPaths.length} 段馆藏视频。旧分段的外挂字幕留在原位。${job.replaces4k ? "其中有 4K 或更高分辨率的视频。" : ""}`;
+  }
   if (job.oldQualityUnknown) {
     $("confirmText").textContent = `旧馆藏参数未能读取。请核对所选文件后确认替换。${$("confirmText").textContent}`;
   }
@@ -427,7 +432,9 @@ function askConfirmation(job, fresh = false) {
     [job.package ? "将删除的下载包" : "将删除的源视频", job.package?.folder || job.source],
     ["将删除的馆藏文件夹", job.libraryRemoval.folder]
   ] : job.action === "mark" ? [["当前馆藏", job.source], ["新文件名", job.target]]
-    : [[job.package ? "将删除的源文件夹" : "源文件", job.package?.folder || job.source], ["替换的旧视频", job.old], ["入库位置", job.target]];
+    : [[job.package ? "将删除的源文件夹" : "源文件", job.package?.folder || job.source],
+      ...oldPaths.map((path, index) => [oldPaths.length > 1 ? `替换的馆藏分段 ${index + 1}/${oldPaths.length}` : "替换的旧视频", path]),
+      ["入库位置", job.target]];
   for (const [label, value] of [...paths,
     ...job.items.slice(1).map((item) => [item.retainedSubtitle ? "沿用馆藏字幕（时间轴原样保留）"
       : job.package?.videos.some((part) => part.path === item.source) ? "分段入库位置" : "配套文件", item.target])]) {
@@ -446,7 +453,7 @@ function askConfirmation(job, fresh = false) {
     $("discardLtx").checked = Boolean(job.discardLtx);
   }
   $("confirm").showModal();
-  (isDiscard(job.action) || job.replaces4k || job.oldQualityUnknown ? $("confirmBack") : $("confirmRun")).focus();
+  (isDiscard(job.action) || oldPaths.length > 1 || job.replaces4k || job.oldQualityUnknown ? $("confirmBack") : $("confirmRun")).focus();
 }
 
 async function loadMetadata(owner) {
@@ -475,10 +482,16 @@ async function prepareAction(action, tags) {
     }
     const actor = comparison.actors[Number($("actorTarget").value)];
     const old = comparison.files.find((file) => file.id === oldId);
+    const oldParts = action === "replace" && old?.partIds?.map((id) => {
+      const part = comparison.files.find((file) => file.id === id);
+      if (!part?.available) throw new Error("馆藏分段未全部读取，请重新匹配后再替换。");
+      return { id, signature: part.signature };
+    });
     const job = await api("prepare", { action, path: selected, code: action === "discard" ? undefined : comparison.code,
       packageFolder: comparison.package?.folder, packageFingerprint: comparison.package?.fingerprint,
       packageMediaFingerprint: comparison.package?.mediaFingerprint, supportsPackageConfirmation: true,
-      sourceSignature: comparison.source.signature, oldId, oldSignature: old?.signature, actorFolder: actor?.folder, actorName: actor?.name,
+      sourceSignature: comparison.source.signature, oldId, oldSignature: old?.signature, oldParts: oldParts || undefined,
+      actorFolder: actor?.folder, actorName: actor?.name,
       tags: tags || { ltx: $("tagLtx").checked, u: $("tagU").checked, c: $("tagC").checked, a: $("tagA").checked } });
     if (owner === generation) askConfirmation(job, true);
     else await cancelJob(job, false);
