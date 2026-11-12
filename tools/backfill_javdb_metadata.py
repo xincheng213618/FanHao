@@ -226,7 +226,7 @@ def main() -> None:
     print("补全结束: " + json.dumps(stats, ensure_ascii=False), flush=True)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Backfill missing JavDB info and covers into FanHao SQLite cache.")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
     parser.add_argument("--library-index", type=Path, default=DEFAULT_LIBRARY_INDEX)
@@ -258,7 +258,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detail-wait-seconds", type=int, default=35)
     parser.add_argument("--scraper-config", type=Path, default=DEFAULT_SCRAPER_CONFIG_PATH, help="JavDB selector/label 配置 JSON")
     parser.add_argument("--log", type=Path, default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def configure_stdout() -> None:

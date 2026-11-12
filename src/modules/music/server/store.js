@@ -1226,6 +1226,66 @@ export function createMusicStore(options = {}) {
     return added || null;
   }
 
+  function playlistBatchTrackIds(trackIds, action) {
+    if (!Array.isArray(trackIds) || !trackIds.length || trackIds.some(id => typeof id !== "string" || !id.trim())) {
+      throw httpError(400, "缺少有效的歌曲 ID");
+    }
+    const requested = new Set(trackIds.map(id => id.trim()));
+    if (requested.size > MAX_LIMIT) throw httpError(400, `每次最多${action} ${MAX_LIMIT} 首歌曲`);
+    return requested;
+  }
+
+  function addTracksToPlaylist(playlistId, trackIds) {
+    const requested = playlistBatchTrackIds(trackIds, "加入");
+    return mutate((database) => {
+      const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!playlist) return null;
+      const findItem = database.prepare("SELECT 1 FROM music_playlist_items WHERE playlist_id = ? AND track_id = ?");
+      const findTrack = database.prepare("SELECT 1 FROM music_tracks WHERE id = ? AND status = 'ok'");
+      const receipt = { ok: true, addedCount: 0, alreadyPresentCount: 0, unavailableCount: 0 };
+      const available = [];
+      for (const id of requested) {
+        if (findItem.get(playlistId, id)) {
+          receipt.alreadyPresentCount += 1;
+        } else if (!findTrack.get(id)) {
+          receipt.unavailableCount += 1;
+        } else {
+          available.push(id);
+        }
+      }
+      if (!available.length) return receipt;
+
+      const order = database.prepare(`
+        SELECT typeof(MAX(sort_order)) AS type, CAST(MAX(0, COALESCE(MAX(sort_order), 0)) AS INTEGER) AS value
+        FROM music_playlist_items WHERE playlist_id = ?
+      `);
+      order.setReadBigInts(true);
+      const last = order.get(playlistId);
+      let lastOrder = last.value;
+      // Preserve legacy text/blob ordering and keep the resulting positions safe for playlist readers.
+      if (last.type === "text" || last.type === "blob" || lastOrder + BigInt(available.length) > BigInt(Number.MAX_SAFE_INTEGER)) {
+        database.prepare(`
+          WITH ranked AS MATERIALIZED (
+            SELECT track_id, ROW_NUMBER() OVER (ORDER BY sort_order, added_at, track_id) AS position
+            FROM music_playlist_items WHERE playlist_id = ?
+          )
+          UPDATE music_playlist_items SET sort_order = (SELECT position FROM ranked WHERE ranked.track_id = music_playlist_items.track_id)
+          WHERE playlist_id = ?
+        `).run(playlistId, playlistId);
+        lastOrder = order.get(playlistId).value;
+      }
+      const insert = database.prepare("INSERT INTO music_playlist_items (playlist_id, track_id, sort_order, added_at) VALUES (?, ?, ?, ?)");
+      const now = new Date().toISOString();
+      for (const id of available) {
+        lastOrder += 1n;
+        insert.run(playlistId, id, lastOrder, now);
+      }
+      database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(now, playlistId);
+      receipt.addedCount = available.length;
+      return receipt;
+    }, result => Boolean(result?.addedCount));
+  }
+
   function removeFromPlaylist(playlistId, trackId, { receiptOnly = false } = {}) {
     const removed = mutate((database) => {
       const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
@@ -1237,11 +1297,26 @@ export function createMusicStore(options = {}) {
     return removed || null;
   }
 
+  function removeTracksFromPlaylist(playlistId, trackIds) {
+    const requested = playlistBatchTrackIds(trackIds, "移出");
+    return mutate((database) => {
+      const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
+      if (!playlist) return null;
+      const remove = database.prepare("DELETE FROM music_playlist_items WHERE playlist_id = ? AND track_id = ?");
+      let removedCount = 0;
+      for (const trackId of requested) removedCount += remove.run(playlistId, trackId).changes;
+      if (removedCount) database.prepare("UPDATE music_playlists SET updated_at = ? WHERE id = ?").run(new Date().toISOString(), playlistId);
+      return { ok: true, removedCount, alreadyAbsentCount: requested.size - removedCount };
+    }, result => Boolean(result?.removedCount));
+  }
+
   function reorderPlaylist(playlistId, input = {}) {
     const reordered = mutate((database) => {
       const playlist = database.prepare("SELECT id FROM music_playlists WHERE id = ?").get(playlistId);
       if (!playlist) return false;
-      const requested = playlistTrackIdsFromInput(input);
+      // Imported playlists and playlists grown by individual adds can exceed
+      // the batch creation limit. The order route already bounds its body size.
+      const requested = playlistTrackIdsFromInput(input, { limit: Infinity });
       if (!requested.length) throw httpError(400, "缺少歌曲排序");
       const existingRows = database
         .prepare(
@@ -1330,6 +1405,7 @@ export function createMusicStore(options = {}) {
     suggest,
     invalidate,
     addToPlaylist,
+    addTracksToPlaylist,
     clearHistory,
     createPlaylist,
     deletePlaylist,
@@ -1347,6 +1423,7 @@ export function createMusicStore(options = {}) {
     claimProgressSession,
     reorderPlaylist,
     removeFromPlaylist,
+    removeTracksFromPlaylist,
     saveProgress,
     saveProgressOutcome,
     scan: scanService.scan,

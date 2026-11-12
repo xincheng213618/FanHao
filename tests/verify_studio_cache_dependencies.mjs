@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,12 +9,14 @@ import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import * as contracts from "../src/modules/fanhao/server/library/cache-contracts.js";
 import { readTableStampRow, tableStampValue } from "../src/modules/fanhao/server/library/table-stamp-query.js";
+import { createTableStampWorkerClient } from "../src/modules/fanhao/server/library/table-stamp-worker-client.js";
 import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
 import { createCodePrefixService } from "../src/modules/fanhao/server/catalog/code-prefix-service.js";
 import { routeCatalogApi } from "../src/modules/fanhao/server/catalog/routes.js";
 import { createWorkFilterService } from "../src/modules/fanhao/server/works/work-filter-service.js";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
 import { createWorkSorter } from "../src/modules/fanhao/server/works/work-sorter.js";
+import { selectStudios, studioWorkCount } from "../android-client/www/modules/fanhao/features/studios/index-model.js";
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const legacyRevision = "1f6ddf213f0fbab4d417fdf61636b957d1909338";
@@ -194,6 +197,55 @@ function verifyLargeCatalogStamps() {
 }
 
 const cases = [
+  { name: "local-count-index", async run({ reader, writer }, options) {
+    writer.exec(`
+      INSERT INTO makers
+      WITH RECURSIVE ids(id) AS (VALUES(1000) UNION ALL SELECT id+1 FROM ids WHERE id<1500)
+      SELECT id, 'Remote ' || id, 'remote ' || id, 'fixture', '2026' FROM ids;
+      INSERT INTO works VALUES
+        (3,'AB-003','ok','2025-03-01','2026'),(4,'AB-004','ok','2025-04-01','2026'),
+        (5,'AB-005','ok','2025-05-01','2026'),(6,'AB-006','ok','2025-06-01','2026');
+      INSERT INTO work_makers(work_id,maker_id,role,updated_at)
+      SELECT w.id,m.id,'maker','2026' FROM works w JOIN makers m ON m.id>=1000 WHERE w.id BETWEEN 3 AND 6;
+      INSERT INTO makers VALUES (30,'Shelf Studio','shelf studio','fixture','2026');
+      INSERT INTO work_makers(work_id,maker_id,role,updated_at)
+      VALUES (1,30,'maker','2026'),(1,30,'label','2026'),(2,30,'maker','2026'),(3,30,'maker','2026');
+      INSERT INTO local_works(work_id,updated_at) VALUES (1,'2026');
+    `);
+    const h = harness(reader, options);
+    const oldUrl = "/api/studios?limit=500";
+    const localUrl = "/api/studios?limit=500&sort=localCount";
+    const old = await h.request(oldUrl);
+    assert.equal(old.count, 500);
+    assert.equal(old.makers.some(({ id }) => id === "10"), false, "the old cap can hide a stocked studio");
+    assert.equal(Object.hasOwn(old, "total"), false, "existing API clients retain the old response fields");
+    const local = await h.request(localUrl);
+    assert.equal(local.count, 500);
+    assert.equal(local.total, 504);
+    assert.deepEqual(local.makers.slice(0, 2).map(({ id, workCount, localWorkCount }) => [id, workCount, localWorkCount]), [
+      ["10", 2, 2], ["30", 3, 2]
+    ], "local ordering precedes LIMIT and counts distinct local works across duplicate records and roles");
+    assert.deepEqual((await h.request("/api/studios?limit=1&q=shelf&sort=localCount")).makers.map(({ id }) => id), ["30"]);
+    assert.equal(local.makers.some(({ id }) => id === "1500"), false);
+    const found = await h.request("/api/studios?limit=500&sort=localCount&q=REMOTE+1500");
+    assert.deepEqual(found.makers.map(({ id }) => id), ["1500"], "name search scans the catalog before taking the first page");
+    assert.equal(found.total, 1);
+    assert.equal((await h.request("/api/studios?limit=1&sort=localCount&q=Remote")).total, 501, "match totals include makers beyond the response limit");
+    assert.equal((await h.request("/api/studios?limit=500&sort=localCount&q=missing")).total, 0);
+    assert.deepEqual((await h.request("/api/studios?limit=1&sort=localCount")).makers.map(({ id }) => id), ["10"]);
+    assert.equal(await h.request(localUrl), local, "local responses reuse their own cache entries");
+    assert.equal(await h.request(oldUrl), old, "opt-in ordering cannot replace the old cached order");
+    const remote = local.makers.find(({ id }) => id === "1000");
+    assert.equal(remote.workCount, 4);
+    assert.equal(studioWorkCount(remote), 0, "Android displays zero local works even when the remote catalog has works");
+    assert.equal(studioWorkCount({ workCount: 3 }), 3, "Android accepts older payloads without a local count");
+    assert.equal(selectStudios([remote, local.makers[0]])[0].id, "10", "Android count sorting also respects explicit zero");
+    writer.exec("INSERT INTO makers VALUES (31,'100%_Studio','100%_studio','fixture','2027')");
+    assert.deepEqual((await h.request("/api/studios?limit=500&sort=localCount&q=%25_")).makers.map(({ id }) => id), ["31"],
+      "percent and underscore in a studio name are searched literally");
+    writer.exec("INSERT INTO local_works(work_id,updated_at) VALUES (3,'2027')");
+    assert.equal((await h.request(localUrl)).makers[0].id, "30", "new local works invalidate the ordered index");
+  } },
   { name: "maker-name", unchangedSql: "UPDATE makers SET name='Beta',name_search='beta',updated_at='2026' WHERE id=10", sql: "UPDATE makers SET name='Beta',name_search='beta',updated_at='2027' WHERE id=10", check(snapshot) {
     assert.equal(maker(snapshot).name, "Beta", "cached studio summary must see changed maker metadata");
     assert.equal(snapshot.studio.studio.name, "Beta");
@@ -237,28 +289,14 @@ const cases = [
     const before = h.stamp();
     const readerVersion = reader.prepare("PRAGMA main.data_version").get().data_version;
     writer.exec("UPDATE maker_external_refs SET url='https://fixture.invalid/handoff' WHERE id=1");
-    const worker = new Worker(new URL("../src/modules/fanhao/server/library/table-stamp-worker.js", import.meta.url), {
-      workerData: { dbPath: databasePath, imageDbPath: null }
-    });
-    let requestId = 0;
-    const readWorkerRow = (table) => new Promise((resolve, reject) => {
-      const id = ++requestId;
-      const timeout = setTimeout(() => { done(); reject(new Error(`worker stamp timeout: ${table}`)); }, 5000);
-      const onError = (error) => { done(); reject(error); };
-      const onMessage = (message) => {
-        if (message.id !== id) return;
-        done();
-        if (message.ok) resolve(message.row);
-        else reject(new Error(message.error));
-      };
-      function done() { clearTimeout(timeout); worker.off("message", onMessage); worker.off("error", onError); }
-      worker.on("message", onMessage);
-      worker.on("error", onError);
-      worker.postMessage({ id, table });
-    });
+    let worker;
+    class FixtureWorker extends Worker {
+      constructor(url, options) { super(url, options); worker = this; }
+    }
+    const client = createTableStampWorkerClient({ dbPath: databasePath, WorkerCtor: FixtureWorker });
     const readWorkerRows = async () => {
       const rows = new Map();
-      for (const table of dependencyTables) rows.set(table, await readWorkerRow(table));
+      for (const table of dependencyTables) rows.set(table, await client.refresh(table));
       return rows;
     };
     try {
@@ -274,7 +312,43 @@ const cases = [
       h.useStampRows(await readWorkerRows());
       assert.notEqual(h.stamp(), next, "persistent actual worker must observe the next external UPDATE");
       assert.equal(maker(await h.snapshot()).url, "https://fixture.invalid/worker-update");
-    } finally { await worker.terminate(); }
+    } finally { await worker?.terminate(); }
+  } },
+  { name: "worker-timeout-recovery", async run({ databasePath }) {
+    const workers = [];
+    class HeldWorker extends EventEmitter {
+      constructor() { super(); workers.push(this); this.messages = []; this.terminateCalls = 0; }
+      postMessage(message) { this.messages.push(message); }
+      ref() {}
+      unref() {}
+      terminate() { this.terminateCalls++; return Promise.resolve(0); }
+      reply(value) { this.emit("message", { id: this.messages.at(-1).id, ok: true, row: value }); }
+    }
+    const client = createTableStampWorkerClient({ dbPath: databasePath, WorkerCtor: HeldWorker, requestTimeoutMs: 25 });
+    const stalled = [client.refresh("works"), client.refresh("makers")];
+    const original = workers[0];
+    let deadline;
+    try {
+      const results = await Promise.race([
+        Promise.allSettled(stalled),
+        new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("stalled stamp requests never settled")), 1000); })
+      ]);
+      assert.deepEqual(results.map(result => result.reason?.code), ["TABLE_STAMP_TIMEOUT", "TABLE_STAMP_TIMEOUT"]);
+      assert.equal(original.terminateCalls, 1);
+      original.reply({ row_count: 0 });
+      await assert.rejects(client.refresh("works"), { code: "TABLE_STAMP_RETIRING" });
+      assert.equal(workers.length, 1, "resolved terminate must not free the old owner before exit");
+      original.emit("exit", 0);
+      const current = client.refresh("works");
+      assert.equal(workers.length, 2);
+      const replacement = workers[1];
+      original.emit("message", { id: replacement.messages[0].id, ok: true, row: { row_count: 0 } });
+      replacement.reply({ row_count: 2 });
+      assert.deepEqual(await current, { row_count: 2 });
+    } finally {
+      clearTimeout(deadline);
+      for (const worker of workers) worker.emit("exit", 0);
+    }
   } },
   { name: "same-connection-invalidation", schemaVariants: true, async run({ reader }, options) {
     assert.deepEqual(contracts.cacheDependencyTables("studio_catalog"), dependencyTables);

@@ -15,7 +15,8 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-module-settings-"
 
 try {
   fs.writeFileSync(path.join(tempRoot, "package.json"), JSON.stringify({ type: "module" }), "utf8");
-  const appConfigService = createTestAppConfigService(path.join(tempRoot, "data", "app-config.json"));
+  const configPath = path.join(tempRoot, "data", "app-config.json");
+  const appConfigService = createTestAppConfigService(configPath);
   appConfigService.load();
   appConfigService.set({
     compilationPrefixes: ["ABC"],
@@ -41,6 +42,7 @@ try {
   assert.equal(appConfigService.publicConfig().imageReaderCacheMaxBytes, 8 * 1024 ** 3);
   appConfigService.patch({ shortVideoTranscodeConcurrency: 8 });
   assert.equal(appConfigService.shortVideoTranscodeConcurrency(), 4, "short-video transcode concurrency must be persisted and clamped to the supported range");
+  verifyConfigPublication(appConfigService, configPath);
 
   let savedCookie = "";
   const doubanCookieService = {
@@ -126,6 +128,40 @@ function createTestAppConfigService(configPath) {
     maxImageReaderCacheMaxBytes: 200 * 1024 ** 3,
     minImageReaderCacheMaxBytes: 128 * 1024 ** 2
   });
+}
+
+function verifyConfigPublication(service, configPath) {
+  const before = service.publicConfig();
+  const stored = fs.readFileSync(configPath, "utf8");
+  const checkPriorSettings = () => {
+    assert.deepEqual(service.publicConfig(), before, "a failed settings save must preserve live settings");
+    assert.equal(fs.readFileSync(configPath, "utf8"), stored, "a failed settings save must preserve the previous JSON bytes");
+    assert.deepEqual(createTestAppConfigService(configPath).load(), before, "a restart must recover the previous settings");
+    assert.deepEqual(fs.readdirSync(path.dirname(configPath)), [path.basename(configPath)], "abandoned staging files must be cleaned up");
+  };
+  const writeFileSync = fs.writeFileSync;
+  try {
+    fs.writeFileSync = (file, data, options) => {
+      if (file !== configPath && typeof file !== "number") return writeFileSync(file, data, options);
+      writeFileSync(file, '{"partial":', options);
+      throw Object.assign(new Error("fixture interrupted config write"), { code: "ENOSPC" });
+    };
+    assert.throws(() => service.patch({ shortVideoTranscodeConcurrency: 3 }), { code: "ENOSPC" });
+  } finally { fs.writeFileSync = writeFileSync; }
+  checkPriorSettings();
+
+  const renameSync = fs.renameSync;
+  try {
+    fs.renameSync = (from, to) => {
+      if (to === configPath) throw Object.assign(new Error("fixture configuration replace failure"), { code: "EPERM" });
+      return renameSync(from, to);
+    };
+    assert.throws(() => service.patch({ shortVideoTranscodeConcurrency: 3 }), { code: "EPERM" });
+  } finally { fs.renameSync = renameSync; }
+  checkPriorSettings();
+  service.patch({ shortVideoTranscodeConcurrency: 3 });
+  assert.equal(service.shortVideoTranscodeConcurrency(), 3);
+  assert.deepEqual(createTestAppConfigService(configPath).load(), service.publicConfig(), "a successful retry publishes the same settings in memory and on disk");
 }
 
 function writeFixtureModule(modulesDir, id, source) {

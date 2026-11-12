@@ -59,7 +59,7 @@ function fixture(create, timestamps, timed = true, monotonicLibraryRevision = fa
   const favorites = { isFavoriteWork: () => false, publicFavoriteFolders: () => [], normalizeFavoriteFolderId: id => id, favoriteWorks: () => [] };
   const filter = createWorkFilterService({ favoriteStateService: favorites, playbackProgressService: progress, workInfoFacetRow: info });
   const sort = createWorkSorter({ metadataForWork: work => info(work.id), progressForWork: work => progress.getWorkProgress(work) });
-  const provider = { historyEntries(options) { state.calls.source++; return progress.historyEntries(options); } };
+  const provider = { historyEntries(options) { state.calls.source++; return progress.historyEntries(options); }, getWorkProgress: progress.getWorkProgress };
   if (timed) provider.historySnapshot = options => { state.calls.source++; return progress.historySnapshot(options); };
   const collection = create({ getLibrary: () => library, playbackProgressService: provider, favoriteStateService: favorites,
     clampInteger: (value, fallback, min, max) => value == null || value === "" || !Number.isFinite(Number(value)) ? fallback
@@ -161,6 +161,20 @@ try {
   clock = fixedNow + 11; assert.equal(compare(boundary, { offset: 1 }).facets.all, 4);
 
   clock = fixedNow;
+  const search = pair([fixedNow - 7 * DAY, fixedNow - DAY, fixedNow - 8 * DAY]);
+  const byCode = compare(search, { q: " ＦＩＸ－０ ", watch: "unfinished", limit: 1 });
+  assert.equal(byCode.query, "ＦＩＸ－０");
+  assert.deepEqual(byCode.works.map(work => work.id), ["0"]);
+  assert.equal(compare(search, { q: "ＦＩＸ－０", watch: "finished", limit: 1 }).total, 0);
+  assert.deepEqual(compare(search, { q: "Work 00001", watch: "unfinished", limit: 1 }).works.map(work => work.id), ["1"]);
+  assert.equal(compare(search, { q: "Work", sort: "title", limit: 1, offset: 1 }).works[0]?.id, "1");
+  assert.deepEqual(compare(search, { q: "fix2", days: "all", limit: 1 }).works.map(work => work.id), ["2"]);
+  assert.equal(compare(search, { q: "fix2", limit: 1 }).total, 0);
+  clock++;
+  assert.equal(compare(search, { q: "ＦＩＸ－０", watch: "unfinished", limit: 1 }).total, 0,
+    "search snapshots must expire when a matching record leaves the history window");
+
+  clock = fixedNow;
   const rollback = pair([fixedNow - 7 * DAY - 1000, fixedNow - DAY]);
   assert.equal(compare(rollback).total, 1); clock -= 2000; assert.equal(compare(rollback).total, 2);
   clock = fixedNow; assert.equal(compare(rollback).total, 1);
@@ -192,6 +206,26 @@ try {
   }
   await verifyInPlaceLibraryRemoval(false);
   await verifyInPlaceLibraryRemoval(true);
+  const watched = pair([fixedNow - DAY, fixedNow - 2 * DAY, fixedNow - 3 * DAY, fixedNow - 7 * DAY, fixedNow - 8 * DAY]);
+  each(watched, owner => {
+    owner.userState.progress["video-0"].position = 100;
+    owner.userState.progress["video-2"].position = 0;
+    owner.userState.progress["video-4"].position = 100;
+    owner.works[0].videos.push({ id: "older-file" });
+    owner.userState.progress["older-file"] = { workId: "0", position: 33, duration: 100, updatedAt: new Date(fixedNow - 2 * DAY).toISOString() };
+  });
+  assert.deepEqual(compare(watched, { watch: "unfinished", limit: 1, offset: 1 }).works.map(work => work.id), ["3"]);
+  assert.deepEqual(compare(watched, { watch: "finished" }).works.map(work => work.id), ["0"]);
+  assert.deepEqual(compare(watched, { watch: "finished", days: "all" }).works.map(work => work.id), ["0", "4"]);
+  assert.equal(compare(watched, { watch: "invalid" }).watch, undefined, "unknown state preserves the old API shape");
+  clock++;
+  assert.equal(compare(watched, { watch: "unfinished" }).total, 1, "a finished-state cache cannot keep an expired unfinished member");
+  each(watched, owner => owner.progress.saveVideoProgress("video-1", { position: 100, duration: 100, workId: "1" }));
+  assert.deepEqual(compare(watched, { watch: "finished" }).works.map(work => work.id), ["1", "0"]);
+  assert.equal(compare(watched, { watch: "unfinished" }).total, 0, "saving completion retires already-warmed unfinished pages");
+  each(watched, owner => owner.switchUser());
+  assert.equal(compare(watched, { watch: "finished" }).total, 0, "another account cannot inherit the finished-state cache");
+  clock = fixedNow;
   const recovery = pair([fixedNow - DAY]); each(recovery, owner => { owner.state.cacheable = false; });
   compare(recovery); each(recovery, owner => { owner.state.cacheable = true; }); compare(recovery); compare(recovery, { offset: 1 });
   assert.equal(recovery.current.state.calls.source, withoutReuse ? 3 : 2, "degraded metadata is retried on the same version and healthy queries may then be reused");

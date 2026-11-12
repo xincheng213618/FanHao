@@ -81,7 +81,7 @@ export function createServerConfig({
     PLAYABLE_VIDEO_EXTS: new Set([".mp4", ".m4v", ".mov", ".webm"]),
     DIRECT_VIDEO_EXTS: new Set([".mp4", ".m4v", ".webm"]),
     IMAGE_EXTS: new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"]),
-    INFO_EXTS: new Set([".nfo", ".txt", ".json", ".xml", ".html", ".htm", ".csv", ".md", ".srt", ".ass", ".ssa"]),
+    INFO_EXTS: new Set([".nfo", ".txt", ".json", ".xml", ".html", ".htm", ".csv", ".md", ".srt", ".ass", ".ssa", ".vtt"]),
     COVER_HINTS: new Set(["cover", "poster", "folder", "front", "fanart", "thumb", "thumbnail", "封面"]),
     MAX_INFO_BYTES: 1024 * 1024,
     DEFAULT_WORK_LIMIT: 160,

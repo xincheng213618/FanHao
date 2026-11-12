@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { MAX_LIMIT } from "../src/modules/music/server/constants.js";
-import { createM3uTrackMatcher, decodeM3uPath, parseM3u } from "../src/modules/music/server/m3u.js";
+import { createM3uTrackMatcher, decodeM3uPath, formatM3uPlaylist, parseM3u } from "../src/modules/music/server/m3u.js";
 import { routeMusicApi } from "../src/modules/music/server/routes.js";
 import { createMusicStore } from "../src/modules/music/server/store.js";
 
@@ -21,6 +21,16 @@ try {
   insert.run("unicode", String.raw`\\media-host\music\中文 #1.mp3`, "中文 #1.mp3", "中文 #1.mp3", "ok");
   insert.run("unique", String.raw`C:\albums\unique.flac`, "albums/unique.flac", "unique.flac", "ok");
   insert.run("missing", String.raw`\\media-host\music\missing.mp3`, "missing.mp3", "missing.mp3", "missing");
+  const percent = path.join(path.dirname(local), "A%20B.mp3");
+  const space = path.join(path.dirname(local), "A B.mp3");
+  const hash = path.join(path.dirname(local), "#mix.mp3");
+  insert.run("literal-percent", percent, "A%20B.mp3", "A%20B.mp3", "ok");
+  insert.run("space", space, "A B.mp3", "A B.mp3", "ok");
+  insert.run("root-hash", hash, "#mix.mp3", "#mix.mp3", "ok");
+  insert.run("album-hash", path.join(path.dirname(local), "album", "#mix.mp3"), "album/#mix.mp3", "#mix.mp3", "ok");
+  const exportDirectory = path.join(path.dirname(local), "export");
+  insert.run("literal-remote-root", path.join(path.dirname(local), "Other%20Mix.mp3"), "Other%20Mix.mp3", "Other%20Mix.mp3", "ok");
+  insert.run("space-in-export-dir", path.join(exportDirectory, "Other Mix.mp3"), "Other Mix.mp3", "Other Mix.mp3", "ok");
   const matcher = createM3uTrackMatcher(database);
   const networkUrl = "file://media-host/music/song.mp3";
 
@@ -36,6 +46,23 @@ try {
   assert.equal(matcher.match("unique.flac")?.id, "unique", "unique filename fallback remains available");
   assert.equal(matcher.match("albums/unique.flac")?.id, "unique");
   assert.equal(matcher.match("file://media-host/music/missing.mp3"), null, "unavailable tracks stay excluded");
+  assert.equal(matcher.match(percent)?.id, "literal-percent", "plain path percent escapes are literal when present");
+  assert.equal(matcher.match("A%20B.mp3")?.id, "literal-percent");
+  assert.equal(matcher.match(pathToFileURL(percent).href)?.id, "literal-percent");
+  assert.equal(matcher.match(pathToFileURL(space).href)?.id, "space", "file URLs explicitly encode paths");
+  const literalName = "Other%20Mix.mp3";
+  assert.equal(createM3uTrackMatcher(database, [literalName], exportDirectory).match(literalName)?.id, "literal-remote-root",
+    "literal relative paths win over URI-decoding into a different song next to the playlist");
+  const exported = formatM3uPlaylist({ name: "Escaped filenames" }, [
+    { source_path: percent, relative_path: "A%20B.mp3", title: "Percent" },
+    { source_path: hash, relative_path: "#mix.mp3", title: "Hash" }
+  ], "relative");
+  const roundTrip = parseM3u(exported).entries;
+  assert.deepEqual(roundTrip, ["A%20B.mp3", "./#mix.mp3"], "a leading hash cannot be emitted as an M3U comment");
+  for (const entries of [roundTrip, [percent, hash]]) {
+    const scopedRoundTrip = createM3uTrackMatcher(database, entries);
+    assert.deepEqual(entries.map(entry => scopedRoundTrip.match(entry)?.id), ["literal-percent", "root-hash"]);
+  }
 
   assert.equal(decodeM3uPath(networkUrl), "//media-host/music/song.mp3");
   assert.equal(decodeM3uPath("file:///C:/Music/A%20B.mp3"), "C:/Music/A B.mp3");
@@ -47,7 +74,7 @@ try {
   assert.deepEqual(parsed.entries.map(entry => matcher.match(entry)?.id), ["network", "local"], "playlist order and cross-host identities must survive parsing");
   insert.run("legacy-blob", new Uint8Array([1, 2, 3]), null, new Uint8Array([1, 2, 3]), "ok");
   const old = createM3uTrackMatcher(database);
-  const entries = [...parsed.entries, "song.mp3", "unique.flac", "1,2,3", "FILE://MEDIA-HOST/music/song.mp3"];
+  const entries = [...parsed.entries, ...roundTrip, "song.mp3", "unique.flac", "1,2,3", "FILE://MEDIA-HOST/music/song.mp3"];
   const scoped = createM3uTrackMatcher(database, entries);
   for (const entry of entries) assert.deepEqual(scoped.match(entry), old.match(entry), "old nullable/BLOB path columns match identically");
   database.exec("CREATE TEMP TABLE music_tracks(id, source_path, relative_path, file_name, status)");
@@ -78,7 +105,9 @@ async function verifyScopedImport() {
     captured = this;
     const statement = prepare.call(this, sql, ...args);
     if (scan && sql.startsWith("SELECT id, source_path, relative_path, file_name FROM music_tracks")) {
+      scan.arraysSupported = typeof statement.setReturnArrays === "function";
       return {
+        ...(scan.arraysSupported ? { setReturnArrays(enabled) { scan.arrayRows = enabled; statement.setReturnArrays(enabled); } } : {}),
         all() { scan.method = "all"; const rows = statement.all(); scan.rows = rows.length; return rows; },
         *iterate() { scan.method = "iterate"; for (const row of statement.iterate()) { scan.rows++; yield row; } }
       };
@@ -143,6 +172,7 @@ async function verifyScopedImport() {
     scan = { rows: 0 }; assert.deepEqual(await route(after, input(relative)), previousResult); const nextScan = scan;
     scan = null;
     assert.equal(oldScan.method, "all"); assert.equal(nextScan.method, "iterate"); assert.equal(nextScan.rows, oldScan.rows);
+    if (nextScan.arraysSupported) assert.equal(nextScan.arrayRows, true, "bounded import streams native array rows");
     for (const body of [input(absolute), input(["Track 1.mp3", absolute[0], absolute[0], relative[1]]), { path: m3uPath }]) {
       assert.deepEqual(await route(after, body), await route(before, body));
     }

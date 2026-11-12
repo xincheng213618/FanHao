@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { parseInfoMetadata } from "../../../../../lib/info-metadata.js";
 import { canonicalPersonId, createCanonicalPersonReader, hasIdentityTable, personLocations, personPathKey } from "../people/person-identity.js";
 
 const personNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -327,7 +328,7 @@ export function createCoreLibraryService({
     };
   }
 
-  function workInfoFallback(row) {
+  function workInfoFallback(row, imageUrl) {
     return {
       code: row.code || "",
       title: row.work_title || "",
@@ -340,7 +341,7 @@ export function createCoreLibraryService({
       hasSubtitles: dbBoolOrNull(row.has_subtitles),
       javdbTags: parseJsonTextArray(row.javdb_tags_json),
       director: row.director || "",
-      imageUrl: "",
+      imageUrl,
       actors: [],
       tags: [],
       fields: []
@@ -362,6 +363,14 @@ export function createCoreLibraryService({
     }
 
     const videoSizes = cachedVideoSizes(db);
+    const pinnedVideoIds = new Map();
+    if (hasIdentityTable(db, "intake_video_playback_ids")) {
+      for (const { local_work_id, work_id, file_id, public_id } of db.prepare("SELECT * FROM intake_video_playback_ids").all()) {
+        const key = `${local_work_id}:${work_id}`;
+        if (!pinnedVideoIds.has(key)) pinnedVideoIds.set(key, new Map());
+        pinnedVideoIds.get(key).set(file_id, public_id);
+      }
+    }
     const filesByLocalWorkId = new Map();
     for (const row of db
       .prepare(
@@ -406,6 +415,9 @@ export function createCoreLibraryService({
           w.has_subtitles,
           w.javdb_tags_json,
           w.director,
+          CASE WHEN instr(w.raw_text, '://') > 0 AND NOT EXISTS (
+            SELECT 1 FROM local_files f WHERE f.local_work_id = lw.id AND f.file_type = 'image'
+          ) THEN w.raw_text END AS info_raw_text,
           w.updated_at AS work_updated_at
         FROM local_works lw
         JOIN works w ON w.id = lw.work_id
@@ -459,11 +471,14 @@ export function createCoreLibraryService({
       if (row.local_match_method !== "intake_ordered") videos.sort(compareNaturalName);
       const images = files.filter((file) => file.type === "image").sort(compareNaturalName);
       const infos = files.filter((file) => file.type === "info").sort(compareNaturalName);
+      const playbackIds = pinnedVideoIds.get(`${row.local_work_id}:${row.core_work_id}`);
       videos.forEach((video, index) => {
-        video.id = `${row.core_work_id}-${index + 1}`;
+        video.id = playbackIds ? playbackIds.get(video.id) || `${row.core_work_id}-file-${video.id}` : `${row.core_work_id}-${index + 1}`;
       });
       const title = row.work_title || path.basename(sourcePathToAbsolute(row.local_path)) || row.code || "";
       const cover = chooseCover(images, fileBase(title), sourcePathToAbsolute(row.local_path));
+      // The intake sidecar's cover can be displayed even if there is no local image file.
+      const imageUrl = row.info_raw_text ? publicRemoteUrl(parseInfoMetadata(row.info_raw_text).imageUrl) : "";
       const modifiedAt = [...videos, ...images, ...infos]
         .map((file) => file.modifiedAt)
         .filter(Boolean)
@@ -484,7 +499,7 @@ export function createCoreLibraryService({
         videos,
         images,
         infos,
-        infoSummary: workInfoFallback(row)
+        infoSummary: workInfoFallback(row, imageUrl)
       };
       bucket.works.push(work);
       index.worksById.set(work.id, work);

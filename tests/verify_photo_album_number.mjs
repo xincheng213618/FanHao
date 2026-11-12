@@ -40,6 +40,7 @@ const health = photoCollectionHealth([
 ]);
 assert.equal(health.total, 9);
 assert.equal(health.numbered, 6);
+assert.equal(health.missing, 4);
 assert.deepEqual(health.numbering, [{ prefix: "NO.", count: 5, min: 1, max: 9, missing: 4,
   missingRanges: [[3, 4], [7, 8]], truncated: false }]);
 assert.equal(health.duplicateGroupCount, 2);
@@ -57,5 +58,13 @@ assert.equal(mixed.duplicateGroupCount, 1, "VOL.6 and No.6 are the same issue");
 
 // Small families are not treated as a numbering scheme.
 assert.deepEqual(photoCollectionHealth([album("x", "NO.1", 1), album("y", "NO.40", 1)]).numbering, []);
+
+for (const gaps of [120, 121]) {
+  const result = photoCollectionHealth(Array.from({ length: gaps + 1 }, (_, index) =>
+    album(`gap-${index}`, `NO.${index * 2 + 1}`, 1)));
+  assert.equal(result.missing, gaps);
+  assert.equal(result.numbering[0].missingRanges.length, 120);
+  assert.equal(result.numbering[0].truncated, gaps > 120, "exactly 120 displayed ranges are complete");
+}
 
 console.log("photo-album-number: ok");

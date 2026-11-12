@@ -1,14 +1,17 @@
 import contextlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from import_movefile_plan import import_incoming
+from full_scan_core_library import scan_all, scan_candidates
 
 
 class MoveImportTests(unittest.TestCase):
@@ -16,6 +19,9 @@ class MoveImportTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="fanhao-move-import-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
+        image_db = patch.dict(os.environ, FANHAO_CORE_IMAGE_DB=str(self.root / "images.sqlite"))
+        image_db.start()
+        self.addCleanup(image_db.stop)
         self.person = self.root / "Primary"
         self.person.mkdir()
         self.db = self.root / "catalog.sqlite"
@@ -74,6 +80,33 @@ class MoveImportTests(unittest.TestCase):
             import_incoming(self.plan)
         with self.connection() as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM local_works").fetchone()[0], 1)
+
+    def assert_scan_reuses_paths_committed_before_its_write_lock(self, scan):
+        plan = self.plan
+
+        class InterleavedConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=()):
+                if sql == "BEGIN IMMEDIATE":
+                    # Another writer commits while this scanner is about to acquire the write lock.
+                    import_incoming(plan)
+                return super().execute(sql, parameters)
+
+        with contextlib.closing(sqlite3.connect(self.db, factory=InterleavedConnection)) as conn:
+            conn.row_factory = sqlite3.Row
+            stats = scan(conn)
+            self.assertEqual(stats["local_works_created"], 0)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM local_works").fetchone()[0], 3)
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM local_files WHERE file_type='video'").fetchone()[0], 3)
+
+    def test_full_scan_indexes_under_write_lock(self):
+        self.assert_scan_reuses_paths_committed_before_its_write_lock(
+            lambda conn: scan_all(conn, [self.root], True, False)
+        )
+
+    def test_candidate_scan_indexes_under_write_lock(self):
+        self.assert_scan_reuses_paths_committed_before_its_write_lock(
+            lambda conn: scan_candidates(conn, [self.root], [self.person], True, False)
+        )
 
 
 if __name__ == "__main__":

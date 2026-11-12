@@ -1989,10 +1989,11 @@ export function createImageLibraryService({
       collections.push({
         id, title: rows[0].collectionTitle || id, category: rows[0].category || "", count: rows.length, size,
         numbered: health.numbered, prefix: family?.prefix || "", min: family?.min ?? null, max: family?.max ?? null,
-        missing: family?.missing || 0, duplicateGroups: health.duplicateGroupCount, duplicateBytes: health.duplicateReclaimableBytes
+        numberingFamilies: health.numbering.length, missing: health.missing,
+        duplicateGroups: health.duplicateGroupCount, duplicateBytes: health.duplicateReclaimableBytes
       });
       totals.collections++; totals.albums += rows.length; totals.numbered += health.numbered; totals.size += size;
-      totals.missing += family?.missing || 0; totals.duplicateGroups += health.duplicateGroupCount;
+      totals.missing += health.missing; totals.duplicateGroups += health.duplicateGroupCount;
       totals.duplicateBytes += health.duplicateReclaimableBytes;
     }
     collections.sort((a, b) => b.count - a.count || a.title.localeCompare(b.title, "zh-CN"));

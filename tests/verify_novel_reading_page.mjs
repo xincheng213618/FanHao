@@ -218,10 +218,41 @@ function verifyScale() {
     }
   }
 }
+function verifyReadingStatus() {
+  seed(80, 0);
+  writer.exec("UPDATE novel_books SET catalog_revision = 'current'");
+  const addState = writer.prepare(`INSERT INTO novel_reading_state
+    (book_id, chapter_index, scroll_ratio, updated_at, catalog_revision, status)
+    VALUES (?, ?, ?, '2026-11-13', ?, ?)`);
+  addState.run("b50", 9, 1, "current", "resolved");
+  addState.run("b51", 10, 0.99, "current", "resolved");
+  addState.run("b60", 10, 1, "current", "resolved");
+  addState.run("b62", 10, 1, "current", "resolved");
+  addState.run("b70", 10, 1, "old", "resolved");
+  addState.run("b71", 10, 1, null, "unresolved");
+  addState.run("b72", 10, 1, "current", "needs_review");
+  addState.run("b73", null, null, "current", "resolved");
+  const list = (readingStatus, params = {}) => current.listBooks(url({ sort: "title", readingStatus, ...params }));
+  const ids = result => result.books.map(book => book.id);
+  const first = list("finished", { limit: "1" });
+  assert.deepEqual([first.readingStatus, first.total, first.nextOffset, ids(first)], ["finished", 2, 1, ["b60"]]);
+  assert.deepEqual(ids(list("finished", { limit: "1", offset: "1" })), ["b62"]);
+  assert.deepEqual(ids(list("finished", { limit: "1", offset: "2" })), []);
+  assert.deepEqual(ids(list("finished", { q: "Book 00006", category: "分类2", author: "Author 6" })), ["b62"]);
+  assert.deepEqual(ids(list("reading", { reading: "1", sort: "progress" })).sort(), ["b50", "b51"]);
+  assert.deepEqual(ids(list("review")), ["b70", "b71", "b72", "b73"]);
+  assert.equal(list("unread", { limit: "1" }).total, 72);
+  assert.equal(list("unread", { reading: "1" }).total, 0);
+  assert.equal(list("unsupported", { limit: "1" }).total, 80);
+  assert.equal(list("unsupported", { limit: "1" }).readingStatus, undefined);
+  const profile = current.authorDetail("Author 6", url({ readingStatus: "finished", limit: "1" }));
+  assert.equal(profile.total, 1);
+  assert.equal(profile.author.bookCount, 11, "the author profile still describes all of the author's works");
+}
 try {
   current.bookMeta("missing"); writer = new DatabaseSync(dbPath);
   definitions = writer.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index')").all();
-  verifyResponses(); verifyLegacy(); verifyErrors(); verifyWal(); verifyScale();
+  verifyResponses(); verifyLegacy(); verifyErrors(); verifyWal(); verifyReadingStatus(); verifyScale();
   console.log(JSON.stringify({ fixture: "novel-reading-page", responseOracles, errorOracles, measurements }, null, 2));
 } finally {
   DatabaseSync.prototype.prepare = prepare; crypto.randomUUID = randomUuid;

@@ -42,7 +42,7 @@ async function verifyMissingPrefixCache() {
     ['    if (missingWorkIndexCache.stamp !== stamp) {\n      prefixBudget.clear();', '    if (missingWorkIndexCache.stamp !== stamp) {'],
     ['for (let length = Math.min(prefix.length, MISSING_PREFIX_MAX_KEY_LENGTH);', 'for (let length = prefix.length;'],
     ['const cached = prefixBudget.read(missingWorkIndexCache.prefixes, prefix.slice(0, length));', 'const cached = missingWorkIndexCache.prefixes.get(prefix.slice(0, length));'],
-    ['    if (covers.cacheable && prefix.length <= MISSING_PREFIX_MAX_KEY_LENGTH) {\n      prefixBudget.write(missingWorkIndexCache.prefixes, prefix, entries, entries.length);\n    }', '    if (covers.cacheable) missingWorkIndexCache.prefixes.set(prefix, entries);']
+    ['    if (!exact && covers.cacheable && prefix.length <= MISSING_PREFIX_MAX_KEY_LENGTH) {\n      prefixBudget.write(missingWorkIndexCache.prefixes, prefix, entries, entries.length);\n    }', '    if (!exact && covers.cacheable) missingWorkIndexCache.prefixes.set(prefix, entries);']
   ];
   let previous = source;
   for (const [current, old] of changes) {

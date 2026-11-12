@@ -91,6 +91,8 @@ export function createWorkMoveJobService({
   const claimRetryAttempts = new Map();
   const fencedJobs = new Set();
   const workerTerminationPromises = new Map();
+  let recoveryRetryTimer = null;
+  let recoveryRetryDelayMs = 100;
   let closing = false;
   ensureSchema();
   adminCoreMutationService.repairWorkMoveReservations?.();
@@ -772,7 +774,14 @@ export function createWorkMoveJobService({
     pendingJobs.delete(jobId);
     const run = Promise.resolve()
       .then(() => runJob(jobId))
-      .catch((error) => warn("[work-move-job]", error?.message || error))
+      .catch((error) => {
+        if (isSqliteBusy(error)) {
+          warn("[work-move-dispatch-busy]", jobId, error?.message || error);
+          scheduleClaimRetry(jobId);
+        } else {
+          warn("[work-move-job]", error?.message || error);
+        }
+      })
       .finally(() => {
         activeRuns.delete(jobId);
         pumpQueue();
@@ -1190,16 +1199,35 @@ export function createWorkMoveJobService({
 
   function recover() {
     if (closing) return;
-    const jobs = getCoreDb().prepare(`
-      SELECT id FROM work_move_jobs
-      WHERE status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
-      ORDER BY created_at ASC
-    `).all();
+    let jobs;
+    try {
+      jobs = getCoreDb().prepare(`
+        SELECT id FROM work_move_jobs
+        WHERE status IN ('queued', 'running', 'cleanup_pending', 'rollback_pending')
+        ORDER BY created_at ASC
+      `).all();
+    } catch (error) {
+      if (!isSqliteBusy(error)) throw error;
+      warn("[work-move-discovery-busy]", error?.message || error);
+      if (!recoveryRetryTimer) {
+        recoveryRetryTimer = setTimeout(() => {
+          recoveryRetryTimer = null;
+          recover();
+        }, recoveryRetryDelayMs);
+        recoveryRetryTimer.unref?.();
+        recoveryRetryDelayMs = Math.min(2_000, recoveryRetryDelayMs * 2);
+      }
+      return;
+    }
+    clearTimeout(recoveryRetryTimer);
+    recoveryRetryTimer = null;
+    recoveryRetryDelayMs = 100;
     for (const job of jobs) scheduleJob(job.id);
   }
 
   async function close() {
     closing = true;
+    clearTimeout(recoveryRetryTimer);
     pendingJobs.clear();
     for (const timer of claimRetryTimers.values()) clearTimeout(timer);
     claimRetryTimers.clear();

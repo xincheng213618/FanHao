@@ -11,6 +11,21 @@ const normalized = value => process.platform === "win32" ? path.resolve(value).t
 const equalStat = (a, b) => a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeNs === b.mtimeNs && a.ctimeNs === b.ctimeNs;
 const signature = file => JSON.stringify([normalized(file.path), file.name, Number(file.size), file.modifiedAt || ""]);
 const safeError = error => error.statusCode ? error.message : "文件不可访问，请检查磁盘或重新扫描。";
+const searchText = value => String(value || "").normalize("NFKC").toLowerCase();
+
+function matchesGroup(group, files, query) {
+  return searchText(group.code).includes(query) || searchText(group.title).includes(query)
+    || files.some(file => searchText(file.name).includes(query) || searchText(file.path).includes(query));
+}
+
+function fileTotals(files) {
+  let largest = 0, totalBytes = 0;
+  for (const file of files) {
+    largest = Math.max(largest, Number(file.size) || 0);
+    totalBytes += file.size;
+  }
+  return { largest, totalBytes, potentialExtraBytes: Math.max(0, totalBytes - largest) };
+}
 
 export function createDuplicateService({ dbPath, roots, resolveWork, resolveVideo, videoProbeService,
   cleanupMissing = null,
@@ -23,6 +38,8 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
   async function snapshot({ refresh = false } = {}) {
     accepting();
     if (pending) return pending;
+    // A timed-out worker can still be unwinding native I/O.
+    if (workerOwner) throw unavailable();
     if (refresh) cached = null;
     const task = (async () => {
       const stamps = await Promise.all([dbPath, `${dbPath}-wal`].map(async file => {
@@ -32,22 +49,42 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
       accepting();
       const key = stamps.join("|");
       if (cached?.key === key && Date.now() - cached.at < cacheMs) return cached.value;
-      const value = snapshotLoader ? await snapshotLoader() : await new Promise((resolve, reject) => {
-        const worker = workerFactory({ workerData: { dbPath, roots } });
-        const owner = { worker }; workerOwner = owner;
-        let result, error;
-        const timer = setTimeout(() => { error = unavailable(); worker.terminate().catch(() => {}); }, workerTimeoutMs);
-        worker.once("message", message => { result = message.snapshot; if (!result) error = unavailable(); });
-        worker.once("error", () => { error = unavailable(); });
-        worker.once("exit", code => {
-          clearTimeout(timer); if (workerOwner === owner) workerOwner = null;
-          if (closing || error || code !== 0 || !result) reject(error || unavailable()); else resolve(result);
-        });
-      });
+      const value = snapshotLoader ? await snapshotLoader() : await readWorkerSnapshot();
       accepting(); cached = { key, at: Date.now(), value }; return value;
     })();
     pending = task;
     try { return await task; } finally { if (pending === task) pending = null; }
+  }
+
+  function readWorkerSnapshot() {
+    return new Promise((resolve, reject) => {
+      const worker = workerFactory({ workerData: { dbPath, roots } });
+      let result, terminating = false, resolveExit;
+      const exited = new Promise(resolve => { resolveExit = resolve; });
+      const owner = { exited, terminate };
+      workerOwner = owner;
+      const timer = setTimeout(() => {
+        reject(unavailable());
+        terminate();
+      }, workerTimeoutMs);
+
+      function terminate() {
+        if (terminating) return;
+        terminating = true;
+        result = null;
+        void worker.terminate().catch(() => {});
+      }
+
+      worker.once("message", message => { if (!terminating) result = message?.snapshot; });
+      worker.once("error", () => reject(unavailable()));
+      worker.once("exit", code => {
+        clearTimeout(timer);
+        if (workerOwner === owner) workerOwner = null;
+        resolveExit();
+        if (closing || terminating || code !== 0 || !result) reject(unavailable());
+        else resolve(result);
+      });
+    });
   }
   function enrich(group) {
     const files = group.files.map(file => {
@@ -58,13 +95,22 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
     const longest = Math.max(0, ...files.map(file => Number(file.duration) || 0));
     return { ...group, files: files.map(file => ({ ...file, isLongest: longest > 0 && file.duration === longest })) };
   }
-  function withFiles(group, files) {
-    const largest = Math.max(0, ...files.map(file => Number(file.size) || 0));
-    const total = files.reduce((sum, file) => sum + file.size, 0);
+  function withFiles(group, files, { largest, totalBytes, potentialExtraBytes } = fileTotals(files)) {
     return enrich({ ...group, files: files.map(file => ({ ...file, isLargest: largest > 0 && file.size === largest })),
-      totalBytes: total, potentialExtraBytes: Math.max(0, total - largest) });
+      totalBytes, potentialExtraBytes });
   }
-  function present(group) { return withFiles(group, group.files.filter(file => file.availabilityStatus !== "missing" && !missing.has(signature(file)))); }
+  function visibleFiles(group, absent) {
+    const hasManualMissing = missing.size > 0;
+    if (!hasManualMissing && !group.files.some(file => file.availabilityStatus === "missing")) return group.files;
+    return group.files.filter(file => {
+      if (file.availabilityStatus === "missing") {
+        if (absent) absent.add(signature(file));
+        return false;
+      }
+      return !hasManualMissing || !missing.has(signature(file));
+    });
+  }
+  function present(group) { return withFiles(group, visibleFiles(group)); }
   async function rootOnline(row) {
     for (const root of roots || []) {
       const relative = path.relative(path.resolve(root), path.resolve(row.path));
@@ -74,6 +120,7 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
     return false;
   }
   async function restoreMissing(value) {
+    if (!missing.size) return;
     const current = new Set(value.groups.flatMap(group => group.files.map(signature)));
     for (const [key, record] of missing) {
       if (!current.has(key)) { missing.delete(key); continue; }
@@ -87,15 +134,23 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
     const query = String(q).normalize("NFKC").trim().toLowerCase();
     if (query.length > 120 || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw failure("搜索或分页参数无效。", 400, "DUPLICATE_QUERY_INVALID");
     await restoreMissing(value);
-    const absent = new Set([...missing.keys(), ...value.groups.flatMap(group => group.files.filter(file => file.availabilityStatus === "missing").map(signature))]);
-    const candidates = value.groups.map(present).filter(group => group.files.length >= 2);
-    const groups = query ? candidates.filter(group => [group.code, group.title, ...group.files.flatMap(file => [file.name, file.path])]
-      .some(text => String(text || "").normalize("NFKC").toLowerCase().includes(query))) : candidates;
+    const absent = new Set(missing.keys());
+    const groups = [];
+    let candidateGroups = 0, candidateFiles = 0, potentialExtraBytes = 0, total = 0;
+    for (const group of value.groups) {
+      const files = visibleFiles(group, absent);
+      if (files.length < 2) continue;
+      const totals = fileTotals(files);
+      candidateGroups += 1;
+      candidateFiles += files.length;
+      potentialExtraBytes += totals.potentialExtraBytes;
+      if (query && !matchesGroup(group, files, query)) continue;
+      if (total >= offset && groups.length < limit) groups.push(withFiles(group, files, totals));
+      total += 1;
+    }
     const summary = absent.size ? { ...value.summary, indexedFiles: Math.max(0, value.summary.indexedFiles - absent.size),
-      candidateGroups: candidates.length, candidateFiles: candidates.reduce((sum, group) => sum + group.files.length, 0),
-      potentialExtraBytes: candidates.reduce((sum, group) => sum + group.potentialExtraBytes, 0) } : value.summary;
-    return { summary, total: groups.length, offset, hasMore: offset + limit < groups.length,
-      groups: groups.slice(offset, offset + limit).map(enrich) };
+      candidateGroups, candidateFiles, potentialExtraBytes } : value.summary;
+    return { summary, total, offset, hasMore: offset + limit < total, groups };
   }
   async function groupFor(id, includeMissing = false) {
     if (!/^[a-f0-9]{64}$/.test(String(id || ""))) throw failure("比对组标识无效。", 400);
@@ -173,8 +228,7 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
     const task = (async () => {
       const value = await snapshot({ refresh: true });
       const groups = value.groups.filter(group => (groupId === undefined || group.id === groupId)
-        && (!query || [group.code, group.title, ...group.files.flatMap(file => [file.name, file.path])]
-          .some(text => String(text || "").normalize("NFKC").toLowerCase().includes(query))));
+        && (!query || matchesGroup(group, group.files, query)));
       const checked = await checkDuplicateAvailability({ groups }, roots);
       accepting();
       const files = checked.groups.flatMap(group => group.files);
@@ -340,8 +394,9 @@ export function createDuplicateService({ dbPath, roots, resolveWork, resolveVide
   function beginStop() { closing = true; cached = null; checkOwner?.controller.abort(); }
   async function stop() {
     beginStop();
-    const termination = workerOwner ? workerOwner.worker.terminate() : null;
-    const tasks = [termination, pending, checkOwner?.task, probeTask, recheckTask].filter(Boolean); let timer;
+    const owner = workerOwner;
+    owner?.terminate();
+    const tasks = [owner?.exited, pending, checkOwner?.task, probeTask, recheckTask].filter(Boolean); let timer;
     try { await Promise.race([Promise.allSettled(tasks), new Promise((_, reject) => { timer = setTimeout(() => reject(failure("比对读取尚未结束。", 503, "DUPLICATE_STOP_INCOMPLETE")), stopTimeoutMs); })]); }
     finally { clearTimeout(timer); }
   }

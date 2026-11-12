@@ -232,12 +232,47 @@ async function verifyChildLifecycle() {
   const next = held.reimport(item.secondId).catch(error => error);
   await assert.rejects(held.reimport(item.thirdId), error => error.code === "NOVEL_REIMPORT_QUEUE_FULL");
   child.emit("error", new Error("held close"));
-  assert.equal((await first).code, "NOVEL_REIMPORT_CHILD_UNCONFIRMED"); assert.equal((await next).code, "NOVEL_REIMPORT_STOPPED");
+  assert.equal((await first).code, "NOVEL_REIMPORT_CHILD_UNCONFIRMED");
+  assert.equal((await next).code, "NOVEL_REIMPORT_CHILD_UNCONFIRMED");
+  await assert.rejects(held.reimport(item.id), { code: "NOVEL_REIMPORT_CHILD_UNCONFIRMED" });
   assert.equal(spawned, 1, "a closing child without exit proof must block queued parser spawn");
   await assert.rejects(held.start(), error => error.code === "NOVEL_REIMPORT_CHILD_UNCONFIRMED");
   await assert.rejects(held.stop(), error => error.code === "NOVEL_REIMPORT_CHILD_UNCONFIRMED");
   assert.equal(held.diagnostics().children, 1);
-  child.close(9); await held.start(); await held.stop(); checks += 1;
+  child.close(9);
+  await assert.rejects(held.reimport(item.id), { code: "NOVEL_REIMPORT_STOPPED" });
+  await held.start(); await held.stop(); checks += 1;
+
+  const recoveryRoot = newArtifactRoot();
+  const recoveryWriter = writerFor(item, recoveryRoot); await recoveryWriter.start();
+  let lateChild, partialArtifact, launches = 0;
+  const recovering = serviceFor(item, {
+    artifactRoot: recoveryRoot, closeTimeoutMs: 20,
+    novelStore: { ...item.reader, reimportLocalBook: recoveryWriter.reimportLocalBook },
+    spawnProcess(executable, args, options) {
+      if (++launches > 1) return spawn(executable, args, options);
+      partialArtifact = args[args.indexOf("--export-only") + 1];
+      return lateChild = controlledChild();
+    }
+  });
+  try {
+    const failed = recovering.reimport(item.id).catch(error => error);
+    await waitFor(() => Boolean(lateChild));
+    fs.writeFileSync(partialArtifact, "synthetic partial export");
+    lateChild.emit("error", new Error("controlled late parser close"));
+    assert.equal((await failed).code, "NOVEL_REIMPORT_CHILD_UNCONFIRMED");
+    assert.equal(fs.existsSync(partialArtifact), true, "the unconfirmed parser still owns its output");
+    lateChild.close(9);
+    assert.equal(fs.existsSync(partialArtifact), false, "abandoned output is cleaned once the parser exits");
+    const retry = await recovering.reimport(item.id);
+    assert.equal(retry.book.id, item.id, "a new request must recover after physical close without restarting the service");
+    assert.equal(launches, 2);
+    assert.equal(fs.existsSync(recoveryRoot), false, "the abandoned export must be cleaned after physical close");
+    checks += 1;
+  } finally {
+    await recovering.stop();
+    await recoveryWriter.stop();
+  }
 
   let cancelledChild, cancelSpawns = 0;
   const cancelledQueue = serviceFor(item, { spawnProcess() { cancelSpawns += 1; return cancelledChild = controlledChild(); } });

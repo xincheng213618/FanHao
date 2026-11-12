@@ -12,6 +12,7 @@ import { buildArtistLanguageConsensus, musicLanguageForArtist, musicLanguageFrom
 import { insertMusicPhoneticSearchRow, insertMusicShortSearchRow, MUSIC_PHONETIC_INDEX_VERSION } from "./search.js";
 
 const scanFileCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+export const MUSIC_SCAN_SOURCE_UNAVAILABLE = "MUSIC_SCAN_SOURCE_UNAVAILABLE";
 
 export function loadManagedMusicCatalogs(scanRoots = []) {
   const result = new Map();
@@ -87,11 +88,20 @@ export function scanMusicRoots(scanRoots, options = {}) {
     : 12000;
   const ffprobeArgsPrefix = Array.isArray(options.ffprobeArgsPrefix) ? options.ffprobeArgsPrefix.map(String) : [];
   const limit = Number(options.limit || 0);
+  const requireCompleteRead = options.requireCompleteRead === true;
+  // An incomplete scan cannot distinguish unavailable media from deletions.
+  if (requireCompleteRead) {
+    for (const root of scanRoots) {
+      if (!statScanSource(root).isDirectory()) throw musicScanSourceUnavailable();
+    }
+  }
+  const readDirectory = requireCompleteRead ? readScanDirectory : safeReadDirEntries;
+  const statFile = requireCompleteRead ? statScanSource : safeStat;
   const catalogMetadata = loadManagedMusicCatalogs(scanRoots);
   const files = [];
   for (const root of scanRoots) {
-    if (!safeStat(root)?.isDirectory()) continue;
-    for (const filePath of walkFiles(root)) {
+    if (!requireCompleteRead && !safeStat(root)?.isDirectory()) continue;
+    for (const filePath of walkFiles(root, readDirectory)) {
       if (!AUDIO_EXTS.has(path.extname(filePath).toLowerCase())) continue;
       files.push({ root, filePath });
       if (limit > 0 && files.length >= limit) break;
@@ -123,8 +133,11 @@ export function scanMusicRoots(scanRoots, options = {}) {
   const lyrics = [];
 
   for (const { root, filePath } of files) {
-    const stat = safeStat(filePath);
-    if (!stat?.isFile()) continue;
+    const stat = statFile(filePath);
+    if (!stat?.isFile()) {
+      if (requireCompleteRead) throw musicScanSourceUnavailable();
+      continue;
+    }
     const relativePath = path.relative(root, filePath);
     const parts = relativePath.split(/[\\/]/).filter(Boolean);
     const artistFolder = parts.length >= 3 ? parts[parts.length - 3] : parts[0] || "未知歌手";
@@ -749,11 +762,11 @@ export function cachedDirEntries(cache, dir) {
   return entries;
 }
 
-function* walkFiles(root) {
+function* walkFiles(root, readDirectory) {
   const stack = [root];
   while (stack.length) {
     const current = stack.pop();
-    for (const entry of safeReadDirEntries(current)) {
+    for (const entry of readDirectory(current)) {
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         stack.push(fullPath);
@@ -762,6 +775,41 @@ function* walkFiles(root) {
       }
     }
   }
+}
+
+
+function readScanDirectory(directory) {
+  return readScanSource(() => fs.readdirSync(directory, { withFileTypes: true }));
+}
+
+function statScanSource(filePath) {
+  return readScanSource(() => fs.statSync(filePath));
+}
+
+export function captureMusicScanSources(roots) {
+  const observed = roots.map(root => [root, musicScanRootIdentity(root)]);
+  return () => {
+    for (const [root, identity] of observed) {
+      if (musicScanRootIdentity(root) !== identity) throw musicScanSourceUnavailable();
+    }
+  };
+}
+
+function musicScanRootIdentity(root) {
+  const { resolved, stat } = readScanSource(() => ({ resolved: fs.realpathSync.native(root), stat: fs.statSync(root, { bigint: true }) }));
+  if (!stat.isDirectory()) throw musicScanSourceUnavailable();
+  return JSON.stringify([resolved, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)]);
+}
+
+function readScanSource(read) {
+  try { return read(); }
+  catch (cause) { throw musicScanSourceUnavailable(cause); }
+}
+
+export function musicScanSourceUnavailable(cause) {
+  const error = new Error("音乐目录或文件暂时无法读取，已保留原索引", { cause });
+  error.code = MUSIC_SCAN_SOURCE_UNAVAILABLE;
+  return error;
 }
 
 

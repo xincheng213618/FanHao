@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
+import { Readable } from "node:stream";
 import { createCodePrefixService } from "../src/modules/fanhao/server/catalog/code-prefix-service.js";
+import { routeCatalogApi } from "../src/modules/fanhao/server/catalog/routes.js";
+import { readJsonBody } from "../src/platform/server/request-io.js";
 import { createStudioService } from "../src/modules/fanhao/server/catalog/studio-service.js";
 import { createWorkClassificationService } from "../src/modules/fanhao/server/works/work-classification-service.js";
+import { createMissingCodeSearchService } from "../src/modules/fanhao/server/works/missing-code-search-service.js";
 import {
   codePrefixMatches,
   normalizeRequestedCodePrefix,
@@ -26,7 +31,8 @@ const localWorks = [
   localWork("1", "IPX-001"),
   localWork("2", "IPX-002"),
   localWork("3", "SONE-001"),
-  localWork("4", "FC2-PPV-100001")
+  localWork("4", "FC2-PPV-100001"),
+  localWork("5", "300MIUM-123")
 ];
 const makerRows = [
   { work_id: "1", maker_id: "10", maker_name: "IDEA POCKET" },
@@ -40,6 +46,7 @@ const missingByPrefix = {
   ],
   FC2: [missingWork("103", "FC2-PPV-100002")]
 };
+const lookupMissingReads = [];
 
 let sortCalls = 0;
 let catalogStamp = "makers-v1";
@@ -57,7 +64,17 @@ const service = createCodePrefixService({
     return [...new Map(works.map((work) => [String(work.id), work])).values()];
   },
   defaultWorkLimit: 48,
-  fastMissingCodeSearch(prefix) {
+  fastMissingCodeSearch(prefix, options) {
+    if (prefix === "IPX-003") {
+      assert.equal(options?.exact, true);
+      return [missingWork("104", "IPX-0034"), missingWork("101", "IPX-003")];
+    }
+    if (prefix === "FC2-100002") {
+      assert.equal(options?.exact, true);
+      return [missingWork("103", "FC2-100002")];
+    }
+    if (prefix === "300MIUM-124") return [{ ...missingWork("105", "MIUM-124"), indexedCode: "300MIUM-124" }];
+    if (/\d/.test(prefix)) lookupMissingReads.push(prefix);
     return missingByPrefix[prefix] || [];
   },
   filterWorkList(works, filter) {
@@ -78,6 +95,10 @@ const service = createCodePrefixService({
   getStamp: () => catalogStamp,
   workQueryStamp: () => metadataStamp,
   hydrateMissingSearchWorks(works) { hydratedPages.push(works.map((work) => work.id)); },
+  localWorkByCodeKey: () => new Map([
+    ["ipx001", localWorks[0]], ["fc2ppv100001", localWorks[3]], ["mium123", localWorks[4]]
+  ]),
+  localSearchWorkByCodeKey: () => new Map([["300mium123", localWorks[4]]]),
   maxWorkLimit: 1000,
   pagedWorksPayload(works, url, extra) {
     const limit = Number(url.searchParams.get("limit") || 48);
@@ -113,6 +134,65 @@ const service = createCodePrefixService({
     };
   }
 });
+
+const lookupInput = [
+  "X:\\Synthetic\\IPX_001 [1080p].mp4", "ipx-001", "IPX-003", "FC2 100002",
+  "MIUM-123", "300MIUM-123", "", "无番号", "IPX-999", "300MIUM-124"
+].join("\r\n");
+const lookup = service.lookupPayload(lookupInput);
+assert.deepEqual(lookup.items.map(({ line, code, status }) => [line, code, status]), [
+  [1, "IPX-001", "local"], [3, "IPX-003", "known"], [4, "FC2-PPV-100002", "known"],
+  [5, "MIUM-123", "unknown"], [6, "300MIUM-123", "local"], [8, undefined, "invalid"], [9, "IPX-999", "unknown"],
+  [10, "300MIUM-124", "known"]
+]);
+assert.equal(lookup.items.at(-1).searchCode, "300MIUM-124");
+assert.equal(lookup.duplicateCount, 1);
+assert.ok(lookupMissingReads.includes("IPX-999"));
+assert.ok(!JSON.stringify(lookup).includes("Synthetic"), "the API must not echo a pasted path");
+assert.throws(() => service.lookupPayload(Array(101).fill("IPX-001").join("\n")), { statusCode: 400 });
+assert.throws(() => service.lookupPayload("x".repeat(16_001)), { statusCode: 400 });
+let response;
+const catalogDeps = { codePrefixService: service, readJsonBody, sendJson: (_res, status, body) => { response = { status, body }; } };
+const lookupUrl = new URL("http://fixture/api/code-prefixes/lookup");
+for (const [body, status] of [[JSON.stringify({ input: lookupInput }), 200], ["{", 400], [JSON.stringify({ input: "" }), 400], ["x".repeat(65_537), 413]]) {
+  const request = Readable.from([body]); request.method = "POST";
+  assert.equal(await routeCatalogApi(request, {}, lookupUrl, catalogDeps), true);
+  assert.equal(response.status, status);
+  if (status === 200) assert.deepEqual(response.body, lookup);
+}
+
+const exactDb = new DatabaseSync(":memory:");
+try {
+  exactDb.exec(`
+    ATTACH ':memory:' AS fanhao_images;
+    CREATE TABLE fanhao_images.images(owner_type TEXT, owner_id INTEGER, kind TEXT);
+    CREATE TABLE local_works(work_id INTEGER);
+    CREATE TABLE works(id INTEGER PRIMARY KEY, code_search TEXT, code TEXT, title TEXT, status TEXT,
+      release_date TEXT, duration_minutes INTEGER, rating REAL, rating_count INTEGER, has_magnet INTEGER,
+      is_streamable INTEGER, has_subtitles INTEGER, updated_at TEXT, javdb_tags_json TEXT, fields_json TEXT);
+    CREATE INDEX idx_fixture_status_code ON works(status, code_search, id);
+    INSERT INTO works(id, code_search, code, title, status) VALUES
+      (1, 'fix001', 'FIX-001', 'Fixture one', 'ok'),
+      (2, 'fix0012', 'FIX-0012', 'Fixture twelve', 'ok');
+  `);
+  const reads = [];
+  const missing = createMissingCodeSearchService({
+    dbBoolOrNull: (value) => value === null ? null : Boolean(value),
+    getCoreDb: () => ({ prepare(sql) { reads.push(sql); return exactDb.prepare(sql); } }),
+    normalizeWorkCode: (value) => value,
+    parseJsonTextArray: () => [],
+    storedWorkCodeKey: (value) => value.replaceAll("-", "").toLowerCase()
+  });
+  const ids = (works) => works.map(({ id }) => id);
+  assert.deepEqual(ids(missing.search("FIX-001", { exact: true })), ["1"]);
+  assert.ok(reads.some((sql) => sql.includes("w.code_search = ?")), "a cold exact lookup must use the full index key");
+  assert.deepEqual(ids(missing.search("FIX-001")), ["1", "2"], "the exact lookup cannot populate the prefix cache");
+  const cachedReads = reads.length;
+  const fromCache = missing.search("FIX-001", { exact: true });
+  assert.deepEqual(ids(fromCache), ["1"], "exact lookup can read a warm prefix cache");
+  assert.equal(fromCache[0].indexedCode, "FIX-001", "exact results preserve the original indexed code");
+  assert.equal(reads.length, cachedReads);
+} finally { exactDb.close(); }
 
 const summaries = service.summaries(new URL("http://fanhao.local/api/code-prefixes?sort=count"));
 const ipx = summaries.prefixes.find((item) => item.prefix === "IPX");

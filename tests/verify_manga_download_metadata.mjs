@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import fs from "node:fs";
 import { createServer } from "node:http";
@@ -70,6 +71,10 @@ DatabaseSync.prototype.prepare = function (sql, ...args) {
       return rows;
     };
   }
+  if (measurement && sql.includes("SELECT policy.eligible, chapter.chapter_index, chapter.title")) measurement.downloadProjectionReads++;
+  if (measurement && /SELECT \* FROM manga_images WHERE cache_key = \? AND chapter_index = \? ORDER BY image_index/.test(sql)) {
+    measurement.chapterImageReads++;
+  }
   return statement;
 };
 
@@ -89,6 +94,10 @@ try {
       assert.equal(result.work.syncPageStats, 0, "whole-book export must not stat pages synchronously");
       assert.equal(result.work.asyncPageRealpaths, count, "whole-book export still resolves every page");
       assert.equal(result.work.asyncPageStats, count, "whole-book export still verifies every page");
+      if (source === "sqlite") {
+        assert.equal(result.work.downloadProjectionReads, 1, "the standard database supplies one download snapshot");
+        assert.equal(result.work.chapterImageReads, 0, "the standard download must bypass per-chapter image queries");
+      } else assert.equal(result.work.manifestReads, 1, "the JSON export must reuse its first manifest snapshot");
       metrics.push({ source, chapters: count, ...result.work });
     }
 
@@ -209,6 +218,9 @@ try {
   }
 
   await verifyDownloadPreflightLifecycle();
+  await verifyDownloadPlanFallbacks();
+  await verifyParallelChapterPreflight();
+  if (process.argv.includes("--benchmark-preflight")) await comparePreflightTimings();
   console.log(JSON.stringify({ ok: true, sources: 2, metrics }, null, 2));
 } finally {
   measurement = null;
@@ -296,18 +308,21 @@ function createFixture(name, source, input) {
       throw error;
     }
   }
-  const notFound = response => { response.writeHead(404); response.end(); };
-  const fileServer = createFileServer({ mimeTypes: {}, normalizeExt: file => path.extname(file), notFound });
-  const service = createMangaService({
-    root: library, databasePath,
-    safeStat(file) { try { return fs.statSync(file); } catch { return null; } },
-    notFound,
-    serveWholeFile: fileServer.serveWholeFile
-  });
+  function openService(factory = createMangaService) {
+    const notFound = response => { response.writeHead(404); response.end(); };
+    const fileServer = createFileServer({ mimeTypes: {}, normalizeExt: file => path.extname(file), notFound });
+    return factory({
+      root: library, databasePath,
+      safeStat(file) { try { return fs.statSync(file); } catch { return null; } },
+      notFound,
+      serveWholeFile: fileServer.serveWholeFile
+    });
+  }
+  const service = openService();
   const id = service.publicSummary(directory).id;
   assert.equal(service.cacheById(id), directory, "prime directory identity before measuring export metadata");
   return {
-    library, directory, manifest, service, id, bytes, writeImage,
+    library, directory, manifest, database, service, openService, id, bytes, writeImage,
     setIncomplete() {
       if (database) database.prepare("UPDATE manga_comics SET done_chapter_count=0 WHERE cache_key=?").run(directory);
       else { chapters[0].status = "pending"; fs.writeFileSync(manifest, JSON.stringify({ chapters })); }
@@ -353,7 +368,8 @@ async function verifyOpenedReplacement(fixture, chapterIndex, target) {
 async function measuredDownload(fixture, method, chapterIndex) {
   measurement = {
     manifest: fixture.manifest, directory: fixture.directory, manifestReads: 0, manifestBytes: 0, imageDimensionReads: 0,
-    chapterDirectoryReads: 0, chapterDirectoryRows: 0, syncPageRealpaths: 0, syncPageStats: 0, asyncPageRealpaths: 0, asyncPageStats: 0
+    chapterDirectoryReads: 0, chapterDirectoryRows: 0, downloadProjectionReads: 0, chapterImageReads: 0,
+    syncPageRealpaths: 0, syncPageStats: 0, asyncPageRealpaths: 0, asyncPageStats: 0
   };
   const began = performance.now();
   try {
@@ -361,6 +377,109 @@ async function measuredDownload(fixture, method, chapterIndex) {
     const { manifest, directory, ...work } = measurement;
     return { ...result, work: { ...work, elapsedMs: +(performance.now() - began).toFixed(2) } };
   } finally { measurement = null; }
+}
+
+async function verifyDownloadPlanFallbacks() {
+  const chapters = [{ index: 8, title: "later" }, { index: 3, title: "earlier" }];
+  const legacy = createFixture("legacy-download-layout", "sqlite", chapters);
+  legacy.database.exec("ALTER TABLE manga_images ADD COLUMN legacy_note TEXT");
+  const legacyZip = await measuredDownload(legacy, "GET");
+  assert.equal(legacyZip.status, 200);
+  assert.deepEqual(archiveEntries(legacyZip.body), [
+    ["0003_earlier/0001.png", legacy.bytes[1]], ["0008_later/0001.png", legacy.bytes[0]]
+  ]);
+  assert.equal(legacyZip.work.chapterImageReads, 2, "a legacy image table must use its point readers");
+
+  const mixed = createFixture("mixed-download-layout", "sqlite", chapters);
+  mixed.database.exec("DELETE FROM manga_images; DELETE FROM manga_chapters");
+  const mixedZip = await measuredDownload(mixed, "GET");
+  assert.equal(mixedZip.status, 200);
+  assert.deepEqual(archiveEntries(mixedZip.body), [
+    ["0008_later/0001.png", mixed.bytes[0]], ["0003_earlier/0001.png", mixed.bytes[1]]
+  ], "a database summary may still use its manifest for chapter content");
+
+  const extra = createFixture("extra-image-row", "sqlite", chapters);
+  extra.database.prepare("INSERT INTO manga_images(cache_key,chapter_index,image_index,local_path) VALUES (?,8,2,?)")
+    .run(extra.directory, "missing.png");
+  const extraZip = await measuredDownload(extra, "GET");
+  assert.equal(extraZip.status, 200);
+  assert.equal(extraZip.work.chapterImageReads, 2, "extra database rows fall back without truncating the available pages");
+  assert.deepEqual(archiveEntries(extraZip.body), [
+    ["0003_earlier/0001.png", extra.bytes[1]], ["0008_later/0001.png", extra.bytes[0]]
+  ]);
+
+  extra.database.exec("UPDATE manga_comics SET image_count=20001, downloaded_count=20001");
+  const oversized = await measuredDownload(extra, "HEAD");
+  assert.equal(oversized.status, 409);
+  assert.equal(oversized.work.downloadProjectionReads, 0, "oversized books skip the synchronous bulk projection");
+  assert.equal(oversized.work.chapterImageReads, 2);
+}
+
+async function verifyParallelChapterPreflight() {
+  const count = 65;
+  const fixture = createFixture("ordered-parallel-download", "sqlite",
+    Array.from({ length: count }, (_, index) => ({ index: index + 1, title: `chapter ${index + 1}` })));
+  const first = path.join(fixture.directory, "page-0.png");
+  const second = path.join(fixture.directory, "page-1.png");
+  const events = new EventEmitter();
+  const secondStarted = once(events, "second", { signal: AbortSignal.timeout(5000) });
+  const release = Promise.withResolvers();
+  const realpath = fs.promises.realpath;
+  let firstHeld = false;
+  fs.promises.realpath = function (file, ...args) {
+    if (file === first && !firstHeld) {
+      firstHeld = true;
+      return release.promise.then(() => realpath.call(this, file, ...args));
+    }
+    if (file === second) events.emit("second");
+    return realpath.call(this, file, ...args);
+  };
+  const transfer = download(fixture, "GET");
+  void transfer.catch(() => {});
+  try {
+    await secondStarted;
+    assert.equal(firstHeld, true, "the second chapter should start while the first is pending");
+    fixture.database.exec(`
+      UPDATE manga_chapters SET title='changed title' WHERE chapter_index=65;
+      UPDATE manga_images SET local_path='page-0.png' WHERE chapter_index=65;
+    `);
+    release.resolve();
+    const result = await transfer;
+    assert.equal(result.status, 200);
+    assert.deepEqual(archiveEntries(result.body), fixture.bytes.map((bytes, index) =>
+      [`${String(index + 1).padStart(4, "0")}_chapter ${index + 1}/0001.png`, bytes]),
+    "the ZIP follows the original ordered snapshot even if preflight completes out of order and the database changes");
+  } finally {
+    release.resolve();
+    await transfer.catch(() => {});
+    fs.promises.realpath = realpath;
+  }
+}
+
+async function comparePreflightTimings() {
+  const modulePath = "src/modules/photos/server/manga-service.js";
+  const sourceUrl = new URL(`../${modulePath}`, import.meta.url);
+  const baseline = execFileSync("git", ["show", `18a14219:${modulePath}`], { encoding: "utf8" })
+    .replace(/from "(\.[^"]+)"/g, (_match, relative) => `from ${JSON.stringify(new URL(relative, sourceUrl).href)}`);
+  const { createMangaService: oldService } = await import(`data:text/javascript;base64,${Buffer.from(baseline).toString("base64")}`);
+  for (const { chapterCount, pagesPerChapter } of [{ chapterCount: 500, pagesPerChapter: 1 }, { chapterCount: 240, pagesPerChapter: 12 }]) {
+    const fixture = createFixture(`timing-${chapterCount}-${pagesPerChapter}`, "sqlite", Array.from({ length: chapterCount }, (_, index) => ({
+      index: index + 1, title: `chapter ${index + 1}`, images: Array.from({ length: pagesPerChapter }, () => ({}))
+    })));
+    const previous = { ...fixture, service: fixture.openService(oldService) };
+    assert.equal(previous.service.cacheById(fixture.id), fixture.directory);
+    const subjects = [previous, fixture];
+    const samples = [[], []];
+    for (let index = -2; index < 7; index++) {
+      for (const subject of [Number(index % 2 !== 0), Number(index % 2 === 0)]) {
+        const result = await measuredDownload(subjects[subject], "HEAD");
+        assert.equal(result.status, 200);
+        if (index >= 0) samples[subject].push(result.work.elapsedMs);
+      }
+    }
+    const median = values => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+    metrics.push({ benchmark: "warm-head-route", chapterCount, pagesPerChapter, previousMs: median(samples[0]), currentMs: median(samples[1]), samples });
+  }
 }
 
 async function verifyPreparedChapter(source) {

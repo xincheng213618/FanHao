@@ -490,6 +490,61 @@ try {
     await closeFake(startup.children[0], null, "SIGKILL");
   });
 
+  await scenario("a stalled running stream retires before the queued transcode starts", async () => {
+    const f = fixture({ concurrency: 1, capacity: 2, outputStallTimeoutMs: 30 });
+    const { res } = f.request();
+    const queued = f.request().res;
+    const child = await f.child();
+    child.stdout.write("initial MP4 bytes");
+    await until(() => res.headersSent, "transcode headers were sent");
+    await until(() => res.destroyed, "a running stream with no new output must fail");
+    await until(() => res.errors.length > 0, "the stalled response reports its error");
+    assert.equal(res.errors[0].code, "TRANSCODE_OUTPUT_TIMEOUT");
+    assert.deepEqual(child.killCalls, ["SIGKILL"]);
+    assert.equal(f.service.diagnostics().active, 1);
+    assert.equal(f.children.length, 1, "a replacement must wait for physical child close");
+    await closeFake(child, null, "SIGKILL");
+    const nextChild = await f.child(1);
+    nextChild.stdout.write("recovered");
+    await closeFake(nextChild);
+    await until(() => queued.writableFinished, "the queued transcode completes after physical close");
+    assert.equal(queued.body, "recovered");
+  });
+
+  await scenario("output stall watchdog allows response backpressure and rearms on drain", async () => {
+    const f = fixture({ outputStallTimeoutMs: 50 });
+    const { res } = f.request({ slow: true });
+    const child = await f.child();
+    child.stdout.write("first");
+    await until(() => res.writableNeedDrain, "first write fills the response buffer");
+    await delay(100);
+    assert.deepEqual(child.killCalls, [], "initial response backpressure must not be treated as a stall");
+    res.release();
+    await until(() => !child.stdout.isPaused(), "first drain resumes the stream");
+    child.stdout.write("second");
+    await until(() => res.writableNeedDrain, "a piped write fills the response buffer");
+    await delay(100);
+    assert.deepEqual(child.killCalls, [], "later response backpressure must also pause the watchdog");
+    res.release();
+    await until(() => res.destroyed, "a drained response with no new data must time out");
+    assert.deepEqual(child.killCalls, ["SIGKILL"]);
+    await closeFake(child, null, "SIGKILL");
+  });
+
+  await scenario("later output refreshes the running stream deadline", async () => {
+    const f = fixture({ outputStallTimeoutMs: 240 });
+    const { res } = f.request();
+    const child = await f.child();
+    child.stdout.write("first");
+    await delay(150);
+    child.stdout.write("second");
+    await delay(150);
+    assert.deepEqual(child.killCalls, [], "ongoing output renews the deadline beyond the first chunk");
+    await closeFake(child);
+    await until(() => res.writableFinished, "ongoing output completes normally");
+    assert.equal(res.body, "firstsecond");
+  });
+
   await scenario("EOF with a still-live child is bounded and killed", async () => {
     const f = fixture({ childCloseTimeoutMs: 20 }); const { res } = f.request();
     (await f.child()).stdout.end("partial");

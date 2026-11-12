@@ -3,9 +3,21 @@ export async function routeCatalogApi(req, res, url, deps) {
     codePrefixService,
     notFound,
     rankingService,
+    readJsonBody,
     sendJson,
     studioService
   } = deps;
+
+  if (url.pathname === "/api/code-prefixes/lookup" && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req, 64 * 1024);
+      sendJson(res, 200, codePrefixService.lookupPayload(body?.input));
+    } catch (error) {
+      const status = [400, 413].includes(error.statusCode) ? error.statusCode : 503;
+      sendJson(res, status, { error: status < 500 ? error.message : "番号索引暂时读不完整，请重试。" });
+    }
+    return true;
+  }
 
   if (url.pathname === "/api/code-prefixes" && req.method === "GET") {
     try {

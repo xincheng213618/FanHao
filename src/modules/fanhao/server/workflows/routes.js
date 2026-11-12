@@ -1,3 +1,5 @@
+const subtitleRoutes = new Set(["subtitle-source", "subtitle-search", "subtitle-files", "subtitle-download", "subtitle-download-direct", "subtitle-import", "subtitle-remove"]);
+
 export async function routeFileWorkflows(req, res, url, { service, intake, requireLocalAdmin, requestAccess, readJsonBody, sendJson }) {
   const prefix = "/api/fanhao/file-workflows";
   if (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) return false;
@@ -12,7 +14,15 @@ export async function routeFileWorkflows(req, res, url, { service, intake, requi
       else if (route === "discard-stats" && req.method === "GET") result = intake.discardStats({
         reason: url.searchParams.get("reason") || "", ltxOnly: url.searchParams.get("ltx") === "1", page: url.searchParams.get("page")
       });
-      else if (["scan", "compare", "metadata", "prepare", "open"].includes(route) && req.method === "POST") result = await intake[route](await readJsonBody(req));
+      else if ((route === "compare" || subtitleRoutes.has(route)) && req.method === "POST") {
+        const input = await readJsonBody(req, route === "subtitle-import" ? 3 * 1024 * 1024 : undefined);
+        if (res.destroyed) return true;
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        res.once("close", abort);
+        try { result = await intake[route](input, { signal: controller.signal }); }
+        finally { res.off("close", abort); }
+      } else if (["scan", "metadata", "prepare", "open"].includes(route) && req.method === "POST") result = await intake[route](await readJsonBody(req));
       else {
         const match = /^jobs\/([0-9a-f-]{36})(?:\/(run|cancel))?$/.exec(route);
         if (match && !match[2] && req.method === "GET") result = intake.detail(match[1]);

@@ -13,6 +13,10 @@ export function createWorkFilterService({
     return optionalNumber(workInfoFacetRow(work.id)?.rating, work.infoSummary?.rating);
   }
 
+  function isMissingLocalCover(work) {
+    return !work.missingLocal && !work.coverId && !work.infoSummary?.imageUrl && !workHasCoreCover(work.id);
+  }
+
   function matches(work, filter) {
     if (isWorkTraitFilter(filter)) {
       return matchesWorkTraitFilter(traits(work), filter) === true;
@@ -29,7 +33,7 @@ export function createWorkFilterService({
       case "vr": return isVrWork(work);
       case "localMarkedA": return workHasLocalMarker(work, "A");
       case "hasMagnet": return publicWorkAvailability(work).hasMagnet === true;
-      case "missingCover": return !work.missingLocal && !work.coverId && !workHasCoreCover(work.id);
+      case "missingCover": return isMissingLocalCover(work);
       case "all":
       default: return true;
     }
@@ -67,7 +71,7 @@ export function createWorkFilterService({
       if (rating !== null && rating >= 4) counts.highRating += 1;
       if (isVrWork(work)) counts.vr += 1;
       if (publicWorkAvailability(work).hasMagnet === true) counts.hasMagnet += 1;
-      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) counts.missingCover += 1;
+      if (isMissingLocalCover(work)) counts.missingCover += 1;
     }
     return counts;
   }

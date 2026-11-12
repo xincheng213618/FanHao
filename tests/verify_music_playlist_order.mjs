@@ -125,15 +125,16 @@ function compare(value, input, id = "p") {
 }
 function caught(action) { try { action(); } catch (error) { return error; } assert.fail("expected failure"); }
 
-async function membershipRoute(owner, method, playlistId, trackId, query = "") {
+async function membershipRoute(owner, method, playlistId, trackId, query = "", operation = "") {
   const tracks = `/api/music/playlists/${playlistId}/tracks`;
-  const url = new URL(`${tracks}${method === "DELETE" ? `/${trackId}` : ""}${query}`, "http://fixture");
+  const suffix = operation ? `/${operation}` : method === "DELETE" ? `/${trackId}` : "";
+  const url = new URL(`${tracks}${suffix}${query}`, "http://fixture");
   const response = {};
   measuring = { db: owner.db, metadata: 0, reads: 0, playlistDetails: 0 };
   try {
     assert(await routeMusicApi({ method }, response, url, {
       musicStore: owner.store,
-      readJsonBody: () => ({ trackId }),
+      readJsonBody: () => Array.isArray(trackId) ? { trackIds: trackId } : { trackId },
       notFound: target => { target.status = 404; },
       sendJson: (target, status, data) => Object.assign(target, { status, data })
     }));
@@ -178,6 +179,100 @@ async function verifyMembershipReceipts() {
   finally { fault = null; }
   assert.deepEqual(snapshot(receipt), before, "failed receipt writes must roll back membership");
   return metrics;
+}
+
+async function verifyBatchMembership() {
+  const owner = open(createMusicStore, 7);
+  owner.db.exec("DELETE FROM music_playlist_items WHERE playlist_id='p' AND track_id NOT IN ('t0','t1','t2');"
+    + "UPDATE music_playlist_items SET sort_order='legacy' WHERE playlist_id='p' AND track_id='t1';"
+    + "UPDATE music_tracks SET status='missing' WHERE id='t5'");
+  const add = (ids, id = "p") => membershipRoute(owner, "POST", id, ids, "?return=receipt");
+  const selected = ["t4", "t2", "t3", "missing", "t5", " t4 "];
+  const before = snapshot(owner);
+  owner.db.exec("CREATE TRIGGER reject_batch_item BEFORE INSERT ON music_playlist_items WHEN NEW.track_id='t3' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END");
+  assert.throws(() => owner.store.addTracksToPlaylist("p", selected), /fixture failure/);
+  assert.deepEqual(snapshot(owner), before, "all inserts, legacy normalization, and timestamp roll back together");
+  owner.db.exec("DROP TRIGGER reject_batch_item");
+
+  clock += 1000;
+  assert.deepEqual(await add(selected), {
+    status: 200, data: { ok: true, addedCount: 2, alreadyPresentCount: 1, unavailableCount: 2 }, playlistDetails: 0
+  });
+  assert.deepEqual(owner.store.playlistDetail("p").tracks.map(track => track.id), ["t0", "t2", "t1", "t4", "t3"]);
+  const saved = snapshot(owner);
+  assert.deepEqual(saved.items.filter(row => row.playlist_id === "other"), before.items.filter(row => row.playlist_id === "other"));
+  clock += 1000;
+  assert.deepEqual((await add(selected)).data, { ok: true, addedCount: 0, alreadyPresentCount: 3, unavailableCount: 2 });
+  assert.equal((await add(["t6"], "absent")).status, 404);
+  for (const ids of [[], ["t6", 42], Array.from({ length: 2001 }, (_, i) => `item-${i}`)]) {
+    assert.equal((await add(ids)).status, 400);
+  }
+  assert.deepEqual(snapshot(owner), saved, "retries and invalid requests leave saved rows and timestamps unchanged");
+  assert.deepEqual((await add(Array.from({ length: 2000 }, (_, i) => `item-${i}`))).data,
+    { ok: true, addedCount: 0, alreadyPresentCount: 0, unavailableCount: 2000 });
+
+  const remove = (ids, id = "p") => membershipRoute(owner, "POST", id, ids, "", "remove");
+  const selectedForRemoval = ["t2", "t0", "missing", " t2 "];
+  owner.db.exec("CREATE TRIGGER reject_batch_remove BEFORE DELETE ON music_playlist_items WHEN OLD.track_id='t0' BEGIN SELECT RAISE(ABORT, 'fixture remove failure'); END");
+  assert.throws(() => owner.store.removeTracksFromPlaylist("p", selectedForRemoval), /fixture remove failure/);
+  assert.deepEqual(snapshot(owner), saved, "a failed second removal must roll back the whole batch");
+  owner.db.exec("DROP TRIGGER reject_batch_remove");
+  clock += 1000;
+  assert.deepEqual(await remove(selectedForRemoval), {
+    status: 200, data: { ok: true, removedCount: 2, alreadyAbsentCount: 1 }, playlistDetails: 0
+  });
+  const afterRemoval = snapshot(owner);
+  assert.deepEqual(afterRemoval.items, saved.items.filter(row => row.playlist_id !== "p" || !["t0", "t2"].includes(row.track_id)),
+    "batch removal must retain exact order values and leave all other playlists alone");
+  assert.deepEqual(owner.store.playlistDetail("p").tracks.map(track => track.id), ["t1", "t4", "t3"]);
+  assert.equal(owner.store.listTracks(new URLSearchParams()).tracks.some(track => track.id === "t0"), true,
+    "removing playlist membership must leave the catalogue track available");
+  clock += 1000;
+  assert.deepEqual((await remove(selectedForRemoval)).data, { ok: true, removedCount: 0, alreadyAbsentCount: 3 });
+  assert.equal((await remove(["t1"], "absent")).status, 404);
+  for (const ids of [[], ["t1", 42], Array.from({ length: 2001 }, (_, i) => `item-${i}`)]) assert.equal((await remove(ids)).status, 400);
+  assert.deepEqual(snapshot(owner), afterRemoval, "duplicate or invalid removals must not update playlist metadata");
+}
+
+async function verifyOrderBeyondCreationLimit() {
+  const count = 2150;
+  const owner = open(createMusicStore, count);
+  const url = new URL("/api/music/playlists/p/tracks/order", "http://fixture");
+  const submitOrder = async (trackIds) => {
+    const response = {};
+    assert(await routeMusicApi({ method: "PUT" }, response, url, {
+      musicStore: owner.store,
+      readJsonBody: () => ({ trackIds }),
+      notFound: target => { target.status = 404; },
+      sendJson: (target, status, data) => Object.assign(target, { status, data })
+    }));
+    return response;
+  };
+
+  const requested = Array.from({ length: count }, (_, index) => `t${index}`);
+  const moved = requested.pop();
+  requested.splice(2050, 0, moved);
+  const result = await submitOrder(requested);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.data.tracks.map(track => track.id), requested,
+    "the API must persist reorder intent beyond the first 2,000 tracks");
+  assert.deepEqual(owner.store.playlistDetail("p").tracks.map(track => track.id), requested);
+
+  const partial = await submitOrder([...Array.from({ length: 2001 }, (_, index) => `missing-${index}`), moved]);
+  assert.equal(partial.status, 200, "unknown IDs earlier in the request must not hide a valid requested track");
+  assert.deepEqual(partial.data.tracks.map(track => track.id), [moved, ...requested.filter(id => id !== moved)]);
+
+  const created = owner.store.createPlaylist({ name: "Limited batch creation", trackIds: requested });
+  assert.deepEqual(created.tracks.map(track => track.id), requested.slice(0, 2000), "batch creation keeps its own limit");
+
+  const batch = requested.filter(id => id !== "t0").slice(0, 2000);
+  assert.deepEqual((await membershipRoute(owner, "POST", "other", batch, "?return=receipt")).data,
+    { ok: true, addedCount: 2000, alreadyPresentCount: 0, unavailableCount: 0 });
+  assert.deepEqual(owner.store.playlistDetail("other").tracks.map(track => track.id), ["t0", ...batch]);
+  assert.deepEqual((await membershipRoute(owner, "POST", "other", batch, "", "remove")).data,
+    { ok: true, removedCount: 2000, alreadyAbsentCount: 0 });
+  assert.deepEqual(owner.store.playlistDetail("other").tracks.map(track => track.id), ["t0"]);
+  return count;
 }
 
 const metrics = [];
@@ -229,7 +324,9 @@ try {
     compare(value, { trackIds: ["t5", "t4"] });
   }
   const membership = negative ? [] : await verifyMembershipReceipts();
-  console.log(JSON.stringify({ musicPlaylistOrder: "ok", comparisons, privateDatabases: owners.length, metrics, membership }));
+  if (!negative) await verifyBatchMembership();
+  const largeOrderTracks = negative ? 0 : await verifyOrderBeyondCreationLimit();
+  console.log(JSON.stringify({ musicPlaylistOrder: "ok", comparisons, privateDatabases: owners.length, metrics, membership, largeOrderTracks }));
 } finally {
   fault = null; measuring = null;
   try { for (const owner of owners) await owner.store.stop(); }

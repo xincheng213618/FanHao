@@ -5,16 +5,24 @@ import { workCodeKey } from "../../../../../lib/code-parser.js";
 import { intakeNameCode } from "./intake-catalog.js";
 import { PARTIAL, SUBTITLE, VIDEO, checkedPath, identity, intakeError, lstat, pathKey, same, signature } from "./intake-files.js";
 
-export function snapshotIntakeDirectory(folder, roots, label = "下载包") {
+function packageFingerprint({ folderId, entries }) {
+  return createHash("sha256").update(JSON.stringify([folderId, entries])).digest("hex");
+}
+
+export function snapshotIntakeDirectory(folder, roots, label = "下载包", isActiveSubtitleTemporary) {
   const stat = lstat(checkedPath(folder, roots));
   if (!stat?.isDirectory() || stat.isSymbolicLink() || !stat.ino) throw intakeError(`${label}目录已改变，请重新核对`);
   const entries = [];
   function walk(dir, depth) {
     if (depth > 12) throw intakeError(`${label}的子目录太深，请单独核对文件`);
     for (const name of fs.readdirSync(dir).sort()) {
+      const candidate = path.join(dir, name);
+      if (PARTIAL.test(name)) {
+        if (isActiveSubtitleTemporary?.(candidate)) continue;
+        throw intakeError(`${label}内还有未完成文件，请核对目录`);
+      }
       if (entries.length >= 512) throw intakeError(`${label}文件太多，请单独核对文件`);
-      if (PARTIAL.test(name)) throw intakeError(`${label}内还有未完成文件，请核对目录`);
-      const child = checkedPath(path.join(dir, name), roots);
+      const child = checkedPath(candidate, roots);
       const entry = lstat(child);
       if (!entry || entry.isSymbolicLink() || !(entry.isFile() || entry.isDirectory())) throw intakeError(`${label}含链接或特殊文件，请单独核对文件`);
       const directory = entry.isDirectory();
@@ -24,7 +32,7 @@ export function snapshotIntakeDirectory(folder, roots, label = "下载包") {
   }
   walk(folder, 0);
   const folderId = identity(stat);
-  return { folderId, entries, fingerprint: createHash("sha256").update(JSON.stringify([folderId, entries])).digest("hex") };
+  return { folderId, entries, fingerprint: packageFingerprint({ folderId, entries }) };
 }
 
 export async function classifyIntakeVideoAds(videos, classifyAds) {
@@ -36,10 +44,10 @@ export async function classifyIntakeVideoAds(videos, classifyAds) {
   return new Set(promos.map((video) => video.path));
 }
 
-export async function inspectIntakePackage(folder, roots, classifyAds) {
+export async function inspectIntakePackage(folder, roots, classifyAds, isActiveSubtitleTemporary) {
   const code = intakeNameCode(path.basename(folder));
   if (!code) return null;
-  const manifest = snapshotIntakeDirectory(folder, roots);
+  const manifest = snapshotIntakeDirectory(folder, roots, undefined, isActiveSubtitleTemporary);
   const videos = manifest.entries.filter((entry) => !entry.directory && VIDEO.test(entry.relative)).map((entry) => {
     const name = path.basename(entry.relative), stem = path.parse(name).name;
     const part = Number(/[-_.\s](?:cd|part|disc)?[-_.\s]*(\d{1,2})$/i.exec(stem)?.[1] || 0);
@@ -79,6 +87,17 @@ export function packageMediaFingerprint(bundle) {
   const media = [...bundle.videos.map(({ path, signature }) => [path, signature]),
     ...packageSubtitles(bundle).map(({ file, signature }) => [file, signature])];
   return createHash("sha256").update(JSON.stringify([bundle.folderId, media])).digest("hex");
+}
+
+export function matchesIntakePackageFingerprint(bundle, expected, { mediaOnly, source, subtitle }) {
+  if (expected === (mediaOnly ? packageMediaFingerprint(bundle) : bundle.fingerprint)) return true;
+  const { name, signature: writtenSignature } = subtitle ?? {};
+  if (typeof name !== "string" || /[\\/]/.test(name) || !/\.srt$/i.test(name)) return false;
+  const relative = path.relative(bundle.folder, path.join(path.dirname(source), name));
+  const entries = bundle.entries.filter((entry) => entry.directory || entry.relative !== relative || !same(entry.signature, writtenSignature));
+  if (entries.length === bundle.entries.length) return false;
+  const before = { ...bundle, entries };
+  return expected === (mediaOnly ? packageMediaFingerprint(before) : packageFingerprint(before));
 }
 
 export function requireIntakePackage(bundle, roots, folder = bundle.folder) {

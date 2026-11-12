@@ -18,6 +18,7 @@ export function createNovelReimportService({
   const scriptPath = path.join(root, "tools", "rescan_novel_library.py");
   artifactRoot = path.resolve(artifactRoot);
   let accepting = true, active = null, pumping = false, stopTask = null, generation = 0;
+  let unconfirmedChild = null;
   let cleanupError = null;
   const queue = [], busy = new Set(), children = new Set(), files = new Set(), idle = new Set();
 
@@ -25,7 +26,7 @@ export function createNovelReimportService({
     const intent = generation;
     if (stopTask) { try { await stopTask; } catch (error) { if (children.size) throw error; } }
     if (intent !== generation) throw stopped();
-    if ([...children].some((child) => child.closing)) throw failure("NOVEL_REIMPORT_CHILD_UNCONFIRMED", "前一重导入子进程尚未确认退出", 503);
+    if ([...children].some((child) => child.closing)) throw childUnconfirmed();
     cleanupFiles();
     stopTask = null; accepting = true;
   }
@@ -48,6 +49,7 @@ export function createNovelReimportService({
       return { kind: "collection", book: current, task: queued.task, message: "已创建重新采集任务" };
     }
     if (sourcePath.startsWith("upload://")) throw failure("NOVEL_REIMPORT_SOURCE", "这本书由浏览器上传，请选择 TXT 文件重新导入", 400);
+    if (unconfirmedChild) throw childUnconfirmed();
     const local = resolveLocalSource(current);
     const key = `source:${process.platform === "win32" ? local.sourcePath.toLowerCase() : local.sourcePath}`;
     const bookKey = `book:${bookId}`;
@@ -70,7 +72,7 @@ export function createNovelReimportService({
     try {
       while (queue.length) {
         const job = queue.shift(); active = job;
-        if (!accepting) { finishJob(job, stopped()); continue; }
+        if (!accepting || unconfirmedChild) { finishJob(job, accepting ? childUnconfirmed() : stopped()); continue; }
         try {
           assertOwnedRoot(false); fs.mkdirSync(artifactRoot);
         } catch (error) { if (error.code !== "EEXIST") { finishJob(job, error); continue; } }
@@ -145,7 +147,13 @@ export function createNovelReimportService({
     const pipeError = (error) => handle.fail(failure("NOVEL_REIMPORT_PROCESS", error.message || "小说重新导入输出读取失败", 500));
     child.stdout?.on("error", pipeError); child.stderr?.on("error", pipeError);
     child.once("error", (error) => handle.fail(failure("NOVEL_REIMPORT_PROCESS", error.message || "小说重新导入程序失败", 500)));
-    child.once("close", (code) => { handle.exited = true; handle.code = code; children.delete(handle); exited.resolve(); });
+    child.once("close", (code) => {
+      handle.exited = true; handle.code = code; children.delete(handle); exited.resolve();
+      if (unconfirmedChild === handle) {
+        unconfirmedChild = null;
+        try { cleanupFiles(job.descriptor.artifactPath); } catch (error) { cleanupError = error; }
+      }
+    });
     const timer = setTimeout(() => handle.fail(failure("NOVEL_REIMPORT_TIMEOUT", "小说重新导入解析超时", 504)), processTimeoutMs);
     try {
       if (job.failure) handle.fail(job.failure);
@@ -155,7 +163,10 @@ export function createNovelReimportService({
       if (handle.code === 75) throw failure("NOVEL_REIMPORT_TOO_LARGE", "本地 TXT 解析结果超过允许的大小上限", 413);
       if (handle.code !== 0) throw failure("NOVEL_REIMPORT_PROCESS", Buffer.concat(output).toString("utf8").trim().slice(-800) || "小说重新导入解析失败", 500);
     } catch (error) {
-      if (!handle.exited) { accepting = false; error = failure("NOVEL_REIMPORT_CHILD_UNCONFIRMED", "重导入子进程尚未确认退出", 503); }
+      if (!handle.exited) {
+        unconfirmedChild = handle;
+        throw childUnconfirmed();
+      }
       throw error;
     } finally { clearTimeout(timer); job.child = null; }
   }
@@ -204,7 +215,7 @@ export function createNovelReimportService({
     }
     if (!files.size && !fs.readdirSync(artifactRoot).length) fs.rmdirSync(artifactRoot);
   }
-  return { reimport, start, beginStop, stop, diagnostics: () => ({ accepting, pending: queue.length, active: Boolean(active), children: children.size, files: files.size, artifactRoot }) };
+  return { reimport, start, beginStop, stop, diagnostics: () => ({ accepting: accepting && !unconfirmedChild, pending: queue.length, active: Boolean(active), children: children.size, files: files.size, artifactRoot }) };
 }
 
 function result(book) { return { kind: "book", book, message: `重新导入完成：${book.chapterCount} 章` }; }
@@ -220,4 +231,5 @@ function defer() { let resolve, reject; const promise = new Promise((yes, no) =>
 function failure(code, message, statusCode) { return Object.assign(new Error(message), { code, statusCode, outcome: "not_committed" }); }
 function stopped() { return failure("NOVEL_REIMPORT_STOPPED", "小说重新导入服务正在停止", 503); }
 function cancelled() { return failure("NOVEL_REIMPORT_CANCELLED", "小说重新导入已取消", 499); }
+function childUnconfirmed() { return failure("NOVEL_REIMPORT_CHILD_UNCONFIRMED", "重导入子进程尚未确认退出，请稍后重试", 503); }
 async function bounded(promise, milliseconds, message) { let timer; try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(failure("NOVEL_REIMPORT_CHILD_UNCONFIRMED", message, 503)), milliseconds); })]); } finally { clearTimeout(timer); } }

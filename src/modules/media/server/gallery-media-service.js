@@ -3,6 +3,10 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { extractCoverFrameAsync, probeVideoDurationAsync } from "../../../../lib/cover-frame.js";
 
+const CONTINUE_KINDS = new Set(["movie", "tv", "anime"]);
+const CONTINUE_LIMIT = 6;
+const MAX_CONTINUE_LIMIT = 24;
+
 export function createGalleryMediaService({
   coverBoxSize,
   coverGeneratorVersion,
@@ -45,6 +49,10 @@ export function createGalleryMediaService({
   function byId(id) {
     const target = String(id || "");
     if (!target) return null;
+    return indexedMedia().get(target) ?? getLinkedVideoById?.(target) ?? null;
+  }
+
+  function indexedMedia() {
     const index = getImageLibraryIndex();
     const items = index.mediaItems || [];
     if (mediaLookup?.index !== index || mediaLookup.items !== items) {
@@ -52,7 +60,38 @@ export function createGalleryMediaService({
       for (const item of items) if (!byId.has(item.id)) byId.set(item.id, item);
       mediaLookup = { index, items, byId };
     }
-    return mediaLookup.byId.get(target) ?? getLinkedVideoById?.(target) ?? null;
+    return mediaLookup.byId;
+  }
+
+  function continueWatching(kind, { limit, includeProgressRevision = false } = {}) {
+    const count = Number(limit);
+    const maximum = Number.isSafeInteger(count) && count > 0 ? Math.min(count, MAX_CONTINUE_LIMIT) : CONTINUE_LIMIT;
+    let media;
+    const progress = playbackProgressService.recentUnfinishedVideoProgress(id => {
+      media ||= indexedMedia();
+      const mediaKind = media.get(id)?.mediaKind;
+      return kind === "all" ? CONTINUE_KINDS.has(mediaKind) : mediaKind === kind;
+    });
+    const items = [], series = new Set(), seriesMetadata = new Map();
+    for (const entry of progress) {
+      const item = publicGalleryMediaItem(media.get(entry.videoId), null, null, seriesMetadata);
+      if (item.seriesKey && item.mediaKind !== "movie") {
+        const seriesKey = `${item.mediaKind}\n${item.seriesKey}`;
+        if (series.has(seriesKey)) continue;
+        series.add(seriesKey);
+      }
+      const title = item.movieMetadata?.title || item.tvSeries?.title || item.seriesName || item.title || "未命名视频";
+      items.push({
+        id: item.id,
+        title,
+        episodeTitle: item.mediaKind !== "movie" && item.title !== title ? item.title : "",
+        coverUrl: item.movieMetadata?.coverUrl || item.tvSeries?.coverUrl || "",
+        percent: entry.percent,
+        ...(includeProgressRevision ? { progressRevision: JSON.stringify([entry.updatedAt, entry.position, entry.duration]) } : {})
+      });
+      if (items.length === maximum) break;
+    }
+    return items;
   }
 
   function mediaPath(item) {
@@ -432,6 +471,7 @@ export function createGalleryMediaService({
   return {
     beginStop,
     byId,
+    continueWatching,
     mediaPath,
     publicDetail,
     start,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { createServer } from "node:http";
 import { mkdtempSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -74,14 +75,19 @@ function json(res, statusCode, payload) {
 }
 let sourceRequests = 0;
 let bodyReads = 0;
+let heldSource;
 const runtime = createPhotosRuntime({
   appConfigService: {},
   imageLibraryService,
   getImageGalleryDb: db.getDb,
   getPhotoSets: () => albums,
   imageReaderCacheStatus: async () => ({}),
-  loadPublicPhotoSource: async (url) => {
+  loadPublicPhotoSource: async (url, { signal } = {}) => {
     sourceRequests += 1;
+    if (heldSource?.url === url) {
+      heldSource.started.resolve(signal);
+      await heldSource.release.promise;
+    }
     assert.ok(htmlPages.has(url), `unexpected fixture URL ${url}`);
     return { url, html: htmlPages.get(url) };
   },
@@ -102,6 +108,8 @@ const server = createServer(async (req, res) => {
   } catch (error) {
     console.error(error);
     json(res, error.statusCode || 500, { error: error.message });
+  } finally {
+    if (req.headers["x-fixture-disconnect"]) heldSource?.complete.resolve();
   }
 });
 try {
@@ -131,6 +139,59 @@ try {
   await assert.rejects(fetchPublicPhotoSource(sourceUrl, { fetchImpl: async () => new Response(null, {
     status: 302, headers: { location: "http://127.0.0.1/private" }
   }) }), /5280k/);
+
+  const bodyReader = new AbortController();
+  const startedReading = Promise.withResolvers();
+  const cancelledBody = Promise.withResolvers();
+  const releaseCleanup = Promise.withResolvers();
+  const readFailure = new Error("fixture source preview disconnected");
+  let bodySettled = false;
+  const sourceBody = new ReadableStream({
+    pull() { startedReading.resolve(); },
+    cancel(reason) { cancelledBody.resolve(reason); return releaseCleanup.promise; }
+  }, { highWaterMark: 0 });
+  const read = assert.rejects(fetchPublicPhotoSource(sourceUrl, {
+    signal: bodyReader.signal,
+    fetchImpl: async () => new Response(sourceBody, { headers: { "Content-Type": "text/html" } })
+  }).finally(() => { bodySettled = true; }), error => error === readFailure);
+  let readGuard;
+  try {
+    await startedReading.promise;
+    bodyReader.abort(readFailure);
+    const reason = await Promise.race([
+      cancelledBody.promise,
+      new Promise((_, reject) => { readGuard = setTimeout(() => reject(new Error("source body did not cancel")), 2000); })
+    ]);
+    assert.equal(reason, readFailure);
+    assert.equal(bodySettled, false, "the cancelled preview must retain ownership until body cleanup settles");
+  } finally {
+    clearTimeout(readGuard);
+    releaseCleanup.resolve();
+  }
+  await read;
+
+  const controller = new AbortController();
+  heldSource = { url: otherCollectionUrl, started: Promise.withResolvers(), release: Promise.withResolvers(), complete: Promise.withResolvers() };
+  const disconnected = assert.rejects(fetch(`${base}/api/photo-catalog/intake/preview`, {
+    method: "POST", headers: { "Content-Type": "application/json", "x-fixture-admin": "1", "x-fixture-disconnect": "1" },
+    body: JSON.stringify({ mode: "source", url: otherCollectionUrl }), signal: controller.signal
+  }), { name: "AbortError" });
+  try {
+    const signal = await heldSource.started.promise;
+    assert.ok(signal instanceof AbortSignal, "the HTTP request must own its upstream preview signal");
+    const upstreamAborted = once(signal, "abort", { signal: AbortSignal.timeout(2000) });
+    controller.abort();
+    await Promise.all([disconnected, upstreamAborted]);
+    heldSource.release.resolve();
+    await heldSource.complete.promise;
+    assert.equal(sourceRequests, 1, "a late source response must not start the collection's issue-list request");
+  } finally {
+    controller.abort();
+    heldSource.release.resolve();
+    await disconnected;
+    await heldSource.complete.promise;
+    heldSource = null;
+  }
 
   const { localCollections, sampleSourceUrl } = await api("/intake/options");
   assert.equal(sampleSourceUrl, sourceDirectory);

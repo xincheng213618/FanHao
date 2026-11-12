@@ -10,8 +10,13 @@ export const TASTE_DIMENSIONS = Object.freeze([
 
 const round = (value, places = 4) => Number(value.toFixed(places));
 const clean = (value) => String(value || "").normalize("NFKC").trim();
+const EVIDENCE_PAGE_SIZE = 24;
 
-export function buildTasteProfile(input, { now = new Date().toISOString(), limit = 20 } = {}) {
+export function buildTasteProfile(input, options) {
+  return buildTasteAnalysis(input, options).profile;
+}
+
+export function buildTasteAnalysis(input, { now = new Date().toISOString(), limit = 20, snapshot = "" } = {}) {
   // One release contributes once, even when it has several files or editions.
   const grouped = new Map();
   for (const row of input) {
@@ -86,7 +91,7 @@ export function buildTasteProfile(input, { now = new Date().toISOString(), limit
     if (score) recommendations.push({ id: work.id, code: work.code, title: work.title, score: round(score), reasons });
   }
   recommendations.sort((a, b) => b.score - a.score || a.code.localeCompare(b.code));
-  return { version: 1, generatedAt: now, summary: { total: works.length, marked: marked.length,
+  const profile = { version: 1, generatedAt: now, summary: { total: works.length, marked: marked.length,
     markedRate: works.length ? round(marked.length / works.length) : 0,
     indexedRows: input.length, duplicateRows: input.length - works.length }, dimensions,
     recommendations: recommendations.slice(0, 24),
@@ -95,4 +100,35 @@ export function buildTasteProfile(input, { now = new Date().toISOString(), limit
       interpretation: "[A] 是特别喜欢；其他馆藏是基础偏好，未标记不代表不喜欢。",
       comparison: "各维度只比较有该类资料的作品；倾向倍数按该维度的整体标记率计算，并用 20 个基础样本平滑。",
       limitations: "资料缺失、标记习惯和人物与标签的共现会影响结果；分数是匹配排序，不是喜欢概率。" } };
+  if (!snapshot) return { profile };
+  profile.snapshot = snapshot;
+  return { profile, evidence: indexFeatureEvidence(works, dimensions) };
+}
+
+function indexFeatureEvidence(works, dimensions) {
+  const index = new Map(dimensions.map(({ key, distinctive, favorites }) => [
+    key, new Map([...distinctive, ...favorites].map(({ id, name }) => [id, { name, marked: [], unmarked: [] }]))
+  ]));
+  const collator = new Intl.Collator("zh-CN", { numeric: true });
+  const ordered = [...works].sort((left, right) =>
+    collator.compare(left.code, right.code) || collator.compare(left.title, right.title) || collator.compare(left.id, right.id));
+  for (const work of ordered) {
+    const record = { id: work.id, code: work.code, title: work.title };
+    const scope = work.marked ? "marked" : "unmarked";
+    for (const [key, features] of index) {
+      for (const id of work.features[key].keys()) features.get(id)?.[scope].push(record);
+    }
+  }
+  return index;
+}
+
+export function pageTasteEvidence(index, { dimension, feature, scope = "marked", offset = 0 }) {
+  const found = index?.get(dimension)?.get(feature);
+  if (!found || !["marked", "unmarked"].includes(scope)) return null;
+  const items = found[scope];
+  const page = items.slice(offset, offset + EVIDENCE_PAGE_SIZE);
+  return {
+    name: found.name, markedCount: found.marked.length, unmarkedCount: found.unmarked.length,
+    total: items.length, limit: EVIDENCE_PAGE_SIZE, offset, items: page, hasMore: offset + page.length < items.length
+  };
 }

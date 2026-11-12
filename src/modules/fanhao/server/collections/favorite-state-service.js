@@ -146,19 +146,39 @@ export function createFavoriteStateService({
     return publicFavoriteFolder(id);
   }
 
-  function deleteFavoriteFolder(folderId) {
-    const state = getUserState();
-    const id = customFavoriteFolder(folderId, state);
+  function transferFavoriteFolder(state, id, destinationId) {
     const folders = Object.fromEntries(Object.entries(state.favoriteFolders).filter(([key]) => key !== id));
     if (!Object.hasOwn(folders, defaultFavoriteFolderId)) folders[defaultFavoriteFolderId] = userStateService.defaultFavoriteFolders()[defaultFavoriteFolderId];
     let movedCount = 0;
     const favorites = Object.fromEntries(Object.entries(state.favorites || {}).map(([workId, record]) => {
       if (record?.folderId !== id) return [workId, record];
       movedCount += 1;
-      return [workId, { ...record, folderId: defaultFavoriteFolderId }];
+      return [workId, { ...record, folderId: destinationId }];
     }));
     saveFolderChanges(state, folders, favorites);
-    return { deletedFolderId: id, movedCount, defaultFolder: publicFavoriteFolder(defaultFavoriteFolderId) };
+    return { deletedFolderId: id, movedCount, destinationFolder: publicFavoriteFolder(destinationId) };
+  }
+
+  function deleteFavoriteFolder(folderId) {
+    const state = getUserState();
+    const id = customFavoriteFolder(folderId, state);
+    const { deletedFolderId, movedCount, destinationFolder } = transferFavoriteFolder(state, id, defaultFavoriteFolderId);
+    return { deletedFolderId, movedCount, defaultFolder: destinationFolder };
+  }
+
+  function mergeFavoriteFolder(folderId, destinationId, { sourceCreatedAt, destinationCreatedAt } = {}) {
+    const state = getUserState();
+    if (folderId === defaultFavoriteFolderId) throw folderError(400, "默认收藏夹不能作为合并源");
+    const id = customFavoriteFolder(folderId, state);
+    if (typeof destinationId !== "string" || !Object.hasOwn(state.favoriteFolders, destinationId)) {
+      throw folderError(404, "目标收藏夹不存在");
+    }
+    if (id === destinationId) throw folderError(400, "请选择另一个目标收藏夹");
+    if (sourceCreatedAt !== undefined && sourceCreatedAt !== String(state.favoriteFolders[id].createdAt || "")
+      || destinationCreatedAt !== undefined && destinationCreatedAt !== String(state.favoriteFolders[destinationId].createdAt || "")) {
+      throw folderError(409, "收藏夹已重新创建，请刷新列表后再合并");
+    }
+    return transferFavoriteFolder(state, id, destinationId);
   }
 
   function moveFavoriteToFolder(workId, folderId) {
@@ -172,6 +192,46 @@ export function createFavoriteStateService({
     favorite.folderId = userStateService.normalizeFavoriteFolderId(folderId);
     userStateService.save();
     return publicFavoriteForWork(workId);
+  }
+
+  function favoriteBatchIds(workIds) {
+    if (!Array.isArray(workIds) || !workIds.length || workIds.length > 500
+      || workIds.some((id) => typeof id !== "string" || !id.trim())) {
+      throw folderError(400, "请选择 1 至 500 部已收藏的作品");
+    }
+    return [...new Set(workIds)];
+  }
+
+  function moveFavoritesToFolder(workIds, folderId) {
+    const state = getUserState();
+    const ids = favoriteBatchIds(workIds);
+    if (typeof folderId !== "string" || !Object.hasOwn(state.favoriteFolders || {}, folderId)) {
+      throw folderError(404, "目标收藏夹不存在");
+    }
+    const library = getLibrary();
+    if (ids.some((id) => !library.worksById.has(id) || !Object.hasOwn(state.favorites, id))) {
+      throw folderError(409, "部分作品已移出馆藏或取消收藏，请刷新收藏后重新选择");
+    }
+    const changes = ids.map((id) => [id, userStateService.normalizeFavoriteRecord(state.favorites[id], state.favoriteFolders)])
+      .filter(([, favorite]) => favorite.folderId !== folderId);
+    if (changes.length) {
+      const favorites = { ...state.favorites };
+      for (const [id, favorite] of changes) favorites[id] = { ...favorite, folderId };
+      saveFolderChanges(state, state.favoriteFolders, favorites);
+    }
+    return { workIds: ids, folderId, movedCount: changes.length };
+  }
+
+  function removeFavorites(workIds) {
+    const ids = favoriteBatchIds(workIds);
+    const state = getUserState();
+    const removed = ids.filter((id) => Object.hasOwn(state.favorites, id));
+    if (removed.length) {
+      const favorites = { ...state.favorites };
+      for (const id of removed) delete favorites[id];
+      saveFolderChanges(state, state.favoriteFolders, favorites);
+    }
+    return { workIds: ids, removedCount: removed.length };
   }
 
   function toggleFavorite(workId, body = {}) {
@@ -194,6 +254,20 @@ export function createFavoriteStateService({
     };
   }
 
+  function saveFavoriteToFolder(workId, folderId) {
+    const state = getUserState();
+    const folders = state.favoriteFolders || userStateService.defaultFavoriteFolders();
+    if (typeof folderId !== "string" || !Object.hasOwn(folders, folderId)) {
+      throw folderError(404, "目标收藏夹不存在");
+    }
+    const previous = favoriteRecord(workId);
+    if (previous?.folderId !== folderId) {
+      const favorite = { createdAt: previous?.createdAt || new Date().toISOString(), folderId };
+      saveFolderChanges(state, folders, { ...state.favorites, [workId]: favorite });
+    }
+    return { workId, favorite: true, favoriteFolder: publicFavoriteForWork(workId), folders: publicFavoriteFolders() };
+  }
+
   function favoriteWorks(folderId = "") {
     const userState = getUserState();
     const library = getLibrary();
@@ -213,11 +287,15 @@ export function createFavoriteStateService({
     favoriteRecord,
     favoriteWorks,
     isFavoriteWork,
+    mergeFavoriteFolder,
     moveFavoriteToFolder,
+    moveFavoritesToFolder,
     normalizeFavoriteFolderId,
     publicFavoriteFolders,
     publicFavoriteForWork,
+    removeFavorites,
     renameFavoriteFolder,
+    saveFavoriteToFolder,
     toggleFavorite
   };
 }

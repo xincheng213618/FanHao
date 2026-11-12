@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isNamedSubtitleForVideo } from "../../../../../lib/subtitles.js";
 
 export function createLocalLibraryScanService({
   compareNaturalName,
@@ -32,18 +33,25 @@ export function createLocalLibraryScanService({
     });
   }
 
-  function walkFiles(rootDir) {
+  function readDirectory(directory, { requireCompleteScan = false } = {}) {
+    try {
+      return fs.readdirSync(directory, { withFileTypes: true });
+    } catch (cause) {
+      if (!requireCompleteScan) return [];
+      const error = new Error(`无法读取人物目录 ${directory}，已保留原有作品记录`, { cause });
+      error.statusCode = 409;
+      error.code = "PERSON_FOLDER_SCAN_INCOMPLETE";
+      throw error;
+    }
+  }
+
+  function walkFiles(rootDir, options) {
     const results = [];
     const stack = [rootDir];
 
     while (stack.length) {
       const current = stack.pop();
-      let entries = [];
-      try {
-        entries = fs.readdirSync(current, { withFileTypes: true });
-      } catch {
-        continue;
-      }
+      const entries = readDirectory(current, options);
 
       for (const entry of entries) {
         if (entry.isDirectory()) {
@@ -63,29 +71,11 @@ export function createLocalLibraryScanService({
     return results;
   }
 
-  function directChildDirectories(rootDir) {
-    try {
-      return fs
-        .readdirSync(rootDir, { withFileTypes: true })
-        .filter((entry) => {
-          if (!entry.isDirectory() || isExcludedDirName(entry.name)) return false;
-          return !pathWithinAnyRoot(path.join(rootDir, entry.name), excludedRoots);
-        })
-        .map((entry) => path.join(rootDir, entry.name));
-    } catch {
-      return [];
-    }
-  }
-
-  function directFiles(rootDir) {
-    try {
-      return fs
-        .readdirSync(rootDir, { withFileTypes: true })
-        .filter((entry) => entry.isFile())
-        .map((entry) => path.join(rootDir, entry.name));
-    } catch {
-      return [];
-    }
+  function directChildDirectories(rootDir, entries = readDirectory(rootDir)) {
+    return entries.filter((entry) => {
+      if (!entry.isDirectory() || isExcludedDirName(entry.name)) return false;
+      return !pathWithinAnyRoot(path.join(rootDir, entry.name), excludedRoots);
+    }).map((entry) => path.join(rootDir, entry.name));
   }
 
   function toMediaFile(fullPath, type) {
@@ -209,7 +199,7 @@ export function createLocalLibraryScanService({
   }
 
   function scanSingleVideoWorks(personId, personDir, options = {}) {
-    const files = walkFiles(personDir);
+    const files = walkFiles(personDir, options);
     const media = collectMediaFiles(files);
     const videoCountByDir = new Map();
     const filesByDir = new Map();
@@ -232,7 +222,8 @@ export function createLocalLibraryScanService({
         const matchingFiles = (filesByDir.get(videoDirKey) || []).filter((fullPath) => {
           if (fullPath === video.path) return true;
           if (!isImage(fullPath) && !isInfo(fullPath)) return false;
-          return isOnlyVideoInDir || fileBase(path.basename(fullPath)).toLowerCase() === videoBase;
+          const name = path.basename(fullPath);
+          return isOnlyVideoInDir || fileBase(name).toLowerCase() === videoBase || isNamedSubtitleForVideo(video.name, name);
         });
         return createWork(personId, video.name, videoDir, matchingFiles, video, { identityPath: video.path });
       })
@@ -248,9 +239,10 @@ export function createLocalLibraryScanService({
 
     const works = [];
 
-    const childDirs = directChildDirectories(personDir);
+    const entries = readDirectory(personDir, options);
+    const childDirs = directChildDirectories(personDir, entries);
     for (const childDir of childDirs) {
-      const childFiles = walkFiles(childDir);
+      const childFiles = walkFiles(childDir, options);
       const work = createWork(personId, path.basename(childDir), childDir, childFiles);
       if (work) {
         const linked = linkWork(personId, work, options);
@@ -258,12 +250,14 @@ export function createLocalLibraryScanService({
       }
     }
 
-    const rootFiles = directFiles(personDir);
+    const rootFiles = entries.filter((entry) => entry.isFile()).map((entry) => path.join(personDir, entry.name));
     const rootMedia = collectMediaFiles(rootFiles);
     for (const video of rootMedia.videos) {
       const matchingFiles = rootFiles.filter((fullPath) => {
-        const base = fileBase(path.basename(fullPath));
-        return fullPath === video.path || (base === fileBase(video.name) && (isImage(fullPath) || isInfo(fullPath)));
+        if (fullPath === video.path) return true;
+        if (!isImage(fullPath) && !isInfo(fullPath)) return false;
+        const name = path.basename(fullPath);
+        return fileBase(name) === fileBase(video.name) || isNamedSubtitleForVideo(video.name, name);
       });
       const work = createWork(personId, video.name, personDir, matchingFiles, video);
       if (work) {

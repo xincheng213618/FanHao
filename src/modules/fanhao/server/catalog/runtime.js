@@ -14,6 +14,15 @@ export function createCatalogRuntime(deps) {
       }
       return true;
     }
+    if (ltxService && url.pathname === "/api/fanhao/ltx/local-media" && req.method === "GET") {
+      if (!deps.ltx.requireLocalAdmin(req, res)) return true;
+      try {
+        deps.sendJson(res, 200, await ltxService.readLocalMedia(url.searchParams.get("code")));
+      } catch {
+        deps.sendJson(res, 503, { error: "暂时无法读取本地视频参数。" });
+      }
+      return true;
+    }
     if (ltxService && url.pathname === "/api/fanhao/ltx" && req.method === "GET") {
       if (!deps.ltx.requireLocalAdmin(req, res)) return true;
       try {
@@ -33,6 +42,7 @@ export function createCatalogRuntime(deps) {
   }
 
   return {
+    findIntakeMetadata: ltxService?.findIntakeMetadata,
     routeApi,
     start
   };

@@ -1,6 +1,7 @@
 import { classifyWorkCategory, normalizeWorkCategory, summarizeWorkCategories, WORK_CATEGORY_OPTIONS } from "./work-category.js";
 import { createWorkSorter } from "./work-sorter.js";
 import { createWeightedCacheBudget, normalizeWorkSortMode } from "./work-cache-budget.js";
+import { createWorkTitleMatcher } from "./work-title-search.js";
 import { deriveWorkTraits, isWorkTraitFilter as isTraitFilter, matchesWorkTraitFilter, mediaClassificationSearch, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
 
 const LIST_PAGE_CACHE_LIMIT = 96;
@@ -200,12 +201,15 @@ export function createWorkQueryService({
       case "hasMagnet":
         return publicWorkAvailability(work).hasMagnet === true;
       case "missingCover":
-        if (work.missingLocal) return false;
-        return !work.coverId && !workHasCoreCover(work.id);
+        return isMissingLocalCover(work);
       case "all":
       default:
         return true;
     }
+  }
+
+  function isMissingLocalCover(work) {
+    return !work.missingLocal && !work.coverId && !work.infoSummary?.imageUrl && !workHasCoreCover(work.id);
   }
 
   function sortWorkList(works, sort, options = {}) {
@@ -288,7 +292,7 @@ export function createWorkQueryService({
       case "vr": return isVrWork(work);
       case "localMarkedA": return workHasLocalMarker(work, "A");
       case "hasMagnet": return work.infoSummary?.hasMagnet === true;
-      case "missingCover": return !work.missingLocal && !work.coverId && !workHasCoreCover(work.id);
+      case "missingCover": return isMissingLocalCover(work);
       case "all":
       default: return true;
     }
@@ -329,7 +333,7 @@ export function createWorkQueryService({
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
       if (publicWorkAvailability(work).hasMagnet === true) facets.hasMagnet += 1;
-      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
+      if (isMissingLocalCover(work)) facets.missingCover += 1;
     }
 
     if (workInfoReadCacheable()) staticFacetCache.set(works, { stamp, facets });
@@ -383,7 +387,7 @@ export function createWorkQueryService({
       if (rating !== null && rating >= 4) facets.highRating += 1;
       if (isVrWork(work)) facets.vr += 1;
       if (work.infoSummary?.hasMagnet === true) facets.hasMagnet += 1;
-      if (!missingLocal && !work.coverId && !workHasCoreCover(work.id)) facets.missingCover += 1;
+      if (isMissingLocalCover(work)) facets.missingCover += 1;
     }
 
     return facets;
@@ -405,7 +409,7 @@ export function createWorkQueryService({
     const missing = pageSource.filter((work) => !preparedWorkEntry(work, options));
     if (missing.length) {
       const coverBatch = options.lightweightInfo && !options.includeCoreCovers
-        ? missing.filter((work) => work.missingLocal && !work.cachedCover?.coverUrl)
+        ? missing.filter((work) => work.missingLocal ? !work.cachedCover?.coverUrl : !work.coverId)
         : missing;
       if (coverBatch.length) prewarmCoreWorkCovers(coverBatch);
       if (!options.lightweightInfo) {
@@ -415,7 +419,10 @@ export function createWorkQueryService({
     }
     const page = pageSource.map((work) => preparedPublicWork(work, options));
     prewarmRemoteImagesForWorks(page);
-    const payload = { ...extra, count: page.length, total, limit, offset, sort, traitFacets: workTraitFacets(works), works: page };
+    const traitFacets = options.traitFacetSource
+      ? workTraitFacets(options.traitFacetSource, url)
+      : workTraitFacets(works);
+    const payload = { ...extra, count: page.length, total, limit, offset, sort, traitFacets, works: page };
     if (recordPerformanceSpan) recordPerformanceSpan("page-hydrate", performance.now() - pageStarted);
     return payload;
   }
@@ -490,11 +497,14 @@ export function createWorkQueryService({
     if (!matchedWorks) {
       const visibleWorks = workClassificationService.filterForRequest(sourceWorks, url, filter);
       const filters = requestedFilters(filter);
-      matchedWorks = visibleWorks;
-      if (filters.length) {
-        const stamp = currentStamp();
-        matchedWorks = visibleWorks.filter((work) => filters.every((item) => matchesFilter(work, item, stamp)));
-      }
+      const stamp = filters.length || options.titleQuery ? currentStamp() : "";
+      const matchesTitle = options.titleQuery
+        ? createWorkTitleMatcher(options.titleQuery, work => compactFacetRow(work, stamp)?.code)
+        : null;
+      matchedWorks = filters.length || matchesTitle
+        ? visibleWorks.filter(work => filters.every((item) => matchesFilter(work, item, stamp))
+          && (!matchesTitle || matchesTitle(work)))
+        : visibleWorks;
       cacheable = Boolean(filterContext) && filters.every((item) => cacheableFilters.has(item) || isTraitFilter(item));
     }
     const works = sortWorkList(matchedWorks, sort, options);
@@ -853,8 +863,8 @@ export function createWorkQueryService({
       const matchesMain = workMatcher("main");
       const works = (base?.works || allWorks()).filter((work) => !work.missingLocal
         && matchesMain(work)
-        && matchesWorkTraitFilter(traitsForWork(work, workStamp), classification.key)
-        && (!nextClassification || matchesWorkTraitFilter(traitsForWork(work, workStamp), nextClassification.key)));
+        && (classification.key === "all" || matchesWorkTraitFilter(traitsForWork(work, workStamp), classification.key))
+        && (!nextClassification || nextClassification.key === "all" || matchesWorkTraitFilter(traitsForWork(work, workStamp), nextClassification.key)));
       const source = makeSearchSource(works, [], base?.cacheable !== false);
       source.cacheable = source.cacheable && workInfoReadCacheable() && workSearchReadCacheable();
       if (source.cacheable) derivedBudget.write(searchSourceCache, cacheKey, source, works.length, 48);
@@ -950,7 +960,14 @@ export function createWorkQueryService({
     const { readProfile } = peopleSearch;
     const presentPerson = readProfile && peopleSearch.people.length && createPublicPersonPresenter
       ? createPublicPersonPresenter(readProfile) : publicPerson;
-    const people = peopleSearch.people.map((person) => presentPerson(person, { skipFallbackAvatar: true }));
+    const personScopes = ["main", "western"].map(scope => [scope,
+      peopleScopeService.personMatcher?.(scope)
+        || ((person) => peopleScopeService.personMatches?.(person, scope) ?? (scope === "main"))
+    ]);
+    const people = peopleSearch.people.map(person => ({
+      ...presentPerson(person, { skipFallbackAvatar: true }),
+      searchScopes: personScopes.filter(([, matches]) => matches(person)).map(([scope]) => scope)
+    }));
     const source = makeSearchSource(matchedWorks, people,
       readProfile?.cacheable !== false && rankingResult.cacheable !== false && actorResult.cacheable !== false
         && actorRowResults.every((result) => result.cacheable !== false));
@@ -1045,13 +1062,20 @@ export function createWorkQueryService({
     return traits;
   }
 
-  function workTraitFacets(works) {
+  function workTraitFacets(works, visibilityUrl = null) {
     const stamp = currentStamp();
     const cached = traitFacetCache.get(works);
-    if (cached?.stamp === stamp) return cached.facets;
-    const facets = summarizeWorkTraits(works, (work) => traitsForWork(work, stamp));
+    const byVisibility = cached?.stamp === stamp ? cached.byVisibility : new Map();
+    const key = visibilityUrl ? ["includeMissingLocal", "includeCompilation"]
+      .map((name) => !visibilityUrl.searchParams.has(name) || visibilityUrl.searchParams.get(name) === "1" ? "1" : "0").join("") : "";
+    if (byVisibility.has(key)) return byVisibility.get(key);
+    const source = visibilityUrl ? workClassificationService.filterForRequest(works, visibilityUrl) : works;
+    const facets = summarizeWorkTraits(source, (work) => traitsForWork(work, stamp));
     if (workInfoReadCacheable() && workSearchReadCacheable()
-      && !works.some((work) => work.missingCodeSearchPending && !work.missingCodeSearchTraitsReady)) traitFacetCache.set(works, { stamp, facets });
+      && !source.some((work) => work.missingCodeSearchPending && !work.missingCodeSearchTraitsReady)) {
+      byVisibility.set(key, facets);
+      traitFacetCache.set(works, { stamp, byVisibility });
+    }
     return facets;
   }
 

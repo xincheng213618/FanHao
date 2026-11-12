@@ -2,8 +2,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-// Current table definition from tools/manga_collector.py. Other schemas keep
+// Current table definitions from tools/manga_collector.py. Other schemas keep
 // the existing point reader, including ordering and failure isolation.
+const MANGA_CHAPTERS_TABLE_SQL = `CREATE TABLE manga_chapters (
+        cache_key TEXT NOT NULL,
+        chapter_index INTEGER NOT NULL,
+        slug TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL DEFAULT '',
+        html_path TEXT,
+        image_count INTEGER NOT NULL DEFAULT 0,
+        downloaded_count INTEGER NOT NULL DEFAULT 0,
+        skipped_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT '',
+        error TEXT,
+        PRIMARY KEY (cache_key, chapter_index),
+        FOREIGN KEY (cache_key) REFERENCES manga_comics(cache_key) ON DELETE CASCADE
+    )`;
 const MANGA_IMAGES_TABLE_SQL = `CREATE TABLE manga_images (
         cache_key TEXT NOT NULL,
         chapter_index INTEGER NOT NULL,
@@ -20,6 +36,7 @@ const MANGA_IMAGES_TABLE_SQL = `CREATE TABLE manga_images (
         FOREIGN KEY (cache_key, chapter_index)
             REFERENCES manga_chapters(cache_key, chapter_index) ON DELETE CASCADE
     )`;
+const MAX_DOWNLOAD_PAGE_ROWS = 20_000;
 
 function closeDatabase(state) {
   if (!state.db) return;
@@ -201,6 +218,53 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
     }
   }
 
+  function downloadChapters(cacheKey, expectedPages) {
+    if (!Number.isSafeInteger(expectedPages) || expectedPages < 1 || expectedPages > MAX_DOWNLOAD_PAGE_ROWS) return null;
+    const database = open();
+    if (!database) return null;
+    try {
+      // Read the chapter title and its image paths in the same snapshot.
+      const rows = database.prepare(`
+        WITH policy AS MATERIALIZED (
+          SELECT EXISTS (
+            SELECT 1 FROM main.sqlite_schema
+            WHERE type = 'table' AND name = 'manga_chapters' AND sql = ?
+          ) AND EXISTS (
+            SELECT 1 FROM main.sqlite_schema
+            WHERE type = 'table' AND name = 'manga_images' AND sql = ?
+          ) AND NOT EXISTS (
+            SELECT 1 FROM temp.sqlite_schema WHERE name COLLATE NOCASE IN ('manga_chapters', 'manga_images')
+          ) AS eligible
+        )
+        SELECT policy.eligible, chapter.chapter_index, chapter.title, image.image_index, image.local_path
+        FROM policy
+        LEFT JOIN main.manga_chapters AS chapter ON policy.eligible AND chapter.cache_key = ?
+        LEFT JOIN main.manga_images AS image
+          ON image.cache_key = chapter.cache_key AND image.chapter_index = chapter.chapter_index
+        ORDER BY chapter.chapter_index, image.image_index
+        LIMIT ?
+      `).all(MANGA_CHAPTERS_TABLE_SQL, MANGA_IMAGES_TABLE_SQL, cacheKey, expectedPages + 1);
+      if (rows[0]?.eligible !== 1 || rows[0].chapter_index === null || rows.length > expectedPages) return null;
+      const chapters = [];
+      let record;
+      for (const row of rows) {
+        const index = row.chapter_index;
+        // Nonstandard legacy indices still use the old ordinal fallback.
+        if (!Number.isFinite(index) || index <= 0) return null;
+        if (record?.chapter.index !== index) {
+          const title = String(row.title || `第 ${index} 话`).trim();
+          record = { chapter: { index, title }, images: [] };
+          chapters.push(record);
+        }
+        if (row.image_index !== null) record.images.push({ index: Number(row.image_index || 0), local_path: row.local_path || null });
+      }
+      return chapters;
+    } catch {
+      // Keep the existing per-chapter path for older or unavailable databases.
+      return null;
+    }
+  }
+
   function image(cacheKey, chapterIndex, imageIndex) {
     const database = open();
     if (!database) return null;
@@ -288,5 +352,5 @@ export function createMangaDatabaseReader({ dbPath } = {}) {
     }
   }
 
-  return { chapter, chapters, comic, comics, comicSummaries, firstImage, detailFirstImages, summaryFirstImages, image, images, lookupStamp, status };
+  return { chapter, chapters, comic, comics, comicSummaries, firstImage, detailFirstImages, summaryFirstImages, image, images, downloadChapters, lookupStamp, status };
 }

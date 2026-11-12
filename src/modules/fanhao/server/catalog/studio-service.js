@@ -179,13 +179,15 @@ export function createStudioService({
     const sync = ensureCatalog();
     const limit = clampInteger(url.searchParams.get("limit"), 120, 1, 1000);
     const q = String(url.searchParams.get("q") || "").trim().toLowerCase();
+    const localFirst = url.searchParams.get("sort") === "localCount";
     ensureSummaryPayloadCache(sync.stamp);
-    const cacheKey = `${q}:${limit}`;
+    const cacheKey = JSON.stringify([q, limit, localFirst]);
     const cached = readLru(studioSummaryPayloadCache, cacheKey);
     if (cached) return cached;
-    const rows = q ? querySummaryRows(q, limit) : cachedSummaryRows(sync.stamp).slice(0, limit);
+    const rows = q || localFirst ? querySummaryRows(q, limit, localFirst) : cachedSummaryRows(sync.stamp).slice(0, limit);
     const makers = rows.map(publicMakerSummary);
     const payload = { sync, count: makers.length, makers };
+    if (localFirst) payload.total = q ? Number(rows[0]?.matched_count || 0) : sync.makerCount;
     writeLru(studioSummaryPayloadCache, cacheKey, payload, STUDIO_SUMMARY_CACHE_LIMIT);
     return payload;
   }
@@ -203,7 +205,9 @@ export function createStudioService({
     return rows;
   }
 
-  function querySummaryRows(q, limit) {
+  function querySummaryRows(q, limit, localFirst = false) {
+    const like = localFirst ? "LIKE ? ESCAPE '\\'" : "LIKE ?";
+    const term = localFirst ? q.replace(/[\\%_]/g, "\\$&") : q;
     return getCoreDb()
       .prepare(
         `
@@ -217,18 +221,19 @@ export function createStudioService({
           COUNT(DISTINCT lw.work_id) AS local_work_count,
           MIN(w.release_date) AS first_release_date,
           MAX(w.release_date) AS latest_release_date
+          ${localFirst && q ? ", COUNT(*) OVER () AS matched_count" : ""}
         FROM makers m
         LEFT JOIN maker_external_refs ref ON ref.maker_id = m.id
         LEFT JOIN work_makers wm ON wm.maker_id = m.id
         LEFT JOIN works w ON w.id = wm.work_id
         LEFT JOIN local_works lw ON lw.work_id = wm.work_id
-        WHERE (? = '' OR m.name_search LIKE ? OR m.name LIKE ?)
+        WHERE (? = '' OR m.name_search ${like} OR m.name ${like})
         GROUP BY m.id
-        ORDER BY work_count DESC, name
+        ORDER BY ${localFirst ? "local_work_count DESC, m.name, m.id" : "work_count DESC, name"}
         LIMIT ?
         `
       )
-      .all(q, `%${q}%`, `%${q}%`, limit);
+      .all(q, `%${term}%`, `%${term}%`, limit);
   }
 
   function prewarm() {

@@ -9,6 +9,7 @@ import { performance } from "node:perf_hooks";
 import { createAccessAnalyticsService } from "../src/modules/system/server/access-analytics-service.js";
 import { createIpRegionService, parseIp2Region } from "../src/modules/system/server/ip-region-service.js";
 import { routeAdminApi } from "../src/modules/system/server/admin/routes.js";
+import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const LEGACY_STATS_PAYLOAD = `  async function statsPayload(url) {
@@ -691,4 +692,52 @@ assert.equal(bootstrapped.visitors[0].ip, "9.9.9.9");
 await bootstrapService.close();
 
 fs.rmSync(tempDir, { recursive: true, force: true });
+const retryFixture = createVerifiedTempDir("fanhao-access-bootstrap-retry-");
+const retryLog = path.join(retryFixture.tempDir, "access.log");
+fs.writeFileSync(retryLog, ["9.9.9.9", "8.8.8.8"].map((remote, index) => JSON.stringify({
+  time: new Date(Date.now() - (120_000 - index * 60_000)).toISOString(),
+  method: "GET", path: "/fanhao", status: 200, remote, access: "remote", auth: "password"
+})).join("\n"));
+const retryDbPath = path.join(retryFixture.tempDir, "retry.sqlite");
+const retryDb = new DatabaseSync(retryDbPath);
+let failGeo = true;
+const recovering = createAccessAnalyticsService({
+  dbPath: retryDbPath, createDatabase: () => retryDb, maxPending: 1,
+  ipRegionService: { ...geo, async lookup(ip) {
+    if (failGeo && ip === "8.8.8.8") throw new Error("controlled bootstrap lookup failure");
+    return geo.lookup(ip);
+  } }
+});
+try {
+  const counts = () => retryDb.prepare("SELECT SUM(request_count) AS n FROM access_daily").get().n || 0;
+  const completed = () => retryDb.prepare("SELECT value FROM access_meta WHERE key = 'access_log_bootstrap_v1'").get();
+  recovering.record({ method: "GET" }, { statusCode: 200 }, new URL("http://localhost/fanhao"), { access: { clientAddress: "1.2.3.4" } });
+  await recovering.flush();
+  await assert.rejects(recovering.bootstrapFromAccessLogs([retryLog]), /controlled bootstrap lookup failure/);
+  assert.equal(counts(), 1, "a later historical lookup failure must not leave a partial import");
+  assert.equal(completed(), undefined);
+
+  failGeo = false;
+  retryDb.exec(`CREATE TRIGGER fail_bootstrap_receipt BEFORE INSERT ON access_meta
+    BEGIN SELECT RAISE(ABORT, 'controlled receipt failure'); END`);
+  await assert.rejects(recovering.bootstrapFromAccessLogs([retryLog]), /controlled receipt failure/);
+  assert.equal(counts(), 1, "history and its completion receipt must roll back together");
+  assert.equal(completed(), undefined);
+  retryDb.exec("DROP TRIGGER fail_bootstrap_receipt");
+
+  const contender = createAccessAnalyticsService({ dbPath: retryDbPath, maxPending: 1, ipRegionService: geo });
+  try {
+    const first = recovering.bootstrapFromAccessLogs([retryLog]);
+    assert.strictEqual(recovering.bootstrapFromAccessLogs([retryLog]), first, "one service must share an active historical import");
+    const results = await Promise.all([first, contender.bootstrapFromAccessLogs([retryLog])]);
+    assert.equal(results.filter(result => result.skipped).length, 1, "only one connection may publish the historical import");
+    assert.equal(results.reduce((total, result) => total + result.imported, 0), 2);
+    assert.equal(counts(), 3, "retry adds each historical request exactly once while preserving live counters");
+    assert.equal(JSON.parse(completed().value).imported, 2);
+  } finally { await contender.close(); }
+} finally {
+  failGeo = false;
+  try { await recovering.close(); }
+  finally { retryFixture.cleanup(); }
+}
 console.log("access analytics verification passed");

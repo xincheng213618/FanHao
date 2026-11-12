@@ -6,6 +6,7 @@ export async function routeNovelApi(req, res, url, deps) {
     readJsonBody,
     reimportService,
     requireLocalAdmin = () => true,
+    searchBookText,
     sendJson: sendJsonResponse,
     novelUploadMaxBodyBytes = 80 * 1024 * 1024
   } = deps;
@@ -219,6 +220,15 @@ export async function routeNovelApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/novels/bookmarks/books" && req.method === "GET") {
+    try {
+      sendJson(res, 200, novelStore.bookmarkBooks(url.searchParams.getAll("id"), url.searchParams.get("sourceRealm")));
+    } catch (error) {
+      sendJson(res, error.statusCode || 500, { error: error.message || "书签书目读取失败" });
+    }
+    return true;
+  }
+
   const catalogMatch = /^\/api\/novels\/([^/]+)\/catalog$/.exec(url.pathname);
   if (catalogMatch && req.method === "GET") {
     try {
@@ -230,6 +240,37 @@ export async function routeNovelApi(req, res, url, deps) {
       sendJson(res, 200, data);
     } catch (error) {
       sendJson(res, error.statusCode || 500, { error: error.message || "章节目录读取失败" });
+    }
+    return true;
+  }
+
+  const textSearchMatch = /^\/api\/novels\/([^/]+)\/search-text$/.exec(url.pathname);
+  if (textSearchMatch && req.method === "GET") {
+    if (!searchBookText) { notFound(res); return true; }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    req.once?.("aborted", abort);
+    res.once?.("close", abort);
+    try {
+      if (req.aborted || res.destroyed) return true;
+      const query = String(url.searchParams.get("q") || "").trim();
+      const after = Number(url.searchParams.get("after") || 0);
+      if (!query || query.length > 120 || !Number.isSafeInteger(after) || after < 0) {
+        sendJson(res, 400, { error: "请输入 1 到 120 个字符，并使用有效的搜索位置" });
+        return true;
+      }
+      const data = await searchBookText(decodeURIComponent(textSearchMatch[1]), { query, after,
+        sourceRealm: url.searchParams.get("sourceRealm") ?? undefined,
+        catalogRevision: url.searchParams.get("catalogRevision") ?? undefined }, { signal: controller.signal });
+      if (!controller.signal.aborted) {
+        if (data) sendJson(res, 200, data);
+        else notFound(res);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) sendJson(res, error.statusCode || 500, { error: error.statusCode ? error.message : "全书正文搜索失败，请重试" });
+    } finally {
+      req.removeListener?.("aborted", abort);
+      res.removeListener?.("close", abort);
     }
     return true;
   }

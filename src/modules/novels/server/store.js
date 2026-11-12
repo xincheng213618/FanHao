@@ -127,6 +127,14 @@ const PROGRESS_COLUMNS = `s.chapter_id AS progress_chapter_id, s.chapter_index A
   s.scroll_ratio AS progress_scroll_ratio, s.updated_at AS progress_updated_at,
   s.catalog_revision AS progress_revision, s.status AS progress_status,
   s.reason AS progress_reason, s.anchor_json AS progress_anchor, s.candidate_json AS progress_candidate`;
+const CURRENT_READING = "(s.status = 'resolved' AND s.catalog_revision IS b.catalog_revision AND COALESCE(s.chapter_index, 0) > 0)";
+const FINISHED_READING = "(s.chapter_index = COALESCE(b.chapter_count, 0) AND COALESCE(s.scroll_ratio, 0) >= 1)";
+const READING_FILTERS = new Map([
+  ["unread", "s.book_id IS NULL"],
+  ["reading", `${CURRENT_READING} AND NOT ${FINISHED_READING}`],
+  ["finished", `${CURRENT_READING} AND ${FINISHED_READING}`],
+  ["review", `s.book_id IS NOT NULL AND NOT COALESCE(${CURRENT_READING}, 0)`]
+]);
 
 function canDriveRecentReadingFromState(database) {
   try {
@@ -367,6 +375,8 @@ export function createNovelStore(options = {}) {
       const category = String(url.searchParams.get("category") || "all").trim() || "all";
       const author = String(url.searchParams.get("author") || "").trim();
       const readingOnly = ["1", "true", "yes"].includes(String(url.searchParams.get("reading") || "").toLowerCase());
+      const readingStatus = url.searchParams.get("readingStatus");
+      const readingCondition = READING_FILTERS.get(readingStatus);
       const sort = normalizeSort(url.searchParams.get("sort"));
       const limit = clampInteger(url.searchParams.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
       const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
@@ -374,6 +384,7 @@ export function createNovelStore(options = {}) {
       const params = [];
       const indexedAuthor = Boolean(author) && (authorIndexAvailable ?? hasStandardIndexedBookSchema(database));
       if (readingOnly) conditions.push("EXISTS (SELECT 1 FROM novel_reading_state rs WHERE rs.book_id = b.id)");
+      if (readingCondition) conditions.push(readingCondition);
       if (category !== "all") {
         conditions.push("COALESCE(b.category, '全部') = ?");
         params.push(category);
@@ -399,11 +410,13 @@ export function createNovelStore(options = {}) {
       // Stabilize the standard producer's previous rowid tie order only in the
       // qualified author path. Other and legacy queries retain their old order.
       const order = bookOrderSql(sort) + (indexedAuthor ? (sort === "updated" ? ", b.rowid DESC" : ", b.rowid ASC") : "");
-      const countFrom = readingOnly
-        ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
-        : "novel_books b";
+      const countFrom = readingCondition
+        ? "novel_books b LEFT JOIN novel_reading_state s ON s.book_id = b.id"
+        : readingOnly
+          ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
+          : "novel_books b";
       let cachedSummary = null;
-      if (!query && !author && !readingOnly && category === "all" && summaryStaticCache && readSummaryCacheStable) {
+      if (!query && !author && !readingOnly && !readingCondition && category === "all" && summaryStaticCache && readSummaryCacheStable) {
         // The static summary counts the same active books in this snapshot.
         try { cachedSummary = staticSummaryFromDb(database, sourceRealm, { cachedOnly: true }); }
         catch {}
@@ -432,7 +445,7 @@ export function createNovelStore(options = {}) {
         `;
       const page = database.prepare(pageSql);
       const total = Number(countRow?.count || 0);
-      const rankedPage = sort === "updated" && !query && !author && !readingOnly && category === "all"
+      const rankedPage = sort === "updated" && !query && !author && !readingOnly && !readingCondition && category === "all"
         && total >= 4096 && offset < total && limit <= 256
         ? prepareRecentBookPage(database, pageSql, limit, offset) : null;
       const rows = (rankedPage ?? page).all(...params, limit, offset);
@@ -449,6 +462,7 @@ export function createNovelStore(options = {}) {
         category,
         author,
         readingOnly,
+        ...(readingCondition ? { readingStatus } : {}),
         sort,
         facets: summary.categories,
         summary
@@ -524,7 +538,7 @@ export function createNovelStore(options = {}) {
       // that count to bound the cost of restoring table order.
       const profileIndexLimit = Math.min(MAX_AUTHOR_PROFILE_INDEX_ROWS, page.summary.totals.books / 8);
       const indexedProfile = indexedAuthor && page.author === author
-        && !page.query && !page.readingOnly && page.category === "all" && page.total <= profileIndexLimit;
+        && !page.query && !page.readingOnly && !page.readingStatus && page.category === "all" && page.total <= profileIndexLimit;
       // Select the author's index range, then restore table order before SUM
       // so legacy numeric values retain the original accumulation behavior.
       const profileSource = indexedProfile ? `(
@@ -573,6 +587,21 @@ export function createNovelStore(options = {}) {
       return book
         ? { serverClockMs: progressServerClock(database), sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision, book, chapters: [], chapterTotal: Number(book.chapterCount || 0), catalogLoaded: false }
         : null;
+    });
+  }
+
+  function bookmarkBooks(bookIds, expectedRealm) {
+    if (!Array.isArray(bookIds) || !bookIds.length || bookIds.length > 50
+        || bookIds.some(id => typeof id !== "string" || !id || id.length > 200)) {
+      throw httpError(400, "请选择 1 至 50 本书籍");
+    }
+    const ids = [...new Set(bookIds)];
+    return withReadDb((database) => {
+      const sourceRealm = sourceRealmFromDb(database);
+      if (expectedRealm !== sourceRealm) throw httpError(409, "小说库来源已变化，请刷新后重试");
+      const books = database.prepare(`SELECT id, title, catalog_revision AS catalogRevision FROM novel_books
+        WHERE status = 'ok' AND id IN (${ids.map(() => "?").join(",")})`).all(...ids);
+      return { sourceRealm, books };
     });
   }
 
@@ -737,6 +766,37 @@ export function createNovelStore(options = {}) {
     });
   }
 
+  function searchBookText(bookId, { query, after = 0, sourceRealm, catalogRevision } = {}) {
+    const text = String(query || "").trim();
+    if (!text || text.length > 120 || !Number.isSafeInteger(after) || after < 0) {
+      throw httpError(400, "请输入 1 到 120 个字符，并使用有效的搜索位置");
+    }
+    const pattern = new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu");
+    return withReadDb(database => {
+      const book = bookRecordFromDb(database, bookId);
+      if (!book) return null;
+      checkBookPreconditions(book, { sourceRealm, catalogRevision });
+      const matches = [], limit = 20;
+      let hasMore = false;
+      const chapters = database.prepare(`SELECT id, chapter_index, title, content FROM novel_chapters
+        WHERE book_id = ? AND chapter_index > ? ORDER BY chapter_index`).iterate(bookId, after);
+      for (const chapter of chapters) {
+        const match = pattern.exec(chapter.content);
+        if (!match) continue;
+        if (matches.length === limit) { hasMore = true; break; }
+        const start = Math.max(0, match.index - 42);
+        const matchEnd = match.index + match[0].length;
+        const end = Math.min(chapter.content.length, matchEnd + 64);
+        const display = value => value.toWellFormed().replace(/\s+/gu, " ");
+        matches.push({ id: chapter.id, index: chapter.chapter_index, title: chapter.title,
+          before: (start ? "…" : "") + display(chapter.content.slice(start, match.index)),
+          match: display(match[0]), after: display(chapter.content.slice(matchEnd, end)) + (end < chapter.content.length ? "…" : "") });
+      }
+      return { bookId, sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision,
+        query: text, matches, nextAfter: hasMore ? matches.at(-1).index : null };
+    });
+  }
+
   function catalog(bookId, url) {
     return withReadDb((database) => {
       const book = bookRecordFromDb(database, bookId);
@@ -862,6 +922,9 @@ export function createNovelStore(options = {}) {
   function openDownload(bookId) {
     const database = new DatabaseSync(dbPath, { readOnly: true });
     try {
+      // Pin one revision before reading the title. The response may wait for
+      // backpressure before the chapter iterator makes its first SQLite read.
+      database.exec("BEGIN DEFERRED");
       // This internal DTO only supplies TXT headers; downloads remain read-only
       // even for a legacy database which has not yet received a library_id.
       const book = bookRecordFromDb(database, bookId, { includeRealm: false });
@@ -903,6 +966,7 @@ export function createNovelStore(options = {}) {
             iterator.return?.();
           } catch {}
           try {
+            // Closing the dedicated connection also releases its read snapshot.
             database.close();
           } catch {}
         }
@@ -1062,6 +1126,7 @@ export function createNovelStore(options = {}) {
     authorDetail,
     bookDetail,
     bookMeta,
+    bookmarkBooks,
     catalog,
     chapterDetail,
     deleteBook,
@@ -1077,6 +1142,7 @@ export function createNovelStore(options = {}) {
     readWriteReceipt,
     releaseWriteReceipts,
     saveProgress,
+    searchBookText,
     writeIdentity,
     writeIdentityRecord,
     summary,

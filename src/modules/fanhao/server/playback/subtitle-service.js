@@ -10,8 +10,10 @@ import { writeSubtitleBesideVideo, discoverVideoSubtitles } from "./subtitle-sid
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_SAVED_TRACKS = 32;
 const MAX_ACTIVE = 8;
+const languageNames = new Intl.DisplayNames("zh-CN", { type: "language" });
 const digest = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const failure = (message, statusCode = 400, code = "SUBTITLE_INVALID") => Object.assign(new Error(message), { statusCode, code });
+const subtitlePathKey = (value) => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
 
 export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVideo = null,
   provider = createSubtitlecatProvider({ maxDownloadBytes: MAX_BYTES }), stopWaitMs = 10000 }) {
@@ -121,10 +123,20 @@ export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVid
   async function tracksFor(ctx, signal) {
     const indexed = (ctx.work.infos || []).filter((file) => isSubtitleFile(file.name || file.path || ""));
     const discovered = await discoverVideoSubtitles(ctx.video, { roots, signal });
-    const subtitles = [...new Map([...indexed, ...discovered].map(file => [path.resolve(file.path), file])).values()];
+    const subtitles = [...new Map([...indexed, ...discovered].map(file => [subtitlePathKey(file.path), file])).values()];
     const local = matchSubtitleCandidates(ctx.video, ctx.work.videos || [], subtitles)
-      .map((item) => ({ ...item, ...item.file, id: `local:${Buffer.from(String(item.file.id)).toString("base64url")}`, source: "local", language: item.language || "und" }));
-    const cached = (await savedTracks(ctx, signal)).filter(track => !track.sidecarName || !local.some(file => path.resolve(file.path) === path.resolve(path.dirname(ctx.video.path), track.sidecarName)));
+      .map((item) => {
+        const { file } = item;
+        const track = { ...item, ...file, id: `local:${Buffer.from(String(file.id)).toString("base64url")}`, source: "local", language: item.language || "und" };
+        if (file.sidecarLanguage && (track.language !== file.sidecarLanguage || track.match === "manual")) {
+          track.language = file.sidecarLanguage;
+          track.match = "language";
+          track.label = `${languageNames.of(track.language)} · 匹配文件名`;
+        }
+        return track;
+      });
+    const localPaths = new Set(local.map(file => subtitlePathKey(file.path)));
+    const cached = (await savedTracks(ctx, signal)).filter(track => !track.sidecarName || !localPaths.has(subtitlePathKey(path.join(path.dirname(ctx.video.path), track.sidecarName))));
     const tracks = [...local, ...cached];
     const preferred = tracks.filter((track) => /^zh(?:-|$)/i.test(track.language) && track.match !== "manual");
     return tracks.map((track) => ({ ...track, autoSelect: preferred.length === 1 && preferred[0] === track }));
@@ -139,8 +151,21 @@ export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVid
   }
 
   async function listValue(ctx, signal) {
-    const tracks = (await tracksFor(ctx, signal)).map((track) => publicTrack(track, ctx));
-    return { workId: String(ctx.work.id), videoId: String(ctx.video.id), query: defaultQuery(ctx), tracks, maxUploadBytes: MAX_BYTES };
+    return subtitleList(ctx, await tracksFor(ctx, signal));
+  }
+
+  function subtitleList(ctx, tracks) {
+    return { workId: String(ctx.work.id), videoId: String(ctx.video.id), query: defaultQuery(ctx),
+      tracks: tracks.map(track => publicTrack(track, ctx)), maxUploadBytes: MAX_BYTES };
+  }
+
+  async function savedTrackResult(ctx, signal, cacheId, sidecar) {
+    const tracks = await tracksFor(ctx, signal);
+    const result = subtitleList(ctx, tracks);
+    const sidecarPath = sidecar && subtitlePathKey(sidecar.path);
+    const localIndex = sidecarPath ? tracks.findIndex(track => track.source === "local" && subtitlePathKey(track.path) === sidecarPath) : -1;
+    const track = localIndex >= 0 ? result.tracks[localIndex] : result.tracks.find(item => item.id === cacheId);
+    return { ...result, track, ...(sidecar ? { sidecarName: sidecar.name, savedBesideVideo: true } : {}) };
   }
 
   function list(workId, videoId, { signal } = {}) { return run((abort) => listValue(context(workId, videoId), abort), signal); }
@@ -182,7 +207,7 @@ export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVid
     return run((abort) => { context(workId, videoId); return provider.files(resultId, { signal: abort }); }, signal);
   }
 
-  async function save(ctx, bytes, { name, source, language = "und", sourceUrl = "", sidecarName = "" }, signal) {
+  async function save(ctx, bytes, { name, source, language = "und", sourceUrl = "", sidecar = null }, signal) {
     if (!bytes.length || bytes.length > MAX_BYTES) throw failure("字幕为空或超过 2 MiB", 413, "SUBTITLE_TOO_LARGE");
     const basename = path.basename(String(name || "subtitle.srt").replaceAll("\\", "/")).replace(/[\x00-\x1f\x7f]/g, "");
     if (!isSubtitleFile(basename)) throw failure("请选择 SRT、ASS、SSA 或 VTT 字幕");
@@ -194,16 +219,23 @@ export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVid
       signal.throwIfAborted();
       await checkedCacheDirectory(ctx.directory, true);
       const hash = digest(bytes), file = hash + path.extname(safeName).toLowerCase();
+      const cacheId = `cache:${hash}`;
+      const sidecarName = sidecar?.name || "";
       const saved = await savedTracks(ctx, signal);
-      const existing = saved.find((track) => track.id === `cache:${hash}`);
+      const existing = saved.find((track) => track.id === cacheId);
       if (existing) {
         if (digest(await readFile(existing.path, [base], signal)) !== hash) throw failure("字幕缓存内容校验失败", 409, "SUBTITLE_CACHE_CHANGED");
         if (!sidecarName || existing.sidecarName === sidecarName) {
-          const result = await listValue(ctx, signal);
-          return { ...result, track: result.tracks.find(track => track.id === existing.id || sidecarName && track.name === sidecarName), ...(sidecarName ? { sidecarName, savedBesideVideo: true } : {}) };
+          return savedTrackResult(ctx, signal, cacheId, sidecar);
         }
       }
-      if (!existing && saved.length >= MAX_SAVED_TRACKS) throw failure("当前视频已保存 32 条字幕，请使用已有字幕", 409, "SUBTITLE_CACHE_LIMIT");
+      if (!existing && saved.length >= MAX_SAVED_TRACKS) {
+        if (sidecar) {
+          const result = await savedTrackResult(ctx, signal, cacheId, sidecar);
+          if (result.track) return result;
+        }
+        throw failure("当前视频已保存 32 条字幕，请使用已有字幕", 409, "SUBTITLE_CACHE_LIMIT");
+      }
       const destination = path.join(ctx.directory, file);
       const rawTemporary = path.join(ctx.directory, `${hash}.${crypto.randomUUID()}.raw.tmp`);
       try {
@@ -226,8 +258,7 @@ export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVid
         signal.throwIfAborted();
         await fsp.rename(temporary, path.join(ctx.directory, hash + ".json"));
       } finally { await fsp.unlink(temporary).catch(() => {}); }
-      const result = await listValue(ctx, signal);
-      return { ...result, track: result.tracks.find((track) => track.id === `cache:${hash}` || sidecarName && track.name === sidecarName), ...(sidecarName ? { sidecarName, savedBesideVideo: true } : {}) };
+      return savedTrackResult(ctx, signal, cacheId, sidecar);
     });
     writes.set(ctx.directory, task);
     try { return await task; } finally { if (writes.get(ctx.directory) === task) writes.delete(ctx.directory); }
@@ -255,7 +286,7 @@ export function createSubtitleService({ cacheDir, roots, resolveWork, resolveVid
       const bytes = Buffer.from(file.bytes), language = file.languageCode || file.language || "und";
       convertSubtitle(bytes, { name: file.name });
       const sidecar = await writeSubtitleBesideVideo(ctx.video, bytes, { name: file.name, language, roots, signal: abort });
-      return save(ctx, bytes, { name: sidecar.name, sidecarName: sidecar.name, source: "SubtitleCat", language, sourceUrl: file.sourceUrl }, abort);
+      return save(ctx, bytes, { name: sidecar.name, sidecar, source: "SubtitleCat", language, sourceUrl: file.sourceUrl }, abort);
     }, signal);
   }
 

@@ -4,6 +4,7 @@ import {
   workCodePrefixForWork
 } from "../works/work-code-prefix.js";
 import { createWeightedCacheBudget } from "../works/work-cache-budget.js";
+import { lookupWorkCodes } from "./code-batch-lookup.js";
 
 const DETAIL_SOURCE_CACHE_LIMIT = 96;
 const DETAIL_RESULT_CACHE_LIMIT = 96;
@@ -25,6 +26,8 @@ export function createCodePrefixService({
   getLibrary,
   getStamp,
   hydrateMissingSearchWorks = () => {},
+  localWorkByCodeKey,
+  localSearchWorkByCodeKey,
   maxWorkLimit,
   pagedWorksPayload,
   sortWorkList,
@@ -108,6 +111,18 @@ export function createCodePrefixService({
 
   function detailPayload(rawPrefix, url) {
     return withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => detailPayloadValue(rawPrefix, url)).value).value;
+  }
+
+  function lookupPayload(input) {
+    const result = withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => lookupWorkCodes(input, {
+      localByCodeKey: localWorkByCodeKey,
+      localByExactCode: localSearchWorkByCodeKey,
+      searchMissing: (code) => fastMissingCodeSearch(code, { exact: true })
+    })));
+    if (result.cacheable === false || result.value.cacheable === false) {
+      throw Object.assign(new Error("番号索引暂时读不完整，请重试。"), { statusCode: 503 });
+    }
+    return result.value.value;
   }
 
   function detailPayloadValue(rawPrefix, url) {
@@ -296,6 +311,7 @@ export function createCodePrefixService({
   return {
     detailPayload,
     invalidate,
+    lookupPayload,
     prewarm,
     summaries
   };

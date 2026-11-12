@@ -6,7 +6,7 @@ import vm from "node:vm";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createServerConfig } from "../src/bootstrap/server-config.js";
 import { CURRENT_INDEX_SCHEMA, PARSER_VERSION, imageLibraryCacheIdentity } from "../src/modules/content-index/server/image-library-index-contract.js";
 import { createImageLibraryIndexService } from "../src/modules/content-index/server/image-library-index-service.js";
@@ -41,7 +41,8 @@ try {
     FANHAO_TV_ROOTS: tvRoot,
     FANHAO_ANIME_ROOTS: animeRoot
   };
-  const run = (scope = "all", overrides = {}) => spawnSync(process.execPath, ["tools/rescan_image_library.mjs", "--scope", scope], {
+  const run = (scope = "all", overrides = {}, preload = null) => spawnSync(process.execPath,
+    [...(preload ? ["--import", pathToFileURL(preload).href] : []), "tools/rescan_image_library.mjs", "--scope", scope], {
     cwd: repoRoot, encoding: "utf8", env: { ...env, ...overrides }, windowsHide: true
   });
   const firstRun = run();
@@ -85,6 +86,8 @@ try {
   assert.notEqual(disconnected.status, 0);
   assert.match(disconnected.stderr, /原图库目录暂不可用/);
   assert.deepEqual(readPublication(detachedData), prior);
+  verifyMediaRootAvailability({ tempDir, run });
+  verifyRootReconfiguration({ tempDir, run });
   await verifyPhotoSetLookup(photoRoot);
   verifyScanCollation({ photoRoot, movieRoot, dataDir, env, run });
   console.log("rescan-image-library: ok");
@@ -99,11 +102,191 @@ function readPublication(dataDir) {
     return {
       photoRevision: db.prepare("SELECT revision FROM photo_library_snapshot WHERE id=1").get()?.revision,
       mediaRevision: db.prepare("SELECT revision FROM gallery_media_library_snapshot WHERE id=1").get()?.revision,
+      photoRoots: JSON.parse(db.prepare("SELECT roots_json FROM photo_library_snapshot WHERE id=1").get()?.roots_json || "[]"),
+      mediaRoots: JSON.parse(db.prepare("SELECT roots_json FROM gallery_media_library_snapshot WHERE id=1").get()?.roots_json || "[]"),
       photoSets: rows("photo_library_archives"), mediaItems: rows("gallery_media_library_items")
     };
   } finally {
     db.close();
   }
+}
+
+function verifyMediaRootAvailability({ tempDir, run }) {
+  const movie = path.join(tempDir, "detachable-movie");
+  const tv = path.join(tempDir, "available-tv");
+  const missingAnime = path.join(tempDir, "never-indexed-anime");
+  const data = path.join(tempDir, "media-availability-data");
+  const nested = path.join(movie, "nested");
+  fs.mkdirSync(movie);
+  fs.mkdirSync(nested);
+  fs.mkdirSync(tv);
+  const movieFile = path.join(nested, "film.mp4");
+  fs.writeFileSync(movieFile, "movie fixture");
+  fs.writeFileSync(path.join(tv, "episode-1.mp4"), "TV fixture");
+  const config = { FANHAO_DATA_DIR: data, FANHAO_MOVIE_ROOTS: movie, FANHAO_TV_ROOTS: tv, FANHAO_ANIME_ROOTS: missingAnime };
+  const publish = run("all", config);
+  assert.equal(publish.status, 0, publish.stderr || publish.stdout);
+  const prior = readPublication(data);
+  assert.equal(prior.mediaRoots.find(root => root.root === missingAnime)?.exists, false, "a never-indexed optional root can be absent");
+  const preload = path.join(tempDir, "inject-media-scan-fault.mjs");
+  fs.writeFileSync(preload, `
+    import fs from "node:fs";
+    const fault = process.env.FANHAO_FIXTURE_SCAN_FAULT;
+    const target = process.env.FANHAO_FIXTURE_SCAN_PATH;
+    const accessError = () => Object.assign(new Error("fixture access failure"), { code: "EACCES" });
+    const readdir = fs.readdirSync;
+    const lstat = fs.lstatSync;
+    const stat = fs.statSync;
+    let rootReads = 0;
+    fs.readdirSync = function (file, options) {
+      if (fault === "directory" && file === target) throw accessError();
+      return readdir.call(this, file, options);
+    };
+    fs.lstatSync = function (file, options) {
+      if (fault === "file" && file === target) throw accessError();
+      return lstat.call(this, file, options);
+    };
+    fs.statSync = function (file, options) {
+      const result = stat.call(this, file, options);
+      if (fault === "root-replaced" && file === target && options?.bigint && ++rootReads === 2) result.ino += 1n;
+      return result;
+    };
+  `);
+  for (const [fault, target, error] of [
+    ["directory", nested, /fixture access failure/], ["file", movieFile, /fixture access failure/],
+    ["root-replaced", movie, /扫描期间影视目录已变化/]
+  ]) {
+    const interrupted = run("movie", { ...config, FANHAO_FIXTURE_SCAN_FAULT: fault, FANHAO_FIXTURE_SCAN_PATH: target }, preload);
+    assert.notEqual(interrupted.status, 0, `a ${fault} fault must not publish`);
+    assert.match(interrupted.stderr, error);
+    assert.deepEqual(readPublication(data), prior);
+  }
+  fs.unlinkSync(movieFile);
+  fs.rmdirSync(nested);
+  fs.rmdirSync(movie);
+  for (const scope of ["movie", "media", "all"]) {
+    const disconnected = run(scope, config);
+    assert.notEqual(disconnected.status, 0, "an unavailable previously published movie root must not commit an incomplete scan");
+    assert.match(disconnected.stderr, /原影视目录暂不可用/);
+    assert.deepEqual(readPublication(data), prior);
+  }
+  fs.writeFileSync(path.join(tv, "episode-2.mp4"), "new TV fixture");
+  const refreshTv = run("tv", config);
+  assert.equal(refreshTv.status, 0, refreshTv.stderr || refreshTv.stdout);
+  const afterTv = readPublication(data);
+  assert.equal(afterTv.photoRevision, prior.photoRevision);
+  assert.deepEqual(afterTv.mediaRoots, prior.mediaRoots, "a TV-only scan cannot rewrite the previous movie root status");
+  assert.equal(afterTv.mediaItems.filter(item => item.mediaKind === "movie").length, 1);
+  assert.equal(afterTv.mediaItems.filter(item => item.mediaKind === "tv").length, 2);
+  const db = new DatabaseSync(path.join(data, "image-gallery.sqlite"));
+  try {
+    // Old scoped scans sampled availability even for untouched media kinds.
+    const legacyRoots = afterTv.mediaRoots.map(root => root.root === movie ? { ...root, exists: false } : root);
+    db.prepare("UPDATE gallery_media_library_snapshot SET roots_json=? WHERE id=1").run(JSON.stringify(legacyRoots));
+  } finally { db.close(); }
+  const legacy = readPublication(data);
+  const legacyDisconnected = run("movie", config);
+  assert.notEqual(legacyDisconnected.status, 0);
+  assert.match(legacyDisconnected.stderr, /原影视目录暂不可用/);
+  assert.deepEqual(readPublication(data), legacy, "a legacy unavailable root status cannot discard rows already published from it");
+  fs.mkdirSync(movie);
+  const deleted = run("movie", config);
+  assert.equal(deleted.status, 0, deleted.stderr || deleted.stdout);
+  assert.equal(readPublication(data).mediaItems.filter(item => item.mediaKind === "movie").length, 0,
+    "a successful scan of a reachable empty root publishes a deliberate removal");
+}
+
+function verifyRootReconfiguration({ tempDir, run }) {
+  const data = path.join(tempDir, "root-reconfiguration-data");
+  const photo = path.join(tempDir, "changing-photo"), movie = path.join(tempDir, "changing-movie");
+  const tv = path.join(tempDir, "retained-tv"), parallel = path.join(tempDir, "parallel-photo");
+  for (const directory of [photo, movie, tv, parallel]) fs.mkdirSync(directory);
+  const archive = path.join(photo, "album.zip"), film = path.join(movie, "film.mp4");
+  for (const file of [archive, film, path.join(tv, "episode.mp4"), path.join(parallel, "parallel.zip")]) {
+    fs.writeFileSync(file, "synthetic reconfiguration fixture");
+  }
+  const added = path.join(tempDir, "added-optional-root");
+  const config = { FANHAO_DATA_DIR: data, FANHAO_PHOTO_SET_ROOTS: photo, FANHAO_MOVIE_ROOTS: movie,
+    FANHAO_TV_ROOTS: tv, FANHAO_ANIME_ROOTS: path.join(tempDir, "never-indexed-for-reconfiguration") };
+  const expanded = { ...config, FANHAO_PHOTO_SET_ROOTS: `${photo};${added}`, FANHAO_MOVIE_ROOTS: `${movie};${added}` };
+  const first = run("all", config);
+  assert.equal(first.status, 0, first.stderr || first.stdout);
+  const firstPublication = readPublication(data);
+  fs.unlinkSync(archive);
+  fs.rmdirSync(photo);
+  const lostPhoto = run("photo", expanded);
+  assert.notEqual(lostPhoto.status, 0, "adding a root must not hide the published history of a still-configured offline photo root");
+  assert.match(lostPhoto.stderr, /原图库目录暂不可用/);
+  assert.deepEqual(readPublication(data), firstPublication);
+  const db = new DatabaseSync(path.join(data, "image-gallery.sqlite"));
+  try {
+    // Old imported snapshots can own rows without root status metadata.
+    db.prepare("UPDATE photo_library_snapshot SET roots_json='[]' WHERE id=1").run();
+  } finally { db.close(); }
+  const prior = readPublication(data);
+  const legacyPhoto = run("photo", expanded);
+  assert.notEqual(legacyPhoto.status, 0, "an archive row also proves that its configured root has a published history");
+  assert.match(legacyPhoto.stderr, /原图库目录暂不可用/);
+  assert.deepEqual(readPublication(data), prior);
+  fs.unlinkSync(film);
+  fs.rmdirSync(movie);
+  const lostMovie = run("movie", expanded);
+  assert.notEqual(lostMovie.status, 0, "adding a root must not hide the published history of a still-configured offline media root");
+  assert.match(lostMovie.stderr, /原影视目录暂不可用/);
+  assert.deepEqual(readPublication(data), prior);
+  fs.mkdirSync(movie);
+  const changedMovie = run("movie", expanded);
+  assert.equal(changedMovie.status, 0, changedMovie.stderr || changedMovie.stdout);
+  assert.deepEqual(readPublication(data).mediaItems.map(item => item.title), ["episode"],
+    "a scoped scan with updated root configuration preserves rows for the untouched, still-configured TV root");
+  const removedPhoto = run("photo", { ...expanded, FANHAO_PHOTO_SET_ROOTS: parallel });
+  assert.equal(removedPhoto.status, 0, removedPhoto.stderr || removedPhoto.stdout);
+  assert.deepEqual(readPublication(data).photoSets.map(item => item.title), ["parallel"], "explicitly removed photo roots may leave the published index");
+
+  const preload = path.join(tempDir, "inject-photo-scan-fault.mjs");
+  fs.writeFileSync(preload, `
+    import fs from "node:fs";
+    import { spawnSync } from "node:child_process";
+    const fault = process.env.FANHAO_FIXTURE_SCAN_FAULT;
+    const target = process.env.FANHAO_FIXTURE_SCAN_PATH;
+    const stat = fs.statSync, read = fs.readdirSync;
+    let rootReads = 0, published = false;
+    fs.statSync = function (file, options) {
+      if (fault === "root-access" && file === target) throw Object.assign(new Error("fixture root access failure"), { code: "EACCES" });
+      const result = stat.call(this, file, options);
+      if (fault === "root-replaced" && file === target && options?.bigint && ++rootReads === 2) result.ino += 1n;
+      return result;
+    };
+    fs.readdirSync = function (file, options) {
+      if (fault === "parallel-publish" && file === target && !published) {
+        published = true;
+        const child = spawnSync(process.execPath, ["tools/rescan_image_library.mjs", "--scope", "photo"], {
+          env: { ...process.env, FANHAO_PHOTO_SET_ROOTS: process.env.FANHAO_FIXTURE_PARALLEL_ROOT }, encoding: "utf8", windowsHide: true
+        });
+        if (child.status !== 0) throw new Error(child.stderr || child.stdout);
+      }
+      return read.call(this, file, options);
+    };
+  `);
+  fs.mkdirSync(photo);
+  fs.writeFileSync(archive, "replacement album fixture");
+  const current = readPublication(data);
+  for (const [fault, target, error] of [
+    ["root-replaced", photo, /扫描期间图库目录已变化/], ["root-access", added, /fixture root access failure/]
+  ]) {
+    const result = run("photo", { ...expanded, FANHAO_FIXTURE_SCAN_FAULT: fault, FANHAO_FIXTURE_SCAN_PATH: target }, preload);
+    assert.notEqual(result.status, 0, `${fault} must not publish incomplete photos`);
+    assert.match(result.stderr, error);
+    assert.deepEqual(readPublication(data), current);
+  }
+  const alternate = path.join(tempDir, "other-parallel-photo");
+  fs.mkdirSync(alternate);
+  fs.writeFileSync(path.join(alternate, "concurrent.zip"), "parallel publication fixture");
+  const concurrent = run("photo", { ...expanded, FANHAO_FIXTURE_SCAN_FAULT: "parallel-publish", FANHAO_FIXTURE_SCAN_PATH: photo,
+    FANHAO_FIXTURE_PARALLEL_ROOT: alternate }, preload);
+  assert.notEqual(concurrent.status, 0, "a scan cannot overwrite a newer publication using a different root configuration");
+  assert.match(concurrent.stderr, /图库索引已更新/);
+  assert.deepEqual(readPublication(data).photoSets.map(item => item.title), ["concurrent"]);
 }
 
 function verifyExplicitImport({ tempDir, env, run, first }) {

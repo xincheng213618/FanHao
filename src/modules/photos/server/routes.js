@@ -72,9 +72,13 @@ export async function routePhotosApi(req, res, url, deps) {
   const intakeMatch = /^\/api\/photo-catalog\/intake\/(options|preview|commit)$/.exec(url.pathname);
   if (catalogIntake && intakeMatch && req.method === (intakeMatch[1] === "options" ? "GET" : "POST")) {
     if (!requireLocalAdmin(req, res)) return true;
+    const action = intakeMatch[1];
+    if (action === "preview") {
+      await routePhotoCatalogPreview(req, res, { catalogIntake, readJsonBody, sendJson });
+      return true;
+    }
     try {
-      const action = intakeMatch[1];
-      const result = action === "options" ? catalogIntake.options() : await catalogIntake[action](await readJsonBody(req));
+      const result = action === "options" ? catalogIntake.options() : await catalogIntake.commit(await readJsonBody(req));
       sendJson(res, 200, result);
     } catch (error) {
       if (!error.statusCode) throw error;
@@ -377,4 +381,27 @@ export async function routePhotosApi(req, res, url, deps) {
   }
 
   return false;
+}
+
+async function routePhotoCatalogPreview(req, res, { catalogIntake, readJsonBody, sendJson }) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  const onClose = () => { if (!res.writableEnded) abort(); };
+  const unavailable = () => controller.signal.aborted || req.aborted || res.destroyed || res.writableEnded;
+  if (unavailable()) return;
+  req.once?.("aborted", abort);
+  res.once?.("close", onClose);
+  try {
+    const input = await readJsonBody(req);
+    if (unavailable()) return;
+    const result = await catalogIntake.preview(input, { signal: controller.signal });
+    if (!unavailable()) sendJson(res, 200, result);
+  } catch (error) {
+    if (unavailable()) return;
+    if (!error.statusCode) throw error;
+    sendJson(res, error.statusCode, { error: error.message });
+  } finally {
+    req.off?.("aborted", abort);
+    res.off?.("close", onClose);
+  }
 }

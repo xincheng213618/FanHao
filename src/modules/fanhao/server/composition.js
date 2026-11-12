@@ -8,7 +8,7 @@ export function createFanhaoDependencies(deps) {
     subtitles: deps.subtitles,
     duplicates: deps.duplicates,
     diskUsage: deps.diskUsage,
-    catalog: { ...pick(deps, ["codePrefixService", "notFound", "rankingService", "sendJson", "studioService"]), ltx: deps.ltxCatalog },
+    catalog: { ...pick(deps, ["codePrefixService", "notFound", "rankingService", "readJsonBody", "sendJson", "studioService"]), ltx: deps.ltxCatalog },
     library: { ...pick(deps, [
       "appConfigService",
       "getLastScanError",

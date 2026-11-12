@@ -66,7 +66,18 @@ try {
   assert.equal(fetched.sourceUrl, origin + "/subs/321/Fixture%20ABC-001-zh-CN.srt", "a translated file may live in a different numeric folder");
   const beforeForged = log.length;
   await assert.rejects(provider.download(id, "https://127.0.0.1/secret.srt"), failure("FILE", false));
+  await assert.rejects(provider.downloadDirect("https://127.0.0.1/subs/1/ABC-001-zh-CN.srt"), failure("INVALID_URL", false));
+  await assert.rejects(provider.downloadDirect(origin + "/subs/1/ABC-001-en.srt"), failure("FILE", false));
   assert.equal(log.length, beforeForged);
+  const direct = await provider.downloadDirect("https://subtitlecat.com/subs/123/ABC-001-zh-TW.srt");
+  assert.equal(log.length, beforeForged + 1, "one click uses only the file request");
+  assert.equal(direct.sourceUrl, origin + "/subs/123/ABC-001-zh-TW.srt");
+  assert.equal(direct.language, "zh-TW");
+  assert.deepEqual(direct.bytes, subtitle);
+  const redirected = make(standardFetch([], (url) => url.includes("ABC-001") ? new Response(null, {
+    status: 302, headers: { Location: "/subs/124/ABC-002-zh-CN.srt" }
+  }) : null));
+  await assert.rejects(redirected.downloadDirect(origin + "/subs/123/ABC-001-zh-CN.srt"), failure("REDIRECT", false));
   const fresh = make(standardFetch());
   await assert.rejects(fresh.download(id, file.id), failure("SELECTION_EXPIRED", true));
   assert.equal((await fresh.files(id)).files[0].id, file.id, "a stateless result can be queried again after restart");

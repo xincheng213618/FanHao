@@ -56,9 +56,9 @@ export async function readJsonBody(req, maxBytes = 1024 * 1024) {
   }
 }
 
-export function readJsonFile(filePath, fallback = null) {
+export async function readJsonFile(filePath, fallback = null) {
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return JSON.parse(await fs.promises.readFile(filePath, "utf8"));
   } catch {
     return fallback;
   }

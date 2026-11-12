@@ -68,7 +68,8 @@ export function createPhotosRuntime(deps) {
           return true;
         }
       }
-      await deps.photoSetService.serveImage(res, photoSetImageMatch[1], photoSetImageMatch[2], revision ?? undefined);
+      const preview = url.searchParams.get("preview") === "1";
+      await deps.photoSetService.serveImage(res, photoSetImageMatch[1], photoSetImageMatch[2], revision ?? undefined, { preview });
       return true;
     }
 

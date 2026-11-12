@@ -22,12 +22,14 @@ export function createMediaStreamService({
   capacity = 16,
   queueTimeoutMs = 10000,
   startupTimeoutMs = 15000,
+  outputStallTimeoutMs = 30000,
   childCloseTimeoutMs = 1500
 }) {
   concurrency = boundedInteger(concurrency, 2, 1, 16);
   capacity = boundedInteger(capacity, 16, concurrency, 512);
   queueTimeoutMs = boundedInteger(queueTimeoutMs, 10000, 1, 600000);
   startupTimeoutMs = boundedInteger(startupTimeoutMs, 15000, 1, 600000);
+  outputStallTimeoutMs = boundedInteger(outputStallTimeoutMs, 30000, 1, 600000);
   childCloseTimeoutMs = boundedInteger(childCloseTimeoutMs, 1500, 1, 60000);
   const jobs = new Set();
   const queue = [];
@@ -217,6 +219,7 @@ export function createMediaStreamService({
     };
     job.onStdoutEnd = () => {
       job.stdoutEnded = true;
+      job.stopOutputWatch?.();
       if (!job.closed && !job.failureHandled) {
         job.eofTimer = setTimeout(() => failJob(job, "视频转码失败", transcodeError("TRANSCODE_EXIT_TIMEOUT")), childCloseTimeoutMs);
         job.eofTimer.unref?.();
@@ -244,6 +247,7 @@ export function createMediaStreamService({
       if (job.closed) return;
       job.closed = true;
       job.exitCode = code;
+      job.stopOutputWatch?.();
       job.resolveClosed();
       clearTimeout(job.closeTimer);
       clearTimeout(job.eofTimer);
@@ -267,7 +271,36 @@ export function createMediaStreamService({
   }
 
   function pipeOutput(job) {
-    if (!job.failureHandled && !job.res.destroyed && !job.res.writableEnded) job.child.stdout.pipe(job.res, { end: false });
+    if (job.failureHandled || job.res.destroyed || job.res.writableEnded) return;
+    const { child: { stdout }, res } = job;
+    let timer;
+    const waitingForOutput = () => !job.closed && !job.stdoutEnded && !job.failureHandled
+      && !res.destroyed && !res.writableEnded && !stdout.isPaused() && !res.writableNeedDrain;
+    const pauseWatch = () => { clearTimeout(timer); timer = null; };
+    const watchOutput = () => {
+      if (!waitingForOutput()) return;
+      if (timer) {
+        timer.refresh();
+        return;
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        if (waitingForOutput()) failJob(job, "视频转码输出停滞，请重试", transcodeError("TRANSCODE_OUTPUT_TIMEOUT"), 504);
+      }, outputStallTimeoutMs);
+      timer.unref?.();
+    };
+    job.stopOutputWatch = () => {
+      pauseWatch();
+      stdout.off("data", watchOutput);
+      stdout.off("resume", watchOutput);
+      stdout.off("pause", pauseWatch);
+      job.stopOutputWatch = null;
+    };
+    stdout.on("data", watchOutput);
+    stdout.on("resume", watchOutput);
+    stdout.on("pause", pauseWatch);
+    stdout.pipe(res, { end: false });
+    watchOutput();
   }
 
   function finishSuccess(job) {
@@ -299,6 +332,7 @@ export function createMediaStreamService({
   }
 
   function cancelChild(job) {
+    job.stopOutputWatch?.();
     if (!job.child || job.closed || job.killRequested) return;
     job.killRequested = true;
     if (job.onDrain) { job.res.off("drain", job.onDrain); job.onDrain = null; }

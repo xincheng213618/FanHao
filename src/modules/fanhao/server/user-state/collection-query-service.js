@@ -1,5 +1,6 @@
 import { createWeightedCacheBudget } from "../works/work-cache-budget.js";
 import { deriveWorkTraits, summarizeWorkTraits } from "../../../../../lib/work-traits.js";
+import { createWorkTitleMatcher } from "../works/work-title-search.js";
 
 const COLLECTION_PAGE_CACHE_LIMIT = 64;
 const COLLECTION_PAGE_WORK_BUDGET = 4096;
@@ -53,12 +54,15 @@ export function createCollectionQueryService({
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const filter = requestFilter(url);
     const sort = requestSort(url);
-    const cacheKey = `favorites:${selectedFolderId || "all"}:${filter}:${sort}:${limit}:${offset}`;
+    const query = String(url.searchParams.get("q") || "").trim().slice(0, 120);
+    const cacheKey = JSON.stringify(["favorites", selectedFolderId, filter, sort, query, limit, offset]);
     const cached = readPage(cacheKey);
     if (cached) return cached;
 
-    const queried = preparedQuery(["favorites", selectedFolderId, filter, sort],
-      () => favoriteStateService.favoriteWorks(selectedFolderId), { filter, sort });
+    const queried = preparedQuery(["favorites", selectedFolderId, filter, sort, query], () => {
+      const favorites = favoriteStateService.favoriteWorks(selectedFolderId);
+      return query ? favorites.filter(createWorkTitleMatcher(query, work => workInfoFacetRow(work.id)?.code)) : favorites;
+    }, { filter, sort });
     const page = limit ? queried.works.slice(offset, offset + limit) : queried.works.slice(offset);
     const works = preparePage(page);
     return cachePage(cacheKey, {
@@ -68,6 +72,7 @@ export function createCollectionQueryService({
       offset,
       filter,
       sort,
+      ...(query ? { query } : {}),
       works,
       traitFacets: queried.traitFacets,
       facets: queried.facets,
@@ -87,7 +92,10 @@ export function createCollectionQueryService({
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
     const filter = requestFilter(url);
     const sort = requestSort(url);
-    const cacheKey = `history:${days}:${filter}:${sort}:${limit}:${offset}`;
+    const requestedWatch = url.searchParams.get("watch");
+    const watch = ["unfinished", "finished"].includes(requestedWatch) ? requestedWatch : "all";
+    const query = String(url.searchParams.get("q") || "").trim().slice(0, 120).toWellFormed();
+    const cacheKey = JSON.stringify(["history", days, watch, filter, sort, query, limit, offset]);
     const now = days ? Date.now() : 0;
     const cached = readPage(cacheKey);
     if (cached) {
@@ -96,11 +104,11 @@ export function createCollectionQueryService({
       pageBudget.drop(pageCache, cacheKey);
     }
 
-    const loadSource = () => playbackProgressService.historyEntries({ days }).map((entry) => entry.work);
+    const loadSource = () => historyWorks(playbackProgressService.historyEntries({ days }), watch, query);
     // Providers without a timed snapshot keep their existing per-page reads.
     let queried;
-    if (!days) queried = preparedQuery(["history", filter, sort], loadSource, { filter, sort });
-    else if (typeof playbackProgressService.historySnapshot === "function") queried = preparedHistoryQuery(days, { filter, sort }, now);
+    if (!days) queried = preparedQuery(["history", watch, filter, sort, query], loadSource, { filter, sort });
+    else if (typeof playbackProgressService.historySnapshot === "function") queried = preparedHistoryQuery(days, { filter, sort, watch, query }, now);
     else queried = queryWorks(loadSource(), { filter, sort });
     const page = limit ? queried.works.slice(offset, offset + limit) : queried.works.slice(offset);
     const works = preparePage(page);
@@ -112,6 +120,8 @@ export function createCollectionQueryService({
       offset,
       filter,
       sort,
+      ...(watch === "all" ? {} : { watch }),
+      ...(query ? { query } : {}),
       recentWatchedDays,
       works,
       traitFacets: queried.traitFacets,
@@ -130,16 +140,26 @@ export function createCollectionQueryService({
       && now >= window.observedAt && now <= window.expiresAt;
   }
 
+  function historyWorks(entries, watch, query) {
+    let works = entries.map(entry => entry.work);
+    if (watch !== "all") works = works.filter(work => {
+      const progress = playbackProgressService.getWorkProgress(work);
+      if (!progress || progress.position <= 0) return false;
+      return watch === "finished" ? progress.percent >= 100 : progress.percent < 100;
+    });
+    return query ? works.filter(createWorkTitleMatcher(query, work => workInfoFacetRow(work.id)?.code)) : works;
+  }
+
   function preparedHistoryQuery(days, options, now) {
     ensureCache();
-    const key = JSON.stringify(["history", days, options.filter, options.sort]);
+    const key = JSON.stringify(["history", days, options.watch, options.filter, options.sort, options.query]);
     const cached = queryBudget.read(queryCache, key);
     if (cached) {
       if (currentHistoryWindow(cached.historyWindow, now)) return cached;
       queryBudget.drop(queryCache, key);
     }
     const snapshot = playbackProgressService.historySnapshot({ days });
-    const result = queryWorks(snapshot.entries.map(entry => entry.work), options);
+    const result = queryWorks(historyWorks(snapshot.entries, options.watch, options.query), options);
     result.historyWindow = { observedAt: snapshot.observedAt, expiresAt: snapshot.expiresAt };
     if (key.length <= COLLECTION_QUERY_KEY_LIMIT && workInfoReadCacheable() !== false
       && currentHistoryWindow(result.historyWindow, Date.now())) {

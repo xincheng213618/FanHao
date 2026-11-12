@@ -71,6 +71,77 @@ async function verifyDirectAdmissionAndStop() {
   await until(() => fetched === 3); await instance.stop();
 }
 
+async function verifyReadFailureFallback() {
+  const target = "https://fixture.invalid/cover.jpg";
+  const warnings = [];
+  const warmed = [];
+  let cacheFailed = true;
+  let cacheReads = 0;
+  const instance = service({
+    isAllowedRemoteImageUrl: url => url.hostname === "fixture.invalid",
+    warn: (...values) => warnings.push(values),
+    mediaBlobStore: {
+      async remoteImage() {
+        cacheReads++;
+        if (cacheFailed) throw Object.assign(new Error("temporary cover cache read failure"), { code: "MEDIA_BLOB_BUSY", statusCode: 503 });
+        return tinyGifRow();
+      },
+      cachedRemoteUrls: async () => [], upsertRemote: async () => true
+    },
+    fetchRemoteImage: (url, { signal }) => new Promise((_, reject) => {
+      warmed.push(url);
+      if (signal.aborted) reject(signal.reason);
+      else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    })
+  });
+  try {
+    assert.equal((await miss(instance, "https://outside.invalid/cover.jpg")).status, 403);
+    const fallback = await miss(instance, target);
+    assert.equal(fallback.status, 302);
+    assert.equal(fallback.headers.Location, target);
+    assert.equal(fallback.headers["Cache-Control"], "no-store");
+    await until(() => warmed.length === 1);
+    assert.equal(warnings.length, 1);
+    assert.equal(cacheReads, 1, "a disallowed source must be rejected before reading the cache");
+    cacheFailed = false;
+    const recovered = await miss(instance, target);
+    assert.equal(recovered.status, 200);
+    assert.deepEqual(recovered.body, tinyGif);
+    assert.equal(cacheReads, 2, "a cache fault must not poison the next read");
+    assert.deepEqual(warmed, [target]);
+  } finally { await instance.stop(); }
+}
+
+async function verifyStaleReadCannotRedirect() {
+  const reads = [];
+  let warms = 0;
+  const instance = service({
+    mediaBlobStore: { remoteImage: () => new Promise((resolve, reject) => reads.push({ resolve, reject })) },
+    fetchRemoteImage: async () => { warms++; return new Response(tinyGif); }
+  });
+  const request = {};
+  const disconnected = response();
+  const url = new URL("http://fixture/media/remote-image?url=" + encodeURIComponent("https://fixture.invalid/pending.jpg"));
+  try {
+    const pending = instance.serveCachedRemoteImage(request, disconnected, url);
+    await until(() => reads.length === 1);
+    request.aborted = true;
+    reads[0].reject(new Error("cache failed after disconnect"));
+    await pending;
+    assert.equal(disconnected.status, undefined);
+
+    const stale = response();
+    const staleRequest = assert.rejects(instance.serveCachedRemoteImage({}, stale, url), { code: "MEDIA_IMAGE_STOPPED" });
+    await until(() => reads.length === 2);
+    await instance.stop();
+    await instance.start();
+    reads[1].resolve(tinyGifRow());
+    await staleRequest;
+    assert.equal(stale.status, undefined);
+    assert.equal(warms, 0, "cancelled or stale cache reads must not start remote work");
+  } finally { await instance.stop(); }
+}
+
 async function verifyRetainedOwnership() {
   let release, writes = 0;
   const instance = service({ remoteImageWarmConcurrency: 1, remoteImageWarmCapacity: 2, remoteImageStopWaitMs: 20,
@@ -228,6 +299,8 @@ async function verifyRemoteUrlAdmission() {
 
 await verifyBodyLimits();
 await verifyDirectAdmissionAndStop();
+await verifyReadFailureFallback();
+await verifyStaleReadCannotRedirect();
 await verifyRetainedOwnership();
 await verifyQueuedReplacement();
 await verifyBodyCleanupOwnership();

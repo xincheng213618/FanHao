@@ -696,6 +696,8 @@ const codePrefixService = createCodePrefixService({
   getLibrary: () => library,
   getStamp: studioCatalogStamp,
   hydrateMissingSearchWorks: missingCodeSearchService.hydrate,
+  localWorkByCodeKey: () => workCodeIndexService.localWorkByCodeKey(),
+  localSearchWorkByCodeKey: () => workCodeIndexService.localSearchWorkByCodeKey(),
   maxWorkLimit: MAX_WORK_LIMIT,
   pagedWorksPayload,
   sortWorkList,
@@ -913,8 +915,8 @@ const accessAnalyticsService = createAccessAnalyticsService({
 const accessLogBootstrap = await accessAnalyticsService.bootstrapFromAccessLogs([
   `${ACCESS_LOG_PATH}.1`,
   ACCESS_LOG_PATH
-]);
-if (accessLogBootstrap.imported) {
+]).catch(error => console.warn("[access-analytics-bootstrap]", error?.message || error));
+if (accessLogBootstrap?.imported) {
   console.log(`[access-analytics] imported ${accessLogBootstrap.imported} historical requests`);
 }
 const actorAvatarService = createActorAvatarService({
@@ -1114,6 +1116,7 @@ const moduleRegistry = await discoverFanHaoModules({
           getDb: () => hasCoreDb() ? getCoreDb() : null,
           incomingRoots: SERVER_CONFIG.MEDIA_INTAKE_ROOTS,
           libraryRoots: LIBRARY_ROOTS,
+          videoProbeService,
           requireLocalAdmin,
           coverUrl: (value) => {
             try {
@@ -1136,13 +1139,15 @@ const moduleRegistry = await discoverFanHaoModules({
           requireLocalAdmin, requestAccess: (req) => requestAccess(req), readJsonBody, sendJson,
           intake: {
             getDb: getCoreDb, sourceRoots: SERVER_CONFIG.MEDIA_INTAKE_ROOTS, libraryRoots: LIBRARY_ROOTS,
+            resolveWork: resolveLibraryWorkByPublicId,
+            subtitleBackupRoot: path.join(DATA_DIR, "subtitle-backups"),
             relativeFromRoot: (...args) => relativeFromRoot(...args), onIndexChanged: refreshLibrary,
             markFavorite: (id) => workLocalMutationService.setWorkLocalMarker(String(id), "A", true),
             probeVideo: (file) => probeIntakeVideo(FFPROBE_PATH, file),
             classifyAds: (unnumbered, numbered) => classifyIntakeAds(PYTHON_PATH, path.join(PROJECT_ROOT, "tools", "clean.py"), unnumbered, numbered),
-            fetchMetadata: (code) => fetchIntakeMetadata({ python: PYTHON_PATH,
+            fetchMetadata: (code, detailUrl) => fetchIntakeMetadata({ python: PYTHON_PATH,
               script: path.join(PROJECT_ROOT, "tools", "lookup_intake_metadata.py"),
-              profile: JAVDB_115_COOKIE_PROFILE_DIR, cwd: PROJECT_ROOT }, code)
+              profile: JAVDB_115_COOKIE_PROFILE_DIR, cwd: PROJECT_ROOT }, code, detailUrl)
           }
         },
         diskUsage: {

@@ -94,14 +94,16 @@ const MAX_DUPLICATE_GROUPS = 60;
 function compressMissing(numbers) {
   const ranges = [];
   let missing = 0;
+  let truncated = false;
   for (let index = 1; index < numbers.length; index++) {
     const from = numbers[index - 1] + 1;
     const to = numbers[index] - 1;
     if (from > to) continue;
     missing += to - from + 1;
     if (ranges.length < MAX_GAP_RANGES) ranges.push(from === to ? [from] : [from, to]);
+    else truncated = true;
   }
-  return { ranges, missing };
+  return { ranges, missing, truncated };
 }
 
 /**
@@ -143,10 +145,9 @@ export function photoCollectionHealth(items = []) {
     .filter(family => family.numbers.size >= 5)
     .map((family) => {
       const numbers = [...family.numbers].sort((a, b) => a - b);
-      const { ranges, missing } = compressMissing(numbers);
+      const { ranges, missing, truncated } = compressMissing(numbers);
       const prefix = [...family.prefixes].sort((a, b) => b[1] - a[1])[0][0];
-      return { prefix, count: numbers.length, min: numbers[0], max: numbers.at(-1), missing, missingRanges: ranges,
-        truncated: ranges.length >= MAX_GAP_RANGES };
+      return { prefix, count: numbers.length, min: numbers[0], max: numbers.at(-1), missing, missingRanges: ranges, truncated };
     })
     .sort((a, b) => b.count - a.count);
 
@@ -160,6 +161,7 @@ export function photoCollectionHealth(items = []) {
   return {
     total: items.length,
     numbered,
+    missing: numbering.reduce((sum, family) => sum + family.missing, 0),
     numbering,
     duplicateGroupCount: duplicateGroups.length,
     duplicateReclaimableBytes: duplicateGroups.reduce((sum, group) => sum + group.items.slice(1).reduce((s, i) => s + i.size, 0), 0),

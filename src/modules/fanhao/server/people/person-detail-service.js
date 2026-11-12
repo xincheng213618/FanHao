@@ -194,7 +194,8 @@ export function createPersonDetailService({
     if (!source) return null;
     mark("source");
 
-    const requestKeys = detailPageCacheKey(url);
+    const query = String(url.searchParams.get("q") || "").trim().slice(0, 120).toWellFormed();
+    const requestKeys = detailPageCacheKey(url, query);
     const pageCacheKey = requestKeys.page;
     let worksPayload = readCachedPage(source, pageCacheKey);
     if (worksPayload) {
@@ -212,7 +213,12 @@ export function createPersonDetailService({
         return workQueryService.listFromWorksPayload(yearWorks, url, {
           filter,
           facets
-        }, { lightweightInfo: true, includeCoreCovers: scope === "western" }, {
+        }, {
+          lightweightInfo: true,
+          includeCoreCovers: scope === "western",
+          ...(query ? { titleQuery: query } : {}),
+          ...(url.searchParams.get("traitScope") === "person" ? { traitFacetSource: source.works } : {})
+        }, {
           cache: source.filterCache,
           key: requestKeys.filter
         });
@@ -231,6 +237,7 @@ export function createPersonDetailService({
       filmographyCount: source.works.length,
       year: normalizePersonWorkYear(url.searchParams.get("year")),
       years: source.years,
+      ...(query ? { query } : {}),
       ...worksPayload
     };
     if (url.searchParams.get("timing") === "1") payload.timings = timings;
@@ -325,7 +332,7 @@ export function createPersonDetailService({
     return source;
   }
 
-  function detailPageCacheKey(url) {
+  function detailPageCacheKey(url, query) {
     const parts = [
       userStateStamp(),
       workQueryService.visibilityStamp(),
@@ -335,14 +342,17 @@ export function createPersonDetailService({
       url.searchParams.get("includeCompilation") || "",
       url.searchParams.get("sort") || "releaseDesc",
       url.searchParams.get("limit") || "",
-      url.searchParams.get("offset") || "0"
+      url.searchParams.get("offset") || "0",
+      url.searchParams.get("traitScope") === "person",
+      query
     ];
     return {
       page: JSON.stringify(parts),
       filter: JSON.stringify([
         ...parts.slice(0, 4),
         !url.searchParams.has("includeMissingLocal") || parts[4] === "1",
-        !url.searchParams.has("includeCompilation") || parts[5] === "1"
+        !url.searchParams.has("includeCompilation") || parts[5] === "1",
+        query
       ])
     };
   }

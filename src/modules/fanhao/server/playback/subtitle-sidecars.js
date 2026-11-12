@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 
 const MAX_BYTES = 2 * 1024 * 1024;
 const EXTENSIONS = new Set([".srt", ".ass", ".ssa", ".vtt"]);
-const LANGUAGES = ["zh-CN", "zh-TW", "en", "ja", "und"];
+const LANGUAGE_TAG = /^[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*$/;
 const digest = value => crypto.createHash("sha256").update(value).digest("hex");
 const failure = (message, statusCode = 400, code = "SUBTITLE_SIDECAR_UNSAFE") => Object.assign(new Error(message), { statusCode, code });
 const normalized = value => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
@@ -89,7 +89,7 @@ function recheck(ctx) {
 }
 
 function canonicalLanguage(value) {
-  if (typeof value !== "string" || !/^[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*$/.test(value) || value.length > 63) {
+  if (typeof value !== "string" || !LANGUAGE_TAG.test(value) || value.length > 63) {
     throw failure("字幕语言无效", 400, "SUBTITLE_LANGUAGE_INVALID");
   }
   if (value.toLowerCase() === "und") return "und";
@@ -145,7 +145,7 @@ async function sameContent(filePath, bytes, ctx, signal) {
   } finally { await handle.close(); }
 }
 
-export async function writeSubtitleBesideVideo(video, input, { language = "zh-CN", name = "", roots, signal } = {}) {
+export async function writeSubtitleBesideVideo(video, input, { language = "zh-CN", name = "", roots, signal, onTemporaryFile } = {}) {
   abort(signal);
   if (!(input instanceof Uint8Array)) throw failure("字幕内容必须是字节数据", 400, "SUBTITLE_INVALID");
   if (input.byteLength > MAX_BYTES) throw failure("字幕文件超过 2 MiB", 413, "SUBTITLE_TOO_LARGE");
@@ -165,6 +165,7 @@ export async function writeSubtitleBesideVideo(video, input, { language = "zh-CN
   abort(signal);
   recheck(ctx);
   const temporary = path.join(ctx.directory, `.fanhao-subtitle-${crypto.randomUUID()}.tmp`);
+  onTemporaryFile?.(temporary);
   let handle;
   let temporaryIdentity;
   try {
@@ -208,19 +209,31 @@ export async function writeSubtitleBesideVideo(video, input, { language = "zh-CN
 export async function discoverVideoSubtitles(video, { roots, signal } = {}) {
   abort(signal);
   const ctx = authority(video, roots);
+  const names = await fsp.readdir(ctx.directory);
+  abort(signal);
+  recheck(ctx);
   const files = [];
-  for (const language of LANGUAGES) for (const extension of EXTENSIONS) {
+  for (const name of names) {
     abort(signal);
-    const name = sidecarName(ctx.videoPath, language, extension);
+    const extension = path.extname(name).toLowerCase();
+    if (!EXTENSIONS.has(extension)) continue;
+    const stem = name.slice(0, -extension.length);
+    const suffix = stem.slice(stem.lastIndexOf(".") + 1);
+    if (suffix.length > 63 || !LANGUAGE_TAG.test(suffix)) continue;
     const filePath = path.join(ctx.directory, name);
+    if (!samePath(filePath, path.join(ctx.directory, sidecarName(ctx.videoPath, suffix, extension)))) continue;
+    let language;
+    try { language = canonicalLanguage(suffix); }
+    catch { continue; }
+    if (!samePath(filePath, path.join(ctx.directory, sidecarName(ctx.videoPath, language, extension)))) continue;
     try {
       checkedFile(filePath, ctx);
-      files.push({ id: `sidecar:${digest(normalized(filePath))}`, name, path: filePath, type: "info" });
+      files.push({ id: `sidecar:${digest(normalized(filePath))}`, name, path: filePath, type: "info", sidecarLanguage: language });
     } catch (error) {
       if (error.code !== "ENOENT" && error.code !== "SUBTITLE_SIDECAR_UNSAFE" && error.code !== "SUBTITLE_TOO_LARGE") throw error;
       // A linked, oversized or non-regular track is not a discoverable subtitle.
     }
   }
   recheck(ctx);
-  return files;
+  return files.sort((left, right) => left.name.localeCompare(right.name));
 }

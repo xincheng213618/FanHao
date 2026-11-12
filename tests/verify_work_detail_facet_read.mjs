@@ -111,7 +111,14 @@ function fixture(factories = current, { db = database(), person = false, provide
   return f;
 }
 function equal(old, next, label) { assert.deepEqual(next, old, label); assert.equal(JSON.stringify(next), JSON.stringify(old), `${label}: complete wire/field order`); comparisons++; return next; }
-function compare(db, label, options = {}) { const old = fixture(previous, { db, ...options }), next = fixture(current, { db, ...options }); equal(old.read(), next.read(), label); return [old, next]; }
+function equalDetail(old, next, label) {
+  // These synthetic works have no indexed cover. Verify the additive remote
+  // fallback separately, then compare the rest of the complete historical DTO.
+  const { remoteCoverUrl, ...work } = next.work;
+  assert.equal(remoteCoverUrl, old.work.infoSummary?.imageUrl || undefined, `${label}: remote cover fallback`);
+  equal(old, { ...next, work }, label);
+}
+function compare(db, label, options = {}) { const old = fixture(previous, { db, ...options }), next = fixture(current, { db, ...options }); equalDetail(old.read(), next.read(), label); return [old, next]; }
 function compareFacet(db, id, label, options = {}) {
   const old = fixture(previous, { db, ...options }), next = fixture(production, { db, ...options });
   equal(old.run(() => old.info.facetRow(id)), next.point(id).value, label);
@@ -194,7 +201,7 @@ try {
   for (const value of [tags, "invalid JSON", "null", "[]", '[{"label":"__proto__","value":"safe"},{"key":"类别","value":"恋爱"}]']) {
     const db = database(); db.prepare("UPDATE works SET fields_json=?,javdb_tags_json=?").run(value, '["JavDB-only","高清"]');
     const [old, next] = compare(db, "healthy/full metadata and tags", { person: true });
-    equal(old.read("2"), next.read("2"), "second same-stamp work");
+    equalDetail(old.read("2"), next.read("2"), "second same-stamp work");
     const before = { ...next.stats }; assert.equal(next.read("2"), next.read("2")); assert.deepEqual(next.stats, before, "detail DTO LRU remains effective");
   }
   for (const id of [null, false, 0, "0", 1, 1n, "1", "+1", "01", "1.0", " 1 ", "-1", "9223372036854775807", "-9223372036854775808", "100000000000000000000", { toString: () => "1" }]) {

@@ -469,6 +469,49 @@ async function verifyAllBusyStagesRequeue() {
   db.close();
 }
 
+async function verifyBusyJournalReadRecovers({ startup }) {
+  const fixture = await createFixture(startup ? "startup-read-busy" : "dispatch-read-busy", 2);
+  const db = createDatabase(fixture.root, fixture.source);
+  // Rollback-journal EXCLUSIVE locking blocks readers, unlike a WAL write transaction.
+  db.exec("PRAGMA journal_mode = DELETE; PRAGMA busy_timeout = 20");
+  const locker = new DatabaseSync(path.join(fixture.root, "fixture.sqlite"));
+  const callbacks = [];
+  const warnings = [];
+  const admin = createAdminFixture(db, fixture);
+  const service = createWorkMoveJobService({
+    adminCoreMutationService: admin,
+    getCoreDb: () => db,
+    schedule: (callback) => callbacks.push(callback),
+    warn: (...args) => warnings.push(args.map(String).join(" ")),
+    workerDataPatch: { forceCopy: true }
+  });
+  try {
+    if (!startup) callbacks.shift()();
+    const queued = service.start("1", { personId: "target" });
+    const dispatch = callbacks.shift();
+    if (startup) assert.equal(callbacks.length, 1, "startup discovery must be the only path that dispatches the persisted job");
+    locker.exec("BEGIN EXCLUSIVE");
+    dispatch();
+    await waitForCondition(
+      () => warnings.some((message) => message.includes("database is locked")),
+      "the first journal read must encounter the real SQLite lock",
+      2_000
+    );
+    assert.equal(fs.existsSync(fixture.source), true);
+    assert.equal(fs.existsSync(fixture.target), false);
+    locker.exec("COMMIT");
+    const completed = await waitForJob(service, queued.id, ["completed"], 5_000);
+    assert.equal(completed.phase, "completed");
+    assert.equal(admin.releasedReservationJobs.has(queued.id), true);
+    assert.equal(fs.existsSync(fixture.source), false);
+    assert.equal(fs.existsSync(fixture.target), true);
+  } finally {
+    locker.close();
+    await service.close();
+    db.close();
+  }
+}
+
 function waitForWorkerMessage(worker, predicate, timeoutMs = 8_000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -3284,6 +3327,8 @@ try {
   await verifyWorkLookupRecoversLostStartResponse();
   await verifyOverlappingPathReservationsAreRejected();
   await verifyAllBusyStagesRequeue();
+  await verifyBusyJournalReadRecovers({ startup: false });
+  await verifyBusyJournalReadRecovers({ startup: true });
   await verifyConcurrentStartsAreAtomicallyUnique();
   await verifyLegacyDuplicateJobsMigrateFailClosed();
   await verifyActualAdminSqliteCommit();

@@ -20,8 +20,10 @@ export function createPlaybackProgressService({
   let workProgressCacheRevision = -1;
 
   function getVideoProgress(videoId, work = null) {
-    const userState = getUserState();
-    const progress = userState.progress[videoId];
+    return publicVideoProgress(videoId, getUserState().progress[videoId]);
+  }
+
+  function publicVideoProgress(videoId, progress) {
     if (!progress || !Number.isFinite(progress.position) || !Number.isFinite(progress.duration) || progress.duration <= 0) {
       return null;
     }
@@ -72,6 +74,17 @@ export function createPlaybackProgressService({
   function progressUpdatedTime(progress) {
     const timestamp = Date.parse(progress?.updatedAt || "");
     return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
+  function recentUnfinishedVideoProgress(matchesVideo) {
+    const rows = [];
+    for (const [videoId, row] of Object.entries(getUserState().progress || {})) {
+      if (!(row?.position > 5 && row.position < row.duration) || !matchesVideo(videoId)) continue;
+      const progress = publicVideoProgress(videoId, row);
+      if (progress) rows.push({ progress, time: progressUpdatedTime(row) });
+    }
+    rows.sort((left, right) => right.time - left.time);
+    return rows.map(row => row.progress);
   }
 
   function progressWork(videoId, progress, firstWorkForVideo) {
@@ -280,6 +293,7 @@ export function createPlaybackProgressService({
   return {
     getVideoProgress,
     getWorkProgress,
+    recentUnfinishedVideoProgress,
     historyEntries,
     historySnapshot,
     historyWorks,

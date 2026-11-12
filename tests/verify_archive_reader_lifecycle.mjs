@@ -773,11 +773,24 @@ async function verifyPhotoImageRevision() {
   };
   const files = createFileServer({ mimeTypes, normalizeExt, notFound });
   let replacementDuringExtraction = "";
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+  let previewEncodes = 0, previewGate = null, failPreview = false;
   const archive = archiveService({
     pythonPath: process.env.PYTHON || "python", helperPath: path.join(projectRoot, "tools/archive_image_reader.py"),
     getImageGalleryDb: () => db, imageReaderCacheService: { rootDir: cacheRoot, touch: async () => {}, scheduleCleanup() {} },
     serveInlineFile: files.serveInlineFile, notFound,
     spawnProcess(command, args, options) {
+      if (args[0] === "-hide_banner") {
+        previewEncodes++;
+        assert.match(args[args.indexOf("-vf") + 1], /min\(iw,384\).*min\(ih,384\)/);
+        const child = fakeChild();
+        Promise.resolve(previewGate?.promise).then(() => {
+          child.stdout.end(failPreview ? Buffer.alloc(0) : jpeg);
+          child.stderr.end();
+          child.emit("close", failPreview ? 1 : 0);
+        });
+        return child;
+      }
       if (args[1] === "extract" && replacementDuringExtraction) {
         replace(replacementDuringExtraction);
         replacementDuringExtraction = "";
@@ -831,6 +844,7 @@ async function verifyPhotoImageRevision() {
   try {
     const before = await detail();
     assert.equal(before.imageCount, 1);
+    assert(before.images[0].bytes <= before.previewThresholdBytes, "small originals can be reused as their own previews");
     assert(!fs.existsSync(cacheRoot), "the old manifest has not cached an image yet");
     replace("BBB");
     await rejectImage(image(before), 409);
@@ -852,6 +866,43 @@ async function verifyPhotoImageRevision() {
     const latest = await detail();
     await bytes(image(latest), "DDD");
     await bytes(`${base}${latest.images[0].url}`, "DDD");
+
+    const large = "A".repeat(700 * 1024);
+    fs.writeFileSync(source, storedZip(member, large));
+    const largeAlbum = await detail();
+    const preview = value => `${image(value)}&preview=1`;
+    assert(largeAlbum.images[0].bytes > largeAlbum.previewThresholdBytes);
+    const readPreview = async value => {
+      const response = await fetch(preview(value));
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("cache-control"), "private, max-age=3600");
+      assert.equal(response.headers.get("content-type"), "image/jpeg");
+      return Buffer.from(await response.arrayBuffer());
+    };
+    previewGate = gate();
+    const reads = Promise.all([readPreview(largeAlbum), readPreview(largeAlbum)]);
+    try {
+      await until(() => previewEncodes === 1, "shared preview encoder");
+      await bytes(image(largeAlbum), large);
+    } finally { previewGate.resolve(); }
+    assert.deepEqual(await reads, [jpeg, jpeg]);
+    assert.deepEqual(await readPreview(largeAlbum), jpeg);
+    assert.equal(previewEncodes, 1, "duplicate preview requests reuse the same encode and warm bytes");
+    const nextLarge = "B".repeat(large.length);
+    replace(nextLarge);
+    await rejectImage(preview(largeAlbum), 409);
+    const nextAlbum = await detail();
+    failPreview = true;
+    await bytes(preview(nextAlbum), nextLarge);
+    assert.equal(previewEncodes, 2, "a new revision must not use the old preview; unavailable encoders fall back to the original");
+    failPreview = false;
+    previewGate = gate();
+    const replacedDuringPreview = rejectImage(preview(nextAlbum), 409);
+    try {
+      await until(() => previewEncodes === 3, "active preview encoder for the replacement archive");
+      replace("C".repeat(large.length));
+    } finally { previewGate.resolve(); }
+    await replacedDuringPreview;
     scenarios++;
   } finally {
     await new Promise(resolve => server.close(resolve));

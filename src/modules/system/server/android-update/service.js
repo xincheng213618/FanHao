@@ -48,11 +48,24 @@ export function createAndroidUpdateService({
     return `${protocol}://${host}`;
   }
 
-  function publicManifest(req, url) {
+  async function readManifest(channel) {
+    const manifest = await readJsonFile(manifestPath(channel), null);
+    const versionCode = Number(manifest?.versionCode);
+    return Number.isSafeInteger(versionCode) && versionCode > 0 ? manifest : null;
+  }
+
+  function publishedApk(channel, manifest) {
+    const fileName = manifest?.apkFile;
+    if (typeof fileName !== "string" || !fileName || sanitizeDownloadFileName(fileName, "") !== fileName) return null;
+    const filePath = safeChildPath(channelDir(channel), fileName);
+    return filePath && normalizeExt(filePath) === ".apk" ? { fileName, filePath } : null;
+  }
+
+  async function publicManifest(req, url) {
     const channel = normalizeChannel(url.searchParams.get("channel"));
     const currentVersionCode = clampInteger(url.searchParams.get("currentVersionCode"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const manifest = readJsonFile(manifestPath(channel), null);
-    if (!manifest || !Number(manifest.versionCode)) {
+    const manifest = await readManifest(channel);
+    if (!manifest) {
       return {
         ok: true,
         channel,
@@ -62,16 +75,17 @@ export function createAndroidUpdateService({
       };
     }
 
-    const fileName = sanitizeDownloadFileName(manifest.apkFile || `fanhao-${channel}.apk`, `fanhao-${channel}.apk`);
-    const apkPath = safeChildPath(channelDir(channel), fileName);
-    const exists = Boolean(apkPath && fs.existsSync(apkPath));
-    const versionCode = Number(manifest.versionCode || 0);
-    const available = exists && versionCode > currentVersionCode;
-    const downloadPath = `/api/android/update/apk/${encodeURIComponent(channel)}/${encodeURIComponent(fileName)}`;
+    const apk = publishedApk(channel, manifest);
+    const stat = apk && await fs.promises.stat(apk.filePath).catch(() => null);
+    const downloadable = stat?.isFile() === true;
+    const versionCode = Number(manifest.versionCode);
+    const downloadUrl = downloadable
+      ? `${requestBaseUrl(req)}/api/android/update/apk/${encodeURIComponent(channel)}/${encodeURIComponent(apk.fileName)}`
+      : "";
     return {
       ok: true,
       channel,
-      available,
+      available: downloadable && versionCode > currentVersionCode,
       currentVersionCode,
       versionCode,
       versionName: String(manifest.versionName || versionCode),
@@ -79,41 +93,38 @@ export function createAndroidUpdateService({
       required: Boolean(manifest.required),
       notes: Array.isArray(manifest.notes) ? manifest.notes.slice(0, 12) : [],
       updatedAt: String(manifest.updatedAt || ""),
-      size: Number(manifest.size || (exists ? fs.statSync(apkPath).size : 0)),
+      size: Number(manifest.size || (downloadable ? stat.size : 0)),
       sha256: String(manifest.sha256 || ""),
-      fileName,
-      downloadUrl: `${requestBaseUrl(req)}${downloadPath}`,
-      message: exists ? "" : "更新包文件不存在"
+      fileName: apk?.fileName || "",
+      downloadUrl,
+      message: downloadable ? "" : apk ? "更新包文件不可用" : "更新包发布记录无效"
     };
   }
 
-  function renderPage(req, url) {
-    const update = publicManifest(req, url);
+  async function renderPage(req, url) {
+    const update = await publicManifest(req, url);
     const pageUrl = new URL("/android-update", requestBaseUrl(req));
     if (update.channel === "release") pageUrl.searchParams.set("channel", "release");
     return renderAndroidDownloadPage(update, pageUrl.toString());
   }
 
-  function serveApk(req, res, channel, fileName) {
+  async function serveApk(req, res, channel, fileName) {
+    if (req.aborted || res.destroyed || res.writableEnded) return;
     const normalizedChannel = normalizeChannel(channel);
-    const safeName = sanitizeDownloadFileName(decodeURIComponent(fileName || ""), `fanhao-${normalizedChannel}.apk`);
-    const manifest = readJsonFile(manifestPath(normalizedChannel), null);
-    const manifestFileName = String(manifest?.apkFile || "");
-    const authorizedName = sanitizeDownloadFileName(manifestFileName, "");
-    if (!authorizedName || authorizedName !== manifestFileName || safeName !== authorizedName) {
-      notFound(res);
-      return;
-    }
-    const apkPath = safeChildPath(channelDir(normalizedChannel), safeName);
-    if (!apkPath || normalizeExt(apkPath) !== ".apk") {
+    let requestedName;
+    try { requestedName = decodeURIComponent(fileName || ""); }
+    catch { notFound(res); return; }
+    const apk = publishedApk(normalizedChannel, await readManifest(normalizedChannel));
+    if (req.aborted || res.destroyed || res.writableEnded) return;
+    if (!apk || requestedName !== apk.fileName) {
       notFound(res);
       return;
     }
 
-    return serveWholeFile(req, res, apkPath, stat => ({
+    return serveWholeFile(req, res, apk.filePath, stat => ({
       "Content-Type": "application/vnd.android.package-archive",
       "Content-Length": stat.size,
-      "Content-Disposition": attachmentDisposition(safeName),
+      "Content-Disposition": attachmentDisposition(apk.fileName),
       "Cache-Control": "no-store"
     }));
   }

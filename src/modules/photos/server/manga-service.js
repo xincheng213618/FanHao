@@ -12,6 +12,7 @@ const MANGA_CHAPTER_READ_CAPACITY = 16;
 const MANGA_PAGE_IO_CONCURRENCY = 2;
 const MANGA_DOWNLOAD_PREFLIGHT_CONCURRENCY = 2;
 const MANGA_DOWNLOAD_PREFLIGHT_CAPACITY = 8;
+const MANGA_DOWNLOAD_CHAPTER_BATCH = 64;
 const MANGA_JOB_HISTORY_SCHEMA_VERSION = 1;
 const MAX_MANGA_JOB_HISTORY = 50;
 const MANGA_METADATA_CACHE_MAX_ENTRIES = 2048;
@@ -490,7 +491,7 @@ export function createMangaService({
   function restoreJobHistory() {
     const payload = readJsonFile(jobHistoryPath, null);
     if (payload?.schemaVersion !== MANGA_JOB_HISTORY_SCHEMA_VERSION || !Array.isArray(payload.jobs)) return;
-    let repairedInterruptedJob = false;
+    let repairedJob = false;
     const restored = payload.jobs
       .slice(0, MAX_MANGA_JOB_HISTORY * 2)
       .map(restoreJobHistoryRecord)
@@ -502,9 +503,18 @@ export function createMangaService({
         job.status = "failed";
         job.finishedAt = new Date().toISOString();
         job.exitCode = null;
-        job.error = "后台重启，任务已中断，请重新采集";
+        job.error = indexPublicationMessage(job) || "后台重启，任务已中断，请重新采集";
         job.message = job.error;
-        repairedInterruptedJob = true;
+        repairedJob = true;
+      } else if (job.status === "complete") {
+        if (job.currentChapterIndex && job.failedImages > 0) markIncompleteChapter(job, job.currentChapterIndex);
+        const recoveredError = indexPublicationMessage(job) || incompleteJobMessage(job);
+        if (recoveredError) {
+          job.status = "failed";
+          job.error = job.message = recoveredError;
+          job.progressPercent = Math.min(99, job.progressPercent);
+          repairedJob = true;
+        }
       }
       jobsById.set(job.id, job);
       const cacheKey = databaseKey(job.cacheDir);
@@ -513,7 +523,7 @@ export function createMangaService({
       if (Number.isSafeInteger(sequence)) updateSequence = Math.max(updateSequence, sequence);
     }
     trimJobHistory();
-    if (repairedInterruptedJob) persistJobHistory(true);
+    if (repairedJob) persistJobHistory(true);
   }
 
   function restoreJobHistoryRecord(record) {
@@ -530,6 +540,9 @@ export function createMangaService({
     const startedAt = validIsoTime(record.startedAt);
     if (!startedAt) return null;
     const finishedAt = validIsoTime(record.finishedAt) || "";
+    const failed = historyIndexSet(record.failed);
+    const completed = historyIndexSet(record.completed);
+    for (const index of failed) completed.delete(index);
     return {
       id,
       kind: record.kind === "add" ? "add" : "update",
@@ -543,8 +556,9 @@ export function createMangaService({
       cachedChapters: optionalHistoryCount(record.cachedChapters),
       pendingChapters: optionalHistoryCount(record.pendingChapters),
       processed: historyIndexSet(record.processed),
-      completed: historyIndexSet(record.completed),
-      failed: historyIndexSet(record.failed),
+      completed,
+      failed,
+      reportedFailedChapters: historyCount(record.reportedFailedChapters),
       currentChapterIndex: optionalHistoryCount(record.currentChapterIndex),
       currentChapterTitle: boundedHistoryText(record.currentChapterTitle, 300),
       completedImages: historyCount(record.completedImages),
@@ -552,8 +566,9 @@ export function createMangaService({
       downloadedImages: historyCount(record.downloadedImages),
       failedImages: historyCount(record.failedImages),
       downloadedBytes: historyCount(record.downloadedBytes),
-      progressPercent: Math.max(0, Math.min(100, Number(record.progressPercent || 0))),
+      progressPercent: Math.min(100, historyCount(record.progressPercent)),
       exitCode: Number.isInteger(record.exitCode) ? record.exitCode : null,
+      indexError: boundedHistoryText(record.indexError, 700),
       error: boundedHistoryText(record.error, 1200),
       message: boundedHistoryText(record.message, 1200),
       log: [],
@@ -578,6 +593,7 @@ export function createMangaService({
       processed: [...job.processed],
       completed: [...job.completed],
       failed: [...job.failed],
+      reportedFailedChapters: job.reportedFailedChapters,
       currentChapterIndex: job.currentChapterIndex,
       currentChapterTitle: job.currentChapterTitle,
       completedImages: job.completedImages,
@@ -587,6 +603,7 @@ export function createMangaService({
       downloadedBytes: job.downloadedBytes,
       progressPercent: updateProgressPercent(job),
       exitCode: job.exitCode,
+      indexError: job.indexError || "",
       error: job.error || "",
       message: job.message || ""
     };
@@ -663,6 +680,25 @@ export function createMangaService({
       .filter((index) => index > 0));
   }
 
+  function failedChapterCount(job) {
+    return Math.max(job.failed.size, job.reportedFailedChapters);
+  }
+
+  function incompleteJobMessage(job) {
+    const count = failedChapterCount(job);
+    return count ? `采集未完成，${count} 章未完整保存` : "";
+  }
+
+  function indexPublicationMessage(job) {
+    return job.indexError ? `馆藏索引保存失败，请重试。${job.indexError}` : "";
+  }
+
+  function markIncompleteChapter(job, index) {
+    job.processed.add(index);
+    job.completed.delete(index);
+    job.failed.add(index);
+  }
+
   function publicUpdateJob(job) {
     if (!job) return { status: "idle" };
     const presentation = jobPresentation(job);
@@ -683,7 +719,7 @@ export function createMangaService({
       pendingChapters: job.pendingChapters,
       processedChapters: job.processed.size,
       completedChapters: job.completed.size,
-      failedChapters: job.failed.size,
+      failedChapters: failedChapterCount(job),
       currentChapterIndex: job.currentChapterIndex,
       currentChapterTitle: job.currentChapterTitle,
       completedImages: job.completedImages,
@@ -724,14 +760,12 @@ export function createMangaService({
     if (job.status === "failed") return Math.max(0, Number(job.progressPercent || 0));
     if (job.pendingChapters == null) return 3;
     if (job.pendingChapters === 0) return 92;
-    const currentChapterAlreadyCompleted = Boolean(
-      job.currentChapterIndex && job.completed.has(job.currentChapterIndex)
-    );
-    const imageRatio = !currentChapterAlreadyCompleted && job.totalImages > 0
+    const currentChapterSettled = job.completed.has(job.currentChapterIndex) || job.failed.has(job.currentChapterIndex);
+    const imageRatio = !currentChapterSettled && job.totalImages > 0
       ? Math.min(1, job.completedImages / job.totalImages)
       : 0;
     return Math.max(5, Math.min(99, Math.floor(
-      ((job.completed.size + imageRatio) / job.pendingChapters) * 100
+      ((job.completed.size + job.failed.size + imageRatio) / job.pendingChapters) * 100
     )));
   }
 
@@ -739,12 +773,11 @@ export function createMangaService({
     if (job.status === "failed") return job.error || "漫画更新失败";
     if (job.status === "complete") {
       if (job.pendingChapters === 0) return "已是最新，没有新增章节";
-      if (job.failed.size) return `更新完成，${job.failed.size} 个章节失败`;
       return `更新完成，共处理 ${job.pendingChapters ?? job.processed.size} 个章节`;
     }
     if (job.pendingChapters == null) return "正在读取远程目录";
     if (job.pendingChapters === 0) return "正在确认本地索引";
-    const chapterPosition = Math.min(job.pendingChapters, job.completed.size + 1);
+    const chapterPosition = Math.min(job.pendingChapters, job.completed.size + job.failed.size + 1);
     if (job.totalImages > 0) {
       return `正在更新第 ${chapterPosition}/${job.pendingChapters} 章 · 图片 ${job.completedImages}/${job.totalImages}`;
     }
@@ -778,14 +811,23 @@ export function createMangaService({
       job.failedImages = Number(payload.failedImages || 0);
       job.downloadedBytes = Number(payload.downloadedBytes || 0);
     } else if (event === "chapter-complete") {
-      const index = Number(payload.chapterIndex || 0);
+      const index = historyCount(payload.chapterIndex);
+      const status = String(payload.status || "");
       if (index) {
-        job.processed.add(index);
-        job.completed.add(index);
+        if (status === "failed" || status === "skipped_robots" || historyCount(payload.failedImages) || historyCount(payload.skippedImages)) {
+          markIncompleteChapter(job, index);
+        } else if (!job.failed.has(index)) {
+          job.processed.add(index);
+          job.completed.add(index);
+        }
       }
-      if (String(payload.status || "") === "failed") job.failed.add(index);
-      job.downloadedImages = Number(payload.downloadedImages || job.downloadedImages || 0);
-      job.failedImages = Number(payload.failedImages || job.failedImages || 0);
+      job.downloadedImages = historyCount(payload.downloadedImages ?? job.downloadedImages);
+      job.failedImages = historyCount(payload.failedImages ?? job.failedImages);
+    } else if (event === "index-publication" && ["complete", "failed"].includes(payload.status)) {
+      job.indexPublicationReported = true;
+      job.indexError = payload.status === "failed" ? boundedHistoryText(payload.error, 700) || "SQLite 写入未完成" : "";
+    } else if (event === "complete") {
+      job.reportedFailedChapters = historyCount(payload.failedChapters);
     }
     job.progressPercent = updateProgressPercent(job);
   }
@@ -814,10 +856,12 @@ export function createMangaService({
     if (match) job.cachedChapters = Number(match[1]);
     match = /^Need update:\s*(\d+)/i.exec(value);
     if (match) job.pendingChapters = Number(match[1]);
-    match = /^\[(\d+)\]\s+(?:Fetch page|skipped by robots|failed:)/i.exec(value);
+    match = /^\[(\d+)\]\s+Fetch page/i.exec(value);
     if (match) job.processed.add(Number(match[1]));
-    match = /^\[(\d+)\]\s+failed:/i.exec(value);
-    if (match) job.failed.add(Number(match[1]));
+    match = /^\[(\d+)\]\s+(?:failed:|skipped by robots)/i.exec(value);
+    if (match) markIncompleteChapter(job, Number(match[1]));
+    match = /^SQLite index warning:\s*(.+)$/i.exec(value);
+    if (match && !job.indexPublicationReported) job.indexError = boundedHistoryText(match[1], 700);
     job.message = updateJobMessage(job);
     persistJobHistory();
   }
@@ -840,9 +884,12 @@ export function createMangaService({
     }
     job.exitCode = Number.isInteger(exitCode) ? exitCode : null;
     job.finishedAt = new Date().toISOString();
-    if (error || job.exitCode !== 0) {
+    if (job.currentChapterIndex && job.failedImages > 0) markIncompleteChapter(job, job.currentChapterIndex);
+    job.progressPercent = updateProgressPercent(job);
+    const publicationError = indexPublicationMessage(job) || incompleteJobMessage(job);
+    if (error || job.exitCode !== 0 || publicationError) {
       job.status = "failed";
-      job.error = String(error?.message || `采集器退出代码 ${job.exitCode ?? "未知"}`);
+      job.error = String(error?.message || publicationError || `采集器退出代码 ${job.exitCode ?? "未知"}`);
     } else {
       job.status = "complete";
     }
@@ -1243,6 +1290,7 @@ export function createMangaService({
       processed: new Set(),
       completed: new Set(),
       failed: new Set(),
+      reportedFailedChapters: 0,
       currentChapterIndex: null,
       currentChapterTitle: "",
       completedImages: 0,
@@ -1252,6 +1300,8 @@ export function createMangaService({
       downloadedBytes: 0,
       progressPercent: 0,
       exitCode: null,
+      indexError: "",
+      indexPublicationReported: false,
       error: "",
       message: "正在启动增量更新",
       log: [],
@@ -1979,7 +2029,7 @@ export function createMangaService({
 
   function chapterDownloadRecord(directory, requestedIndex, downloadContext = null) {
     const { cacheDir } = directory;
-    const found = findChapter(cacheDir, requestedIndex, { downloadContext });
+    const found = findChapter(cacheDir, requestedIndex, { downloadContext, manifestContext: downloadContext?.manifestContext });
     if (!found) return null;
     // Downloads need the stored image paths, not reader navigation, covers or
     // image dimensions. Keep the manifest snapshot local to this download.
@@ -1990,18 +2040,17 @@ export function createMangaService({
     return { chapter, images };
   }
 
+  async function chapterDownloadFile(directory, image, index, signal) {
+    const source = await downloadFile(directory, image?.local_path, signal);
+    if (!source) return null;
+    const extension = path.extname(String(image.local_path).replace(/[\\/]+/g, path.sep)).toLowerCase();
+    const resolvedImageIndex = Number(image?.index || index + 1);
+    const imageIndex = Math.max(1, Number(resolvedImageIndex || index + 1));
+    return { ...source, name: `${String(imageIndex).padStart(4, "0")}${extension}` };
+  }
+
   async function chapterDownloadFiles(directory, images, signal) {
-    const files = await readMangaPages(images, signal, async (image, index) => {
-      const source = await downloadFile(directory, image?.local_path, signal);
-      if (!source) return null;
-      const extension = path.extname(String(image.local_path).replace(/[\\/]+/g, path.sep)).toLowerCase();
-      const resolvedImageIndex = Number(image?.index || index + 1);
-      const imageIndex = Math.max(1, Number(resolvedImageIndex || index + 1));
-      return {
-        ...source,
-        name: `${String(imageIndex).padStart(4, "0")}${extension}`
-      };
-    });
+    const files = await readMangaPages(images, signal, (image, index) => chapterDownloadFile(directory, image, index, signal));
     return files.filter(Boolean);
   }
 
@@ -2095,7 +2144,9 @@ export function createMangaService({
   }
 
   async function prepareComicDownload(directory, signal) {
-    const comic = publicDetail(directory.cacheDir);
+    const { cacheDir } = directory;
+    const manifestContext = {};
+    const comic = publicSummary(cacheDir, manifestContext);
     if (!mangaWholeDownloadReady(comic)) {
       return { error: {
         error: "漫画尚未下载完成，整本下载将在全部章节完成后可用",
@@ -2105,26 +2156,42 @@ export function createMangaService({
         failedCount: Number(comic.failedCount || 0)
       } };
     }
-    const downloadContext = {};
+    const cacheKey = databaseKey(cacheDir);
+    const expectedFiles = Number(comic.downloadedCount || 0);
+    const records = database.downloadChapters(cacheKey, expectedFiles);
+    const rows = records ? [] : database.chapters(cacheKey);
+    const chapters = records ?? (rows.length ? rows.map(chapterFromDatabase) : readMangaManifest(cacheDir, manifestContext).chapters);
+    const chapterList = Array.isArray(chapters) ? chapters : [];
+    const downloadContext = { manifestContext };
     const files = [];
     let missingChapter = false;
-    for (const chapter of comic.chapters || []) {
+    for (let start = 0; start < chapterList.length; start += MANGA_DOWNLOAD_CHAPTER_BATCH) {
       if (signal.aborted) return null;
-      const record = chapterDownloadRecord(directory, chapter.index, downloadContext);
-      const chapterFiles = record ? await chapterDownloadFiles(directory, record.images, signal) : [];
-      if (signal.aborted) return null;
-      if (!chapterFiles.length) {
-        missingChapter = true;
-        continue;
+      const tasks = [];
+      const chaptersWithPages = new Set();
+      const end = Math.min(chapterList.length, start + MANGA_DOWNLOAD_CHAPTER_BATCH);
+      for (let index = start; index < end; index++) {
+        const record = records ? records[index] : chapterDownloadRecord(directory, chapterIndex(chapterList[index], index), downloadContext);
+        if (!record) continue;
+        const { index: chapterNumber, title } = record.chapter;
+        const folder = `${String(chapterNumber).padStart(4, "0")}_${zipPathSegment(title, `第${chapterNumber}话`)}`;
+        record.images.forEach((image, pageIndex) => tasks.push({ image, pageIndex, folder, ordinal: index }));
       }
-      const chapterFolder = `${String(record.chapter.index).padStart(4, "0")}_${zipPathSegment(record.chapter.title, `第${record.chapter.index}话`)}`;
-      for (const file of chapterFiles) files.push({ ...file, name: `${chapterFolder}/${file.name}` });
+      const checked = await readMangaPages(tasks, signal, async ({ image, pageIndex, folder, ordinal }) => {
+        const file = await chapterDownloadFile(directory, image, pageIndex, signal);
+        if (!file) return null;
+        chaptersWithPages.add(ordinal);
+        return { ...file, name: `${folder}/${file.name}` };
+      });
+      if (signal.aborted) return null;
+      if (chaptersWithPages.size !== end - start) missingChapter = true;
+      for (const file of checked) if (file) files.push(file);
     }
-    if (missingChapter || files.length !== Number(comic.downloadedCount || 0)) {
+    if (missingChapter || files.length !== expectedFiles) {
       return { error: {
         error: "漫画文件不完整，请先更新修复后再下载整本",
         code: "MANGA_DOWNLOAD_FILES_MISSING",
-        expectedFiles: Number(comic.downloadedCount || 0),
+        expectedFiles,
         availableFiles: files.length
       } };
     }

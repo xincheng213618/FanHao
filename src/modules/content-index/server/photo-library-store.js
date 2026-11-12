@@ -72,14 +72,45 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     return getDb().prepare("SELECT revision FROM gallery_media_library_snapshot WHERE id=1 AND identity=?").get(mediaIdentity)?.revision || "";
   }
 
-  function publish(index, { expectedRevision, expectedMediaRevision, photo = true, media = false } = {}) {
+  function rescanBaseline({ photo, media, includeMediaItems }) {
+    return readSnapshot(db => {
+      const photos = photo ? db.prepare("SELECT revision, roots_json FROM photo_library_snapshot WHERE id=1").get() : null;
+      const videos = media ? db.prepare("SELECT revision, roots_json FROM gallery_media_library_snapshot WHERE id=1").get() : null;
+      return {
+        photoRevision: photos?.revision || "", mediaRevision: videos?.revision || "",
+        photoRoots: photos ? JSON.parse(photos.roots_json) : [], mediaRoots: videos ? JSON.parse(videos.roots_json) : [],
+        mediaItems: videos && includeMediaItems ? readMediaItems(db) : []
+      };
+    });
+  }
+
+  function indexedPhotoRoots() {
+    return getDb().prepare(`SELECT DISTINCT json_extract(data_json, '$.sourceRoot') AS root
+      FROM photo_library_snapshot CROSS JOIN photo_library_archives WHERE photo_library_snapshot.id=1`).all();
+  }
+
+  function indexedMediaRoots() {
+    return getDb().prepare(`SELECT DISTINCT item.media_kind AS kind, json_extract(item.data_json, '$.sourceRoot') AS root
+      FROM gallery_media_library_snapshot snapshot CROSS JOIN gallery_media_library_items item
+      WHERE snapshot.id=1`).all();
+  }
+
+  function publish(index, { expectedRevision, expectedMediaRevision, expectedPublication, photo = true, media = false } = {}) {
     if (!photo && !media) return;
     const projection = photo ? project(index, collectionLocales) : null;
     const db = getDb();
     db.exec("BEGIN IMMEDIATE");
     try {
-      if ((photo && expectedRevision !== undefined && revision() !== expectedRevision)
-        || (media && expectedMediaRevision !== undefined && mediaRevision() !== expectedMediaRevision)) {
+      // A rescan replaces the singleton publications even when its configuration
+      // differs, so its comparison must observe the previous physical rows.
+      const expectedPhoto = expectedPublication?.photoRevision ?? expectedRevision;
+      const expectedMedia = expectedPublication?.mediaRevision ?? expectedMediaRevision;
+      const actualPhoto = photo && expectedPhoto !== undefined && (expectedPublication
+        ? db.prepare("SELECT revision FROM photo_library_snapshot WHERE id=1").get()?.revision || "" : revision());
+      const actualMedia = media && expectedMedia !== undefined && (expectedPublication
+        ? db.prepare("SELECT revision FROM gallery_media_library_snapshot WHERE id=1").get()?.revision || "" : mediaRevision());
+      if ((photo && expectedPhoto !== undefined && actualPhoto !== expectedPhoto)
+        || (media && expectedMedia !== undefined && actualMedia !== expectedMedia)) {
         throw new Error("扫描期间图库索引已更新，请重新扫描");
       }
       const publication = randomUUID();
@@ -256,6 +287,10 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     });
   }
 
+  function readMediaItems(db) {
+    return db.prepare("SELECT data_json FROM gallery_media_library_items ORDER BY position").all().map(row => JSON.parse(row.data_json));
+  }
+
   function mediaIndex() {
     return readSnapshot(db => {
       const state = db.prepare("SELECT revision, scanned_at, roots_json FROM gallery_media_library_snapshot WHERE id=1 AND identity=?").get(mediaIdentity);
@@ -263,7 +298,7 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
       if (cachedMedia?.revision === state.revision) return cachedMedia;
       cachedMedia = {
         revision: state.revision, scannedAt: state.scanned_at, mediaRoots: JSON.parse(state.roots_json),
-        mediaItems: db.prepare("SELECT data_json FROM gallery_media_library_items ORDER BY position").all().map(row => JSON.parse(row.data_json))
+        mediaItems: readMediaItems(db)
       };
       return cachedMedia;
     });
@@ -344,5 +379,6 @@ export function createPhotoLibraryStore({ getDb, archiveExts, photoSetRoots, dir
     });
   }
 
-  return { archiveMarks, byId, collectionPage, contentImageCounts, coverWarmPlan, hasSnapshot, index, indexForCategory, indexForPerson, mediaIndex, mediaRevision, publish, revision, setArchiveMarkedA, summary };
+  return { archiveMarks, byId, collectionPage, contentImageCounts, coverWarmPlan, hasSnapshot, index, indexForCategory, indexForPerson,
+    indexedMediaRoots, indexedPhotoRoots, mediaIndex, mediaRevision, publish, rescanBaseline, revision, setArchiveMarkedA, summary };
 }

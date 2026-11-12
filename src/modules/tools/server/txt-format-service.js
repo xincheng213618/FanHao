@@ -2,6 +2,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { streamStoredZip } from "../../../platform/server/stored-zip-stream.js";
+
+const MAX_BATCH_FILES = 16;
 
 function sanitizeDownloadFileName(value, fallback = "formatted.txt") {
   const raw = String(value || "").replaceAll("\\", "/");
@@ -73,7 +76,11 @@ export function createTxtFormatToolService({
     timers.delete(id);
     const record = downloads.get(id);
     downloads.delete(id);
-    const dir = record?.dirPath || downloadDirForId(id);
+    if (record?.archiveReaders) { record.removeAfterArchive = true; return; }
+    removeDownloadDirectory(record?.dirPath || downloadDirForId(id));
+  }
+
+  function removeDownloadDirectory(dir) {
     try {
       const resolved = path.resolve(dir);
       const root = path.resolve(toolDownloadDir);
@@ -174,9 +181,8 @@ export function createTxtFormatToolService({
     const inputPath = path.join(dirPath, "source.txt");
     const outputFileName = formattedTxtFileName(fileName);
     const outputPath = path.join(dirPath, outputFileName);
-    fs.writeFileSync(inputPath, buffer);
-
     try {
+      fs.writeFileSync(inputPath, buffer);
       const stats = await runFormatter(inputPath, outputPath, options);
       fs.rmSync(inputPath, { force: true });
       const outputBuffer = fs.readFileSync(outputPath);
@@ -187,6 +193,7 @@ export function createTxtFormatToolService({
         filePath: outputPath,
         fileName: outputFileName,
         size: outputBuffer.length,
+        archiveReaders: 0,
         createdAt: now,
         expiresAt: now + ttlMs
       };
@@ -246,10 +253,59 @@ export function createTxtFormatToolService({
     fs.createReadStream(record.filePath).pipe(res);
   }
 
+  async function serveBatchDownload(res, ids) {
+    if (ids.length < 2 || ids.length > MAX_BATCH_FILES || new Set(ids).size !== ids.length
+        || ids.some(id => !/^[A-Za-z0-9_-]{1,80}$/.test(id))) {
+      sendJson(res, 400, { error: `请选择 2 至 ${MAX_BATCH_FILES} 份不同的整理结果` });
+      return;
+    }
+    const now = Date.now();
+    const records = ids.map(id => downloads.get(id));
+    if (records.some(record => !record || now >= record.expiresAt)) {
+      sendJson(res, 410, { error: "部分结果已过期，请重新整理后下载" });
+      return;
+    }
+
+    const files = [], names = new Set();
+    try {
+      const root = fs.realpathSync(toolDownloadDir);
+      for (const record of records) {
+        const filePath = fs.realpathSync(record.filePath);
+        const expectedStat = fs.statSync(filePath);
+        if (filePath !== path.join(root, record.id, record.fileName) || !expectedStat.isFile() || expectedStat.size !== record.size) {
+          throw new Error("TXT result was replaced");
+        }
+        const { name: stem, ext } = path.parse(record.fileName);
+        let name = record.fileName;
+        for (let suffix = 2; names.has(name.toLowerCase()); suffix++) name = `${stem} (${suffix})${ext}`;
+        names.add(name.toLowerCase());
+        files.push({ path: filePath, expectedStat, name });
+      }
+    } catch {
+      sendJson(res, 404, { error: "部分整理结果无法读取，请重新整理后下载" });
+      return;
+    }
+    for (const record of records) record.archiveReaders++;
+    try {
+      res.writeHead(200, {
+        "Content-Type": "application/zip",
+        "Content-Disposition": attachmentDisposition("TXT_整理结果.zip"),
+        "Cache-Control": "no-store"
+      });
+      await streamStoredZip(res, files);
+    } finally {
+      for (const record of records) {
+        record.archiveReaders--;
+        if (!record.archiveReaders && record.removeAfterArchive) removeDownloadDirectory(record.dirPath);
+      }
+    }
+  }
+
   return {
     cleanup,
     createDownload,
     maxBodyBytes,
+    serveBatchDownload,
     serveDownload
   };
 }

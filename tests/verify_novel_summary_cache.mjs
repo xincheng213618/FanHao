@@ -283,7 +283,7 @@ async function verifyBookListSummaryCount() {
   const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
   const source = fs.readFileSync(sourceUrl, "utf8");
   const baselineSource = source.replace(
-    'if (!query && !author && !readingOnly && category === "all" && summaryStaticCache && readSummaryCacheStable)',
+    'if (!query && !author && !readingOnly && !readingCondition && category === "all" && summaryStaticCache && readSummaryCacheStable)',
     "if (false)"
   );
   assert.notEqual(baselineSource, source);
@@ -1219,14 +1219,14 @@ async function verifyAuthorSummaryCache({ memory = false } = {}) {
 async function verifyReadingCount() {
   const sourceUrl = new URL("../src/modules/novels/server/store.js", import.meta.url);
   const source = fs.readFileSync(sourceUrl, "utf8").replaceAll("\r\n", "\n");
-  const countBlock = `      const countFrom = readingOnly
-        ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
-        : "novel_books b";`;
+  const countBlock = `: readingOnly
+          ? "novel_reading_state rs CROSS JOIN novel_books b ON b.id = rs.book_id"
+          : "novel_books b";`;
   assert.equal(source.split(countBlock).length, 2);
   // The former count driver is the only restored code. The actual factory,
   // schema, predicates, rows/order, transaction and revision remain real.
   const previousSource = source.replace(countBlock,
-    '      const countFrom = "novel_books b";')
+    ': "novel_books b";')
     .replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from ${JSON.stringify(new URL(relative, sourceUrl).href)}`);
   const { createNovelStore: previousFactory } = await import(`data:text/javascript;base64,${Buffer.from(previousSource).toString("base64")}`);
   const factory = process.argv.includes("--legacy-reading-count") ? previousFactory : createNovelStore;

@@ -22,6 +22,11 @@ try {
   assert.equal(result.files, 6);
   assert.equal(result.directories, 4);
   assert.equal(result.bytes, 460);
+  await assert.rejects(
+    scanFixture(path.join(fixture.baseDir, "unavailable-root"), path.join(fixture.cacheDir, "unavailable.sqlite")),
+    /磁盘根目录.*不可访问/,
+    "a worker must reject a vanished root instead of reporting a successful empty snapshot"
+  );
 
   const database = new DatabaseSync(outputPath, { readOnly: true });
   try {
@@ -55,6 +60,7 @@ try {
     excludedNames: ["$RECYCLE.BIN"],
     sources: [{ path: fixture.root, label: "测试资料" }, { path: fixture.allowedLinkedRoots[0], label: "链接资料" }]
   };
+  await verifyScanPublication(storeOptions, driveId, fixture, outputPath);
   store = createDiskUsageStore(storeOptions);
   store.start();
   const summary = store.summary();
@@ -93,6 +99,137 @@ try {
 } finally {
   try { await store?.stop(); }
   finally { fixture.cleanup(); }
+}
+
+async function verifyScanPublication(options, driveId, fixture, snapshotPath) {
+  const cacheDir = path.join(fixture.baseDir, "publication-cache");
+  fs.mkdirSync(cacheDir);
+  const driveName = driveId.toLowerCase();
+  const manifestPath = path.join(cacheDir, `${driveName}.json`);
+  const priorManifest = fs.readFileSync(path.join(options.cacheDir, `${driveName}.json`), "utf8");
+  fs.copyFileSync(snapshotPath, path.join(cacheDir, path.basename(snapshotPath)));
+  fs.writeFileSync(manifestPath, priorManifest);
+  const staleManifest = `${manifestPath}.1720000000000-fixture.tmp`;
+  const unrelated = `${manifestPath}.notes.tmp`;
+  fs.writeFileSync(staleManifest, "{");
+  fs.writeFileSync(unrelated, "fixture");
+
+  const rootStat = fs.statSync(fixture.root, { bigint: true });
+  const rootIdentity = { dev: rootStat.dev, ino: rootStat.ino };
+  const cleanupCallbacks = [];
+  const originalSchedule = globalThis.setTimeout;
+  const originalWrite = fs.writeFileSync;
+  let mode = "detached";
+  let pending;
+  const store = createDiskUsageStore({
+    ...options,
+    cacheDir,
+    createWorker(file, { workerData }) {
+      assert(workerData.outputPath.startsWith(`${cacheDir}${path.sep}`));
+      assert.equal(typeof workerData.rootIdentity.ino, "bigint");
+      if (mode === "missing-output") {
+        return new Worker(`const { parentPort, workerData } = require("node:worker_threads");
+          parentPort.postMessage({ type: "complete", result: workerData });`, { eval: true, workerData });
+      }
+      if (mode === "silent") {
+        const worker = new Worker(`require("node:worker_threads").parentPort.once("message", () => {});`, { eval: true });
+        fs.writeFileSync(workerData.outputPath, "active scan");
+        pending = { worker, outputPath: workerData.outputPath };
+        return worker;
+      }
+      const root = mode === "detached" ? path.join(fixture.baseDir, "unavailable-root")
+        : mode === "replaced" ? fixture.baseDir : fixture.root;
+      if (mode === "unreadable-after-scan") {
+        return new Worker(`const fs = require("node:fs");
+          const { workerData } = require("node:worker_threads");
+          const open = fs.opendirSync;
+          fs.opendirSync = (directory, ...args) => {
+            if (directory === workerData.root && fs.existsSync(workerData.outputPath)) {
+              throw Object.assign(new Error("fixture root disconnected after scan"), { code: "EIO" });
+            }
+            return open(directory, ...args);
+          };
+          void import(workerData.workerUrl);`, {
+          eval: true, workerData: { ...workerData, root, rootIdentity, workerUrl: file.href }
+        });
+      }
+      return new Worker(file, { workerData: { ...workerData, root, rootIdentity } });
+    }
+  });
+  globalThis.setTimeout = function(callback, delay, ...args) {
+    if (delay !== 3000) return originalSchedule(callback, delay, ...args);
+    cleanupCallbacks.push(callback);
+    return { unref() {} };
+  };
+  try {
+    store.start();
+    assert.equal(fs.existsSync(staleManifest), false, "startup removes interrupted manifest staging files");
+    assert.equal(fs.readFileSync(unrelated, "utf8"), "fixture");
+
+    async function checkFailedRefresh(error) {
+      const scan = store.refresh(driveId);
+      const task = await waitForScan(store, scan);
+      assert.equal(task.state, "failed");
+      assert.match(task.error, error);
+      assert.equal(fs.readFileSync(manifestPath, "utf8"), priorManifest, "a failed refresh must preserve the selected cache manifest");
+      assert.equal(store.tree(driveId, fixture.root).cache.scanId, "fixture");
+      assert.equal(fs.existsSync(path.join(cacheDir, `${driveName}-${scan.scanId}.sqlite`)), false);
+      assert.equal(fs.existsSync(`${manifestPath}.${scan.scanId}.tmp`), false);
+    }
+
+    await checkFailedRefresh(/磁盘根目录.*不可访问/);
+    mode = "replaced";
+    await checkFailedRefresh(/磁盘根目录.*发生变化/);
+    mode = "unreadable-after-scan";
+    await checkFailedRefresh(/磁盘根目录.*不可访问/);
+    mode = "missing-output";
+    await checkFailedRefresh(/扫描结果文件不可用/);
+
+    mode = "readable";
+    fs.writeFileSync = function(file, content, writeOptions) {
+      if (typeof file === "string" && (file === manifestPath || file.startsWith(`${manifestPath}.`))) {
+        originalWrite.call(this, file, "{", writeOptions);
+        throw Object.assign(new Error("fixture manifest storage full"), { code: "ENOSPC" });
+      }
+      return originalWrite.call(this, file, content, writeOptions);
+    };
+    try { await checkFailedRefresh(/fixture manifest storage full/); }
+    finally { fs.writeFileSync = originalWrite; }
+
+    const completed = store.refresh(driveId);
+    const completedTask = await waitForScan(store, completed);
+    assert.equal(completedTask.state, "complete");
+    assert.equal(store.tree(driveId, fixture.root).cache.scanId, completed.scanId);
+    assert.equal(store.tree(driveId, fixture.root).node.size, 460);
+    assert.equal(cleanupCallbacks.length, 1);
+
+    mode = "silent";
+    const interrupted = store.refresh(driveId);
+    assert.equal(store.status().active.scanId, interrupted.scanId);
+    cleanupCallbacks.shift()();
+    assert.equal(fs.existsSync(pending.outputPath), true, "earlier cleanup cannot remove the active scan output");
+    pending.worker.postMessage("exit without result");
+    const interruptedTask = await waitForScan(store, interrupted);
+    assert.equal(interruptedTask.state, "failed");
+    assert.match(interruptedTask.error, /退出前没有返回结果/);
+    assert.equal(store.status().active, null);
+    assert.equal(fs.existsSync(pending.outputPath), false);
+    assert.equal(store.tree(driveId, fixture.root).cache.scanId, completed.scanId);
+  } finally {
+    fs.writeFileSync = originalWrite;
+    globalThis.setTimeout = originalSchedule;
+    await store.stop();
+  }
+}
+
+async function waitForScan(store, scan) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const task = store.status().tasks.find(entry => entry.scanId === scan.scanId);
+    if (task && ["complete", "failed"].includes(task.state)) return task;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail(`scan ${scan.scanId} did not reach a terminal state`);
 }
 
 async function verifyPlayInfo(store, driveId, root) {

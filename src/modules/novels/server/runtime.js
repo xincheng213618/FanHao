@@ -8,6 +8,7 @@ import { createNovelSettingsProvider } from "./settings.js";
 import { createNovelStore } from "./store.js";
 import { NOVEL_WRITE_METHODS } from "./store.js";
 import { createNovelWriteWorkerClient } from "./write-worker-client.js";
+import { createNovelTextSearch } from "./text-search-service.js";
 import { routeNovelApi } from "./routes.js";
 
 export function createNovelsRuntime({
@@ -25,6 +26,7 @@ export function createNovelsRuntime({
   collectionServiceFactory = createNovelCollectionWorkerClient
 }) {
   const readStore = createNovelStore({ dbPath });
+  const textSearch = createNovelTextSearch({ dbPath });
   const reimportArtifactRoot = reimportServiceOptions.artifactRoot || path.join(os.tmpdir(), `fanhao-novel-reimport-${crypto.randomUUID()}`);
   const writeService = createNovelWriteWorkerClient({ ...writeWorkerOptions, dbPath, reimportArtifactRoot, onCommitted: () => readStore.invalidate() });
   const store = { ...readStore, ...Object.fromEntries(NOVEL_WRITE_METHODS.map((method) => [method, writeService[method]])) };
@@ -72,6 +74,7 @@ export function createNovelsRuntime({
       readJsonBody,
       reimportService,
       requireLocalAdmin,
+      searchBookText: textSearch.search,
       sendJson
     });
   }
@@ -82,11 +85,12 @@ export function createNovelsRuntime({
 
   async function stop() {
     lifecycleGeneration += 1;
+    textSearch.beginStop();
     credentialService.beginStop?.();
     collectionService.beginStop?.();
     reimportService.beginStop();
     try {
-      await drainImports();
+      await drainBackground();
     } finally {
       try { await writeService.stop(); }
       finally {
@@ -96,8 +100,8 @@ export function createNovelsRuntime({
     }
   }
 
-  async function drainImports() {
-    const drained = await Promise.allSettled([collectionService.stop(), reimportService.stop()]);
+  async function drainBackground() {
+    const drained = await Promise.allSettled([collectionService.stop(), reimportService.stop(), textSearch.stop()]);
     const failure = drained.find((result) => result.status === "rejected");
     if (failure) throw failure.reason;
   }
@@ -116,14 +120,16 @@ export function createNovelsRuntime({
       assertStarting(generation);
       await collectionService.start();
       assertStarting(generation);
+      textSearch.start();
     },
     async beginStop() {
       lifecycleGeneration += 1;
+      textSearch.beginStop();
       credentialService.beginStop?.();
       collectionService.beginStop?.();
       reimportService.beginStop();
       // An already dispatched collector import still needs the shared writer.
-      try { await drainImports(); }
+      try { await drainBackground(); }
       finally { await writeService.beginStop(); }
     },
     stop,

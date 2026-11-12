@@ -37,10 +37,10 @@ export function createNovelCollectionService({
 
   async function start() {
     if (started) return;
-    started = true;
-    stopping = false;
     fs.mkdirSync(taskOutputRoot, { recursive: true });
     store.recoverInterruptedTasks();
+    started = true;
+    stopping = false;
     runtimeProbe = await probeRuntime();
     schedulePump();
   }
@@ -234,25 +234,9 @@ export function createNovelCollectionService({
   function executeTask(queuedTask) {
     const task = store.markRunning(queuedTask.id);
     const taskDir = path.join(taskOutputRoot, task.id);
-    fs.mkdirSync(taskDir, { recursive: true });
     const configPath = path.join(taskDir, "task.json");
     const resultPath = path.join(taskDir, "result.json");
     const logPath = path.join(taskDir, "collector.log");
-    const payload = {
-      taskId: task.id,
-      url: task.startUrl,
-      mode: task.mode,
-      adapter: task.adapterSnapshot,
-      options: task.options,
-      credentials: credentialService?.runnerCredentials?.(task.adapterId) || {},
-      projectRoot: root
-    };
-    fs.writeFileSync(configPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    fs.appendFileSync(
-      logPath,
-      `${new Date().toISOString()} attempt ${task.attempt} started\n`,
-      "utf8"
-    );
 
     const logLines = [];
     let lastProgress = {
@@ -277,6 +261,25 @@ export function createNovelCollectionService({
     let child;
     let stdout = null;
     let stderr = null;
+    try {
+      fs.mkdirSync(taskDir, { recursive: true });
+      const payload = {
+        taskId: task.id,
+        url: task.startUrl,
+        mode: task.mode,
+        adapter: task.adapterSnapshot,
+        options: task.options,
+        credentials: credentialService?.runnerCredentials?.(task.adapterId) || {},
+        projectRoot: root
+      };
+      fs.writeFileSync(configPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      fs.appendFileSync(logPath, `${new Date().toISOString()} attempt ${task.attempt} started\n`, "utf8");
+      // The previous attempt's result is never proof that this collector finished.
+      fs.rmSync(resultPath, { force: true });
+    } catch (error) {
+      finishFailure(new Error(`无法准备采集任务文件：${error.message || error}`, { cause: error }));
+      return done;
+    }
     try {
       child = spawnProcess(
         pythonPath,

@@ -153,8 +153,10 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
     for (const [id, plan] of plans) if (plan.expiresAt <= timestamp) plans.delete(id);
   }
 
-  async function readSource(url) {
-    const page = await loadPublicSource(url);
+  async function readSource(url, signal) {
+    signal?.throwIfAborted();
+    const page = await loadPublicSource(url, { signal });
+    signal?.throwIfAborted();
     try {
       return parsePhotoSourcePage(page.url, page.html);
     } catch (error) {
@@ -163,19 +165,20 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
     }
   }
 
-  async function collectionForCategory(firstPage, category) {
+  async function collectionForCategory(firstPage, category, signal) {
     if (firstPage.collection) return firstPage.collection;
     if (firstPage.collections.length !== 1) return null;
     try {
-      const { collection } = await readSource(firstPage.collections[0].url);
+      const { collection } = await readSource(firstPage.collections[0].url, signal);
       return collection?.issueListUrl && sourceCategory(collection.issueListUrl) === category ? collection : null;
     } catch (error) {
+      signal?.throwIfAborted();
       if (error.statusCode !== 502) throw error;
       return null;
     }
   }
 
-  async function sourceBatch(input) {
+  async function sourceBatch(input, signal) {
     const url = publicPhotoSourceUrl(input.url);
     const category = sourceCategory(url.href);
     let verifiedCollection;
@@ -183,7 +186,7 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
     if (input.sourceCollectionUrl !== undefined) {
       const anchor = publicPhotoSourceUrl(input.sourceCollectionUrl);
       if (!category || sourceCategory(anchor.href)) throw photoCatalogError("合集与本次预览分类不匹配");
-      const { collection } = await readSource(anchor.href);
+      const { collection } = await readSource(anchor.href, signal);
       if (!collection?.issueListUrl || sourceCategory(collection.issueListUrl) !== category) {
         throw photoCatalogError("合集与本次预览分类不匹配");
       }
@@ -191,17 +194,17 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
       sourceCollectionUrl = anchor.href;
     }
 
-    let parsed = await readSource(url.href);
+    let parsed = await readSource(url.href, signal);
     if (!category && parsed.collection?.issueListUrl) {
       verifiedCollection = parsed.collection;
       sourceCollectionUrl = url.href;
-      parsed = await readSource(verifiedCollection.issueListUrl);
+      parsed = await readSource(verifiedCollection.issueListUrl, signal);
     }
 
     let collection = verifiedCollection || parsed.collection;
     if (!collection && category && parsed.entries.length) {
-      const firstPage = url.href.replace(/\/$/, "") === category ? parsed : await readSource(category);
-      collection = await collectionForCategory(firstPage, category);
+      const firstPage = url.href.replace(/\/$/, "") === category ? parsed : await readSource(category, signal);
+      collection = await collectionForCategory(firstPage, category, signal);
       if (!collection) {
         const categoryPath = new URL(category).pathname;
         collection = { provider: "5280k", externalId: `category:${categoryPath}`, url: category, name: categoryPath.split("/").at(-1) };
@@ -211,7 +214,8 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
     return { ...parsed, collection, sourceCollections, sourceCollectionUrl };
   }
 
-  async function preview(input) {
+  async function preview(input, { signal } = {}) {
+    signal?.throwIfAborted();
     if (!input || !["source", "local", "manifest"].includes(input.mode)) throw photoCatalogError("请选择套图入库方式");
     const warnings = [];
     let collection, nextPage, sourceCollections, sourceCollectionUrl;
@@ -221,7 +225,8 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
       if (input.archiveQuery !== undefined && (typeof input.archiveQuery !== "string" || input.archiveQuery.length > 240)) {
         throw photoCatalogError("本地压缩包搜索词无效");
       }
-      const parsed = await sourceBatch(input);
+      const parsed = await sourceBatch(input, signal);
+      signal?.throwIfAborted();
       ({ collection, nextPage, sourceCollections, sourceCollectionUrl } = parsed);
       rows = sourceRows(parsed.entries, collection, group, input.archiveQuery);
       if (!rows.length && !collection && !sourceCollections?.length) warnings.push("该公开页面没有识别到套图单期或合集");
@@ -273,6 +278,7 @@ export function createPhotoCatalogIntake({ catalog, getPhotoSets, describePhotoC
     });
     const canCommit = changes.some((row) => row.canCommit);
     let planId = "";
+    signal?.throwIfAborted();
     if (canCommit) {
       clearExpiredPlans();
       if (plans.size >= MAX_PLANS) plans.delete(plans.keys().next().value);

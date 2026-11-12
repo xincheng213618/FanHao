@@ -13,11 +13,12 @@ import { createDuplicateRuntime } from "./duplicates/runtime.js";
 
 export function createFanhaoRuntime(deps) {
   const workflows = deps.workflows ? createFileWorkflowService(deps.workflows) : null;
-  const intake = deps.workflows?.intake ? createMediaIntakeService(deps.workflows.intake) : null;
+  const catalog = createCatalogRuntime(deps.catalog);
+  const intake = deps.workflows?.intake
+    ? createMediaIntakeService({ ...deps.workflows.intake, findLocalMetadata: catalog.findIntakeMetadata }) : null;
   const taste = deps.taste ? createTasteRuntime(deps.taste) : null;
   const subtitles = deps.subtitles ? createSubtitleRuntime(deps.subtitles) : null;
   const duplicates = deps.duplicates ? createDuplicateRuntime(deps.duplicates) : null;
-  const catalog = createCatalogRuntime(deps.catalog);
   const diskUsage = createDiskUsageRuntime(deps.diskUsage);
   const library = createLibraryRuntime(deps.library);
   const settings = createFanhaoSettingsProvider(deps.settings);

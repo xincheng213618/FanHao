@@ -54,7 +54,8 @@ export function createRequestHandler({
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
           res.end();
         } else {
-          sendHtml(res, 200, renderAndroidUpdatePage(req, url));
+          const page = await renderAndroidUpdatePage(req, url);
+          if (!req.aborted && !res.destroyed && !res.writableEnded) sendHtml(res, 200, page);
         }
         return;
       }

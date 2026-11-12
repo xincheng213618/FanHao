@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { sameLocalVideo } from "../library/local-video-identity.js";
 
@@ -44,6 +45,14 @@ function personRecordFromWorks(person, sourcePaths, works, compareNaturalTitle) 
 
 function workFiles(work) {
   return [...(work?.videos || []), ...(work?.images || []), ...(work?.infos || [])];
+}
+
+function disconnectedSourceError(sourcePath, cause) {
+  const folder = sourcePath ? `人物文件夹 ${sourcePath}` : "人物文件夹";
+  const error = new Error(`${folder}已失联，已保留原有作品记录；请重新连接存储或关联文件夹后再刷新`, { cause });
+  error.statusCode = 409;
+  error.code = "PERSON_FOLDER_DISCONNECTED";
+  return error;
 }
 
 export function removeLocalWorksFromLibrary(library, workIds, compareNaturalTitle) {
@@ -257,6 +266,28 @@ export function createPersonLibraryService({
     );
   }
 
+  function assertUnscannedSourcesReadable(knownSourcePaths, selectedKeys) {
+    const roots = libraryOpenRoots();
+    for (const sourcePath of knownSourcePaths) {
+      if (selectedKeys.has(normalizeSourcePath(sourcePath))) continue;
+      const absolutePath = sourcePathToAbsolute(sourcePath);
+      try {
+        fs.opendirSync(absolutePath).closeSync();
+      } catch (cause) {
+        if (cause.code !== "ENOENT") throw disconnectedSourceError(sourcePath, cause);
+        const root = roots.filter((candidate) => pathWithinRoot(absolutePath, candidate))
+          .sort((a, b) => b.length - a.length)[0];
+        if (!root) throw disconnectedSourceError(sourcePath, cause);
+        // A readable root lets a renamed or removed person folder reconcile normally.
+        try {
+          fs.opendirSync(root).closeSync();
+        } catch (rootError) {
+          throw disconnectedSourceError(sourcePath, rootError);
+        }
+      }
+    }
+  }
+
   function refreshPerson(personId, options = {}) {
     const library = getLibrary();
     const person = resolvePerson?.(personId) || library.peopleById.get(personId);
@@ -272,33 +303,29 @@ export function createPersonLibraryService({
     const previousWorksById = new Map(previousWorks.map((work) => [String(work.id), work]));
     const hasExplicitSourcePaths = Array.isArray(options.sourcePaths) && options.sourcePaths.length > 0;
     const selectedSourcePaths = sourcePathCandidates(person, options);
-    const knownSourcePaths = [...(person.sourcePaths || []), person.relativePath].filter(Boolean);
+    const knownSourcePaths = [...new Set([...(person.sourcePaths || []), person.relativePath].filter(Boolean))];
+    const selectedKeys = new Set(selectedSourcePaths.map(normalizeSourcePath));
+    if (previousWorks.length && !options.allowMissingSource) {
+      assertUnscannedSourcesReadable(knownSourcePaths, selectedKeys);
+    }
     if (!selectedSourcePaths.length && (hasExplicitSourcePaths || !knownSourcePaths.length)) {
       const error = new Error("这个人物没有本地来源路径");
       error.statusCode = 400;
       throw error;
     }
     if (!selectedSourcePaths.length && previousWorks.length && !options.allowMissingSource) {
-      const error = new Error("人物文件夹已失联，已保留原有作品记录；请重新关联文件夹后再刷新");
-      error.statusCode = 409;
-      error.code = "PERSON_FOLDER_DISCONNECTED";
-      throw error;
+      throw disconnectedSourceError();
     }
 
     const works = [];
     const bindingWarnings = [];
     const preservedWorkIds = new Set();
-    const knownKeys = new Set(knownSourcePaths.map(normalizeSourcePath));
-    if (hasExplicitSourcePaths || selectedSourcePaths.some((sourcePath) => !knownKeys.has(normalizeSourcePath(sourcePath)))) {
-      bindSourcePaths(person.id, selectedSourcePaths);
-    }
     const existingSourcePaths = [];
     for (const sourcePath of selectedSourcePaths) {
       const absolutePath = sourcePathToAbsolute(sourcePath);
-      const stat = safeStat(absolutePath);
-      if (!stat?.isDirectory()) continue;
       existingSourcePaths.push(relativeFromRoot(absolutePath));
       works.push(...scanPersonDirectory(person.id, absolutePath, {
+        requireCompleteScan: true,
         onBindingError: (error, work) => {
           const candidateWorkIds = error.candidateWorkIds || [];
           for (const workId of candidateWorkIds) preservedWorkIds.add(String(workId));
@@ -309,10 +336,19 @@ export function createPersonLibraryService({
         }
       }));
     }
+    const knownKeys = new Set(knownSourcePaths.map(normalizeSourcePath));
+    if (hasExplicitSourcePaths || selectedSourcePaths.some((sourcePath) => !knownKeys.has(normalizeSourcePath(sourcePath)))) {
+      bindSourcePaths(person.id, selectedSourcePaths);
+    }
 
     for (const work of works) {
       const previousWork = previousWorksById.get(String(work.id));
-      if (previousWork?.infoSummary) work.infoSummary = { ...previousWork.infoSummary };
+      if (previousWork?.infoSummary) {
+        work.infoSummary = {
+          ...previousWork.infoSummary,
+          imageUrl: work.infoSummary?.imageUrl || previousWork.infoSummary.imageUrl
+        };
+      }
       // Automatic JavDB synchronization must fail before replacing the public
       // library snapshot if a local-file write could not be persisted.
       if (options.failOnPersistenceError) libraryIndexService.replaceLocalFilesForWork(work);

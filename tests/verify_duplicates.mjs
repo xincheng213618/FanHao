@@ -71,12 +71,14 @@ try {
   assert.equal((await automatic.list({ refresh: true })).groups[0].files.length, 4);
   const freshAutomatic = serviceFor();
   assert.equal((await freshAutomatic.list()).groups[0].files.length, 4, "a new service still excludes missing paths without a saved manual check"); checks += 3;
+  await verifySnapshotDeadline(snapshot); checks += 5;
   const service = serviceFor({ snapshotLoader: async () => snapshot });
   const page = await service.list(); const group = page.groups[0];
   assert.equal(group.files.length, 5); assert.equal(probeCalls, 0); assert.equal(resolveCalls, 0); checks += 3;
   assert.equal((await service.list({ q: "missing" })).total, 1);
   assert.equal((await service.list({ q: "not-found" })).total, 0);
   await assert.rejects(service.list({ limit: 100 }), { statusCode: 400 }); checks += 3;
+  await verifyListProjection();
   const preview = await service.resolve(group.id, "1");
   assert.equal(new URL(preview.url, "http://fixture").searchParams.get("videoId"), "video-1");
   await assert.rejects(service.resolve(group.id, "../../other-file"), { statusCode: 404 }); checks += 2;
@@ -214,4 +216,84 @@ try {
   await Promise.allSettled(services.map(service => service.stop()));
   await Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
   temporary.cleanup();
+}
+
+async function verifySnapshotDeadline(snapshot) {
+  const stalled = new EventEmitter();
+  let workerStarts = 0, terminateCalls = 0, releaseTermination, deadline;
+  const termination = new Promise(resolve => { releaseTermination = resolve; });
+  stalled.terminate = () => { terminateCalls++; return termination; };
+  const service = serviceFor({
+    workerTimeoutMs: 20,
+    workerFactory() {
+      if (++workerStarts === 1) return stalled;
+      const worker = new EventEmitter();
+      worker.terminate = async () => 1;
+      queueMicrotask(() => {
+        worker.emit("message", { snapshot });
+        worker.emit("exit", 0);
+      });
+      return worker;
+    }
+  });
+  const unavailable = { code: "DUPLICATE_UNAVAILABLE", statusCode: 503 };
+  const guard = new Promise((_, reject) => {
+    deadline = setTimeout(() => reject(new Error("duplicate snapshot request waited for worker exit")), 1000);
+  });
+  try {
+    await Promise.race([Promise.all([
+      assert.rejects(service.list(), unavailable),
+      assert.rejects(service.list({ refresh: true }), unavailable)
+    ]), guard]);
+    assert.equal(terminateCalls, 1);
+    await Promise.race([assert.rejects(service.list({ refresh: true }), unavailable), guard]);
+    assert.equal(workerStarts, 1, "a timed-out worker retains ownership until it exits");
+    stalled.emit("message", { snapshot: { ...snapshot, groups: [] } });
+  } finally {
+    clearTimeout(deadline);
+    stalled.emit("exit", 0);
+    releaseTermination(0);
+  }
+  assert.equal((await service.list()).groups.length, 1, "retry must ignore the timed-out worker's late snapshot");
+  assert.equal(workerStarts, 2);
+}
+
+async function verifyListProjection() {
+  const makeFile = (id, size, status, folder = "") => ({
+    id, size, availabilityStatus: status, name: `${id}.mp4`, path: path.join(directory, folder, `${id}.mp4`)
+  });
+  const matchingFile = makeFile("file-d", 12, "unknown", "ＴＡＲＧＥＴ");
+  let probeReads = 0;
+  Object.defineProperty(matchingFile, "probe", { enumerable: true, get() {
+    probeReads += 1;
+    return { duration: 78, width: 1280, height: 720 };
+  } });
+  const groups = [
+    { id: "first", code: "ABC-101", title: "First", files: [makeFile("file-a", 4, "available"), makeFile("file-b", 2, "available")] },
+    { id: "single", code: "ABC-102", title: "Single survivor", files: [makeFile("file-c", 10, "available"), makeFile("removed-a", 7, "missing")] },
+    { id: "last", code: "ABC-103", title: "Last", files: [matchingFile, makeFile("file-e", 9, "available"), makeFile("removed-b", 6, "missing")] }
+  ];
+  const service = serviceFor({ snapshotLoader: async () => ({
+    groups, summary: { indexedFiles: 10, candidateGroups: 3, candidateFiles: 7, potentialExtraBytes: 24 }
+  }) });
+  const first = await service.list({ limit: 1 });
+  assert.deepEqual(first.groups.map(group => group.id), ["first"]);
+  assert.equal(first.total, 2);
+  assert.equal(first.hasMore, true);
+  assert.deepEqual(first.summary, { indexedFiles: 8, candidateGroups: 2, candidateFiles: 4, potentialExtraBytes: 11 });
+  assert.equal((await service.list({ q: "removed-b" })).total, 0, "missing filenames must not match a visible group");
+  assert.deepEqual((await service.list({ offset: 2, limit: 1 })).groups, []);
+  assert.equal(probeReads, 0, "list queries must not project file metadata outside the requested page");
+  const next = await service.list({ q: "  target  ", limit: 1 });
+  assert.equal(next.total, 1);
+  assert.equal(next.hasMore, false);
+  assert.deepEqual(next.groups.map(group => group.id), ["last"]);
+  const [group] = next.groups;
+  assert.equal(group.totalBytes, 21);
+  assert.deepEqual(group.files.map(file => [file.id, file.isLargest, file.isLongest, file.availabilityStatus]), [
+    ["file-d", true, true, "unknown"], ["file-e", false, false, "available"]
+  ]);
+  assert.equal(group.files[0].resolutionLabel, "1280 × 720");
+  assert.deepEqual((await service.list({ offset: 1, limit: 1 })).groups, next.groups);
+  checks += 14;
 }

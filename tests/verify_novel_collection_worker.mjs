@@ -65,6 +65,9 @@ try {
   assert.equal(service.taskDetail(task.id).progressCurrent, 1);
   console.log(`novel-collection-worker baseline: synchronous adapter/task/progress lock blocks timer (${observed.join(", ")})`);
   await verifyWorkerLockAndReplacement();
+  await verifyCollectorResultOwnership();
+  await verifyCollectorOutputRootRetry();
+  await verifyFailedCollectorPreparation();
   await verifyOwnedChildLifecycle();
   await verifyImportDrainAndRuntime();
   await verifyUnknownOutcome();
@@ -76,7 +79,7 @@ try {
   await verifyResultBudget();
   await verifyDurableImportIntent();
   await verifyCollectorOutputBound();
-  console.log("novel-collection-worker: lock/health, adapter/task/progress/checkpoint, bounds, replacement, real child close, stop/start, import drain, runtime/routes, unknown outcome and fail-closed passed");
+  console.log("novel-collection-worker: lock/health, collector preparation and result ownership, adapter/task/progress/checkpoint, bounds, replacement, real child close, stop/start, import drain, runtime/routes, unknown outcome and fail-closed passed");
 } finally {
   if (lockHolder) await lockHolder.terminate();
   await service.stop();
@@ -273,6 +276,99 @@ function controlledChildren({ hold = false, autoRelease = false } = {}) {
   return { records, spawnProcess, runner: () => records.findLast((item) => !item.probe),
     assertClosed() { assert.equal(records.every((item) => item.closed), true, "all owned Node children must emit close before stop resolves"); } };
 }
+async function verifyCollectorOutputRootRetry() {
+  const controlled = controlledChildren({ autoRelease: true });
+  const options = clientOptions("collector-root-retry", { spawnProcess: controlled.spawnProcess });
+  const client = createNovelCollectionWorkerClient(options);
+  try {
+    const adapter = (await client.createAdapter(adapterBody)).adapter;
+    const task = (await client.createTask({ url: "https://fixture.invalid/root-retry", adapterId: adapter.id, mode: "test" })).task;
+    fs.writeFileSync(options.outputRoot, "file occupying the collection output root");
+    await assert.rejects(client.start(), { code: "EEXIST" });
+    assert.equal((await client.taskDetail(task.id)).status, "queued");
+    assert.equal(controlled.records.length, 0);
+
+    fs.unlinkSync(options.outputRoot);
+    await client.start();
+    assert.equal((await client.runtimeStatus()).ready, true, "after repairing the output root, start must perform its runtime probe");
+    await waitForAsync(async () => (await client.taskDetail(task.id)).status === "succeeded");
+    assert.equal((await client.taskDetail(task.id)).attempt, 1);
+  } finally { await client.stop(); controlled.assertClosed(); }
+}
+
+async function verifyFailedCollectorPreparation() {
+  const controlled = controlledChildren({ autoRelease: true });
+  const options = clientOptions("collector-preparation", { spawnProcess: controlled.spawnProcess });
+  const client = createNovelCollectionWorkerClient(options);
+  try {
+    const adapter = (await client.createAdapter(adapterBody)).adapter;
+    const enqueue = async (name) => (await client.createTask({
+      url: `https://fixture.invalid/${name}`, adapterId: adapter.id, mode: "test"
+    })).task;
+    const outputError = await enqueue("unavailable-output"), configError = await enqueue("blocked-config"), logError = await enqueue("blocked-log");
+    const following = await enqueue("valid-after-failure");
+    const outputPath = (task) => path.join(options.outputRoot, task.id);
+    fs.mkdirSync(options.outputRoot);
+    fs.writeFileSync(outputPath(outputError), "file occupying the task directory");
+    fs.mkdirSync(outputPath(configError));
+    fs.mkdirSync(path.join(outputPath(configError), "task.json"));
+    fs.mkdirSync(outputPath(logError));
+    fs.mkdirSync(path.join(outputPath(logError), "collector.log"));
+    const checkpointPath = path.join(outputPath(logError), "checkpoint.json");
+    fs.writeFileSync(checkpointPath, "synthetic checkpoint");
+
+    await client.start();
+    await waitForAsync(async () => (await client.taskDetail(following.id)).status === "succeeded");
+    for (const task of [outputError, configError, logError]) {
+      const failed = await client.taskDetail(task.id);
+      assert.equal(failed.status, "failed", "a task whose collector cannot be prepared must leave running state");
+      assert.equal(failed.attempt, 1);
+      assert.match(failed.error, /无法准备采集任务文件/);
+      assert.ok(failed.finishedAt, "the task records a terminal timestamp");
+      assert.deepEqual(failed.result, {}, "a preparation failure never dispatched an import");
+    }
+    assert.equal(fs.readFileSync(checkpointPath, "utf8"), "synthetic checkpoint");
+    assert.equal(controlled.records.filter((record) => !record.probe).length, 1, "only the valid task reaches the collector");
+    fs.unlinkSync(outputPath(outputError));
+    await client.runTask(outputError.id);
+    await waitForAsync(async () => (await client.taskDetail(outputError.id)).status === "succeeded");
+    assert.equal((await client.taskDetail(outputError.id)).attempt, 2);
+  } finally { await client.stop(); controlled.assertClosed(); }
+}
+
+async function verifyCollectorResultOwnership() {
+  const controlled = controlledChildren({ autoRelease: true });
+  let runnerStarts = 0, imports = 0;
+  const options = clientOptions("collector-result-owner", {
+    spawnProcess(command, args, options) {
+      if (!args.includes("-c") && ++runnerStarts === 2) return spawn(process.execPath, ["-e", ""], options);
+      return controlled.spawnProcess(command, args, options);
+    },
+    importCollectedBook() { imports += 1; return { book: { id: "synthetic-book", title: "Synthetic collected book" } }; }
+  });
+  const client = createNovelCollectionWorkerClient(options);
+  try {
+    const adapter = (await client.createAdapter(adapterBody)).adapter;
+    const task = (await client.createTask({ url: "https://fixture.invalid/old-result", adapterId: adapter.id, mode: "collect" })).task;
+    await client.start();
+    await waitForAsync(async () => (await client.taskDetail(task.id)).status === "succeeded");
+    assert.equal(imports, 1);
+    const oldResult = path.join(options.outputRoot, task.id, "result.json");
+    assert.equal(JSON.parse(fs.readFileSync(oldResult, "utf8")).status, "ok");
+
+    await client.runTask(task.id);
+    await waitForAsync(async () => {
+      const latest = await client.taskDetail(task.id);
+      return latest.attempt === 2 && ["failed", "succeeded"].includes(latest.status);
+    });
+    const latest = await client.taskDetail(task.id);
+    assert.equal(latest.status, "failed", "a collector exit without fresh output must never replay an earlier result");
+    assert.match(latest.error, /结果文件不存在/);
+    assert.equal(imports, 1);
+    assert.deepEqual(latest.result, {});
+  } finally { await client.stop(); controlled.assertClosed(); }
+}
+
 async function verifyOwnedChildLifecycle() {
   const controlled = controlledChildren({ hold: true });
   const options = clientOptions("progress", { spawnProcess: controlled.spawnProcess });

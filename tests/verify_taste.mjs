@@ -4,8 +4,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { EventEmitter } from "node:events";
-import { buildTasteProfile } from "../src/modules/fanhao/server/taste/profile.js";
-import { analyzeTasteDatabase, readTasteWorks } from "../src/modules/fanhao/server/taste/source.js";
+import { buildTasteProfile, pageTasteEvidence } from "../src/modules/fanhao/server/taste/profile.js";
+import { analyzeTasteDatabase, readTasteAnalysis, readTasteWorks } from "../src/modules/fanhao/server/taste/source.js";
 import { createTasteService } from "../src/modules/fanhao/server/taste/service.js";
 import { createTasteRuntime } from "../src/modules/fanhao/server/taste/runtime.js";
 import { seedTasteLibrary } from "./fixtures/taste-library.mjs";
@@ -62,10 +62,22 @@ try {
   try {
     const [first, second] = await Promise.all([service.profile(), service.profile()]);
     assert.deepEqual(first, second); assert.equal(starts, 1, "concurrent requests must share the same worker");
+    const feature = first.dimensions.find(({ key }) => key === "people").favorites[0];
+    const query = { snapshot: first.snapshot, dimension: "people", feature: feature.id, scope: "marked", offset: 0 };
+    const marked = service.evidence(query);
+    assert.equal(marked.total, feature.marked);
+    assert.equal(marked.markedCount + marked.unmarkedCount, feature.total);
+    assert.equal(new Set(marked.items.map(({ code }) => code)).size, marked.total, "duplicated editions must remain a single evidence row");
+    assert.ok(marked.items.every(({ title, code, id }) => title && code && id));
+    assert.equal(starts, 1, "opening evidence must reuse the profile worker snapshot");
     await service.profile(); assert.equal(starts, 1, "unchanged sources must reuse the bounded cache");
     const writer = new DatabaseSync(file);
     writer.prepare("UPDATE local_works SET local_path = ? WHERE id = 9").run("X:\\演员甲\\[A].ABC-009"); writer.close();
-    assert.equal((await service.profile()).summary.marked, 7, "index changes must invalidate the cache");
+    assert.equal(service.evidence(query).total, marked.total, "the evidence keeps matching the displayed snapshot after a write");
+    const updated = await service.profile();
+    assert.equal(updated.summary.marked, 7, "index changes must invalidate the cache");
+    assert.throws(() => service.evidence(query), { statusCode: 409 });
+    assert.throws(() => service.evidence({ ...query, snapshot: updated.snapshot, feature: "unknown" }), { statusCode: 404 });
     assert.equal(starts, 2);
   } finally { await service.stop(); }
   await assert.rejects(service.profile(), { statusCode: 503 });
@@ -84,13 +96,25 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 10));
   await stoppable.stop(); await rejected;
 
-  let allowed = false, calls = 0, response;
+  let allowed = false, calls = 0, evidenceCalls = 0, response;
+  const analysis = readTasteAnalysis(file, { snapshot: "fixture" });
   const runtime = createTasteRuntime({ dbPath: file, requireLocalAdmin: () => allowed,
     sendJson: (_res, status, body) => { response = { status, body }; },
-    service: { profile: async () => { calls++; return profile; }, beginStop() {}, async stop() {} } });
+    service: {
+      profile: async () => { calls++; return profile; },
+      evidence: (request) => { evidenceCalls++; return pageTasteEvidence(analysis.evidence, request); },
+      beginStop() {}, async stop() {}
+    } });
   const req = { method: "GET" }, res = { setHeader() {} }, url = new URL("http://local/api/fanhao/taste");
+  const evidenceUrl = new URL("http://local/api/fanhao/taste/evidence?snapshot=fixture&dimension=tags&feature=%E7%9C%BC%E9%95%9C&scope=marked");
   assert.equal(await runtime.routeApi(req, res, url), true); assert.equal(calls, 0);
+  assert.equal(await runtime.routeApi(req, res, evidenceUrl), true); assert.equal(evidenceCalls, 0);
   allowed = true; await runtime.routeApi(req, res, url); assert.equal(response.status, 200); assert.equal(calls, 1);
+  await runtime.routeApi(req, res, evidenceUrl); assert.equal(response.status, 200); assert.equal(evidenceCalls, 1);
+  assert.ok(response.body.total > 0);
+  evidenceUrl.searchParams.set("offset", "-1");
+  await runtime.routeApi(req, res, evidenceUrl); assert.equal(response.status, 400); assert.equal(evidenceCalls, 1);
+  await runtime.routeApi({ method: "POST" }, res, evidenceUrl); assert.equal(response.status, 405); assert.equal(evidenceCalls, 1);
   await runtime.routeApi({ method: "POST" }, res, url); assert.equal(response.status, 405); assert.equal(calls, 1);
   assert.equal(await runtime.routeApi(req, res, new URL("http://local/api/other")), false);
   console.log("Taste analysis behavior checks passed: grain, coverage, ownership, evidence, read-only source, worker lifecycle and access boundary.");

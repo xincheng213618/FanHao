@@ -380,6 +380,22 @@ try {
   assert.equal(recoveredCovers.works[201].cachedCover, null);
   assert.deepEqual(metadataBatches.map(ids => ids.length), [200, 2, 1, 199], "only the failed IDs need another read");
   assert.equal(await coverPage(coverRequest), recoveredCovers, "healthy cover metadata pages are cacheable");
+
+  covers.works[1].coverId = "indexed-cover";
+  covers.state.stamp = "lightweight covers";
+  metadataBatches.length = 0;
+  const personWithCovers = createPersonDetailService({ ...covers.grouped.works, ...coverStatus,
+    library: covers.library, workQueryService: coverQuery });
+  const personRequest = new URL("http://fixture.test/api/people/1?limit=2&sort=title");
+  const personPage = await readWorksRoute(personRequest, { personDetailService: personWithCovers });
+  assert.equal(personPage.works[0].cachedCover?.coverUrl, "https://fixture.test/1",
+    "the main person list must expose the existing cover when the local work has no indexed image");
+  assert.equal(personPage.works[0].canGenerateCover, false, "an existing cover suppresses frame generation");
+  assert.equal(personPage.works[1].coverId, "indexed-cover");
+  assert.equal(personPage.works[1].cachedCover, null);
+  assert.deepEqual(metadataBatches, [[1]], "only works on this page without indexed covers need metadata");
+  assert.equal((await readWorksRoute(personRequest, { personDetailService: personWithCovers })).works, personPage.works);
+  assert.deepEqual(metadataBatches, [[1]], "the cached page must reuse its cover fallback");
   console.log(JSON.stringify({ ok: true, comparisons, fallbackComparisons, warnings: warnings.length,
     privateDatabases: fixtures.length + 1, failedFacetPrewarmQueries: 1, healthyPrewarmQueries: { facet: 1, detail: 1 },
     warmPrewarmQueries: 0, normalDetailOneShotQueries: 3,

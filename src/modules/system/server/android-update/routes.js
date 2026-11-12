@@ -5,7 +5,8 @@ export async function routeAndroidUpdateApi(req, res, url, deps) {
   } = deps;
 
   if (url.pathname === "/api/android/update" && req.method === "GET") {
-    sendJson(res, 200, androidUpdateService.publicManifest(req, url));
+    const manifest = await androidUpdateService.publicManifest(req, url);
+    if (!req.aborted && !res.destroyed && !res.writableEnded) sendJson(res, 200, manifest);
     return true;
   }
 

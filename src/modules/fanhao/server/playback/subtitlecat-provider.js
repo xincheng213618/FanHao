@@ -4,6 +4,7 @@ import { extractWorkCodes, normalizeWorkCode, workCodeKey } from "../../../../..
 const ORIGIN = "https://www.subtitlecat.com";
 const LANGUAGE_LABELS = { "zh-CN": "简体中文", "zh-TW": "繁体中文", ja: "日语", en: "英语" };
 const LANGUAGE_ORDER = ["zh-CN", "zh-TW", "ja", "en"];
+const CHINESE_SUFFIX = /-(zh-(?:CN|TW))\.srt$/i;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 const NONE_AVAILABLE = "此结果暂无可直接下载的字幕；仅提供在线翻译的语言不会自动生成。";
 
@@ -261,14 +262,32 @@ export function createSubtitlecatProvider({ fetchImpl = globalThis.fetch, timeou
     }
     const file = typeof fileId === "string" ? selected.files.get(fileId) : null;
     if (!file) return Promise.reject(issue("FILE", "请选择语言列表中已有的字幕文件", 400));
+    return downloadSrt(resourceUrl(file.url, "srt"), file.language, signal);
+  }
+
+  async function downloadDirect(value, { signal } = {}) {
+    let url;
+    try { url = new URL(value); } catch { throw issue("INVALID_URL", "字幕来源地址无效", 400); }
+    if (url.origin === "https://subtitlecat.com") url.hostname = new URL(ORIGIN).hostname;
+    url = resourceUrl(url.href, "srt");
+    const language = languageCode(CHINESE_SUFFIX.exec(decodeURIComponent(url.pathname))?.[1] || "");
+    if (!language) throw issue("FILE", "直链未标明中文字幕，请手动选择版本", 422);
+    const file = await downloadSrt(url, language, signal);
+    if (safeName(new URL(file.sourceUrl)) !== file.name) {
+      throw issue("REDIRECT", "字幕直链已跳转到其他文件，请手动选择版本", 422);
+    }
+    return file;
+  }
+
+  function downloadSrt(url, language, signal) {
     return enqueue(async operationSignal => {
-      const result = await request(resourceUrl(file.url, "srt"), "srt", operationSignal);
+      const result = await request(url, "srt", operationSignal);
       if (!result.content.length || /(?:text\/html|application\/xhtml)/i.test(result.type)
         || /^\s*<(?:!doctype|html|head|body)\b/i.test(result.content.subarray(0, 512).toString("utf8"))) {
         throw issue("CONTENT", "SubtitleCat 未返回有效的字幕文件，请稍后重试", 502, true);
       }
-      return { bytes: result.content, name: file.name, language: file.language, languageCode: file.language,
-        label: file.label, source: "SubtitleCat", sourceUrl: result.url.href };
+      return { bytes: result.content, name: safeName(url), language, languageCode: language,
+        label: LANGUAGE_LABELS[language] || language, source: "SubtitleCat", sourceUrl: result.url.href };
     }, signal);
   }
 
@@ -286,5 +305,5 @@ export function createSubtitlecatProvider({ fetchImpl = globalThis.fetch, timeou
       })]);
     } finally { clearTimeout(timer); }
   }
-  return { search, files, download, beginStop, stop };
+  return { search, files, download, downloadDirect, beginStop, stop };
 }

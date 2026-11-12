@@ -34,14 +34,6 @@ function createId(prefix, value) {
   return `${prefix}_${Buffer.from(value).toString("base64url")}`;
 }
 
-function safeStat(filePath) {
-  try {
-    return fs.statSync(filePath);
-  } catch {
-    return null;
-  }
-}
-
 function parseArgs(argv) {
   const options = { scope: "all" };
   for (let index = 0; index < argv.length; index += 1) {
@@ -175,36 +167,19 @@ function inferPhotoSetPerson(parts, title) {
 function walkMatchingFiles(rootPath, predicate, label) {
   const results = [];
   const root = path.resolve(rootPath);
-  const strict = label === "photo";
-  const rootStat = strict ? fs.statSync(root) : safeStat(root);
-  if (!rootStat?.isDirectory()) {
-    if (strict) throw new Error(`图库目录不可用 ${root}`);
-    return results;
-  }
+  if (!fs.statSync(root).isDirectory()) throw new Error(`扫描目录不可用 ${root}`);
   const stack = [root];
   let visitedDirs = 0;
   while (stack.length) {
     const current = stack.pop();
     visitedDirs += 1;
-    let entries = [];
-    try {
-      entries = fs.readdirSync(current, { withFileTypes: true });
-    } catch (error) {
-      if (strict) throw error;
-      continue;
-    }
+    const entries = fs.readdirSync(current, { withFileTypes: true });
 
     for (const entry of entries) {
       if (isExcludedDirName(entry.name)) continue;
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        try {
-          const lstat = fs.lstatSync(fullPath);
-          if (lstat.isSymbolicLink()) continue;
-        } catch (error) {
-          if (strict) throw error;
-          continue;
-        }
+        if (fs.lstatSync(fullPath).isSymbolicLink()) continue;
         stack.push(fullPath);
         continue;
       }
@@ -225,7 +200,7 @@ function photoSetCoverUrl(albumId, updatedAt = "") {
 }
 
 function publicPhotoSetArchive(filePath, rootPath) {
-  const stat = fs.statSync(filePath);
+  const stat = fs.lstatSync(filePath);
   const signature = archiveDiskSignature(filePath, stat);
   if (!signature) throw new Error(`扫描期间图包已变更 ${filePath}`);
   const relativePath = path.relative(rootPath, filePath);
@@ -269,7 +244,8 @@ function mediaTitleFromFile(filePath) {
 }
 
 function publicGalleryMediaFile(filePath, rootPath, source) {
-  const stat = safeStat(filePath);
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile()) throw new Error(`扫描期间影视文件已变化 ${filePath}`);
   const relativePath = path.relative(rootPath, filePath);
   const dirParts = path
     .dirname(relativePath)
@@ -297,89 +273,73 @@ function publicGalleryMediaFile(filePath, rootPath, source) {
     sourceRoot: rootPath,
     relativePath,
     ext: ext.slice(1),
-    size: stat?.size || 0,
-    updatedAt: stat ? new Date(stat.mtimeMs).toISOString() : "",
+    size: stat.size,
+    updatedAt: new Date(stat.mtimeMs).toISOString(),
     playable: DIRECT_VIDEO_EXTS.has(ext),
     streamUrl: `/media/gallery-video/${encodeURIComponent(id)}`,
     coverUrl: ""
   };
 }
 
-function rootStatuses(roots) {
-  return roots.map((root) => {
-    const stat = safeStat(root);
-    return {
-      root,
-      label: imageLibraryRootLabel(root),
-      exists: Boolean(stat?.isDirectory())
-    };
-  });
-}
-
-function mediaRootStatuses(sources) {
-  return sources.flatMap((source) =>
-    source.roots.map((root) => {
-      const stat = safeStat(root);
-      return {
-        kind: source.kind,
-        label: source.label,
-        root,
-        rootLabel: imageLibraryRootLabel(root),
-        exists: Boolean(stat?.isDirectory())
-      };
-    })
-  );
-}
-
-function scanPhotoSetLibrary(photoRoots, previousRoots) {
-  const roots = rootStatuses(photoRoots);
-  const available = new Set(previousRoots.filter(root => root.exists).map(root => path.resolve(root.root).toLowerCase()));
+function scanPhotoSetLibrary(photoRoots, previousRoots, checkedRoots) {
+  const roots = [];
+  const available = new Set(previousRoots.filter(root => root?.exists && typeof root.root === "string")
+    .map(root => scanRootKey(root.root)));
+  let indexed = null;
   const albums = [];
   const seen = new Set();
-  for (let rootIndex = 0; rootIndex < roots.length; rootIndex += 1) {
-    const root = roots[rootIndex];
+  const rootTotal = photoRoots.length;
+  for (const [rootIndex, rootPath] of photoRoots.entries()) {
+    const label = imageLibraryRootLabel(rootPath);
     const rootPosition = rootIndex + 1;
-    const startPercent = 5 + Math.round((rootIndex / Math.max(1, roots.length)) * 80);
+    const startPercent = 5 + Math.round((rootIndex / rootTotal) * 80);
     emitProgress({
       phase: "photo-root",
       percent: startPercent,
-      root: root.root,
+      root: rootPath,
       rootIndex: rootPosition,
-      rootTotal: roots.length,
+      rootTotal,
       itemCount: albums.length,
-      message: `正在扫描 ${root.label}`
+      message: `正在扫描 ${label}`
     });
-    if (!root.exists) {
-      if (available.has(path.resolve(root.root).toLowerCase())) throw new Error(`原图库目录暂不可用 ${root.root}`);
-      console.log(`[photo] missing ${root.root}`);
+    const identity = readScanRoot(rootPath);
+    roots.push({ root: rootPath, label, exists: Boolean(identity) });
+    if (!identity) {
+      const key = scanRootKey(rootPath);
+      if (available.has(key)) throw new Error(`原图库目录暂不可用 ${rootPath}`);
+      indexed ??= new Set(libraryStore.indexedPhotoRoots().filter(root => typeof root.root === "string")
+        .map(root => scanRootKey(root.root)));
+      if (indexed.has(key)) throw new Error(`原图库目录暂不可用 ${rootPath}`);
+      console.log(`[photo] missing ${rootPath}`);
       emitProgress({
         phase: "photo-root-complete",
-        percent: 5 + Math.round((rootPosition / Math.max(1, roots.length)) * 80),
-        root: root.root,
+        percent: 5 + Math.round((rootPosition / rootTotal) * 80),
+        root: rootPath,
         rootIndex: rootPosition,
-        rootTotal: roots.length,
+        rootTotal,
         itemCount: albums.length,
-        message: `${root.label} 不可用，已跳过`
+        message: `${label} 不可用，已跳过`
       });
       continue;
     }
-    console.log(`[photo] scanning ${root.root}`);
-    const files = walkMatchingFiles(root.root, isArchiveFile, "photo");
-    console.log(`[photo] ${root.root}: ${files.length.toLocaleString()} archives`);
+    checkedRoots.push({ rootPath, identity, label: "图库" });
+    console.log(`[photo] scanning ${rootPath}`);
+    const files = walkMatchingFiles(rootPath, isArchiveFile, "photo");
+    console.log(`[photo] ${rootPath}: ${files.length.toLocaleString()} archives`);
     for (const filePath of files) {
       const key = path.resolve(filePath).toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
-      albums.push(publicPhotoSetArchive(filePath, root.root));
+      albums.push(publicPhotoSetArchive(filePath, rootPath));
     }
     emitProgress({
       phase: "photo-root-complete",
-      percent: 5 + Math.round((rootPosition / Math.max(1, roots.length)) * 80),
-      root: root.root,
+      percent: 5 + Math.round((rootPosition / rootTotal) * 80),
+      root: rootPath,
       rootIndex: rootPosition,
-      rootTotal: roots.length,
+      rootTotal,
       itemCount: albums.length,
-      message: `已扫描 ${rootPosition}/${roots.length} 个目录`
+      message: `已扫描 ${rootPosition}/${rootTotal} 个目录`
     });
   }
   albums.sort((a, b) => {
@@ -389,16 +349,47 @@ function scanPhotoSetLibrary(photoRoots, previousRoots) {
   return { roots, photoSets: albums };
 }
 
-function scanGalleryMediaLibrary(sources) {
-  const roots = mediaRootStatuses(sources);
+function readScanRoot(root) {
+  try {
+    const stat = fs.statSync(root, { bigint: true });
+    return stat.isDirectory() ? { dev: stat.dev, ino: stat.ino, realPath: fs.realpathSync.native(root) } : null;
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
+function scanRootKey(root) {
+  return path.resolve(root).toLowerCase();
+}
+
+function mediaRootKey(kind, root) {
+  return JSON.stringify([kind, scanRootKey(root)]);
+}
+
+function scanGalleryMediaLibrary(sources, previousRoots, checkedRoots) {
+  const available = new Set(previousRoots.filter(root => root?.exists && typeof root.root === "string")
+    .map(root => mediaRootKey(root.kind, root.root)));
+  let indexed = null;
+  const roots = [];
   const items = [];
   const seen = new Set();
   for (const source of sources) {
     for (const rootPath of source.roots) {
-      if (!safeStat(rootPath)?.isDirectory()) {
+      const identity = readScanRoot(rootPath);
+      roots.push({ kind: source.kind, label: source.label, root: rootPath, rootLabel: imageLibraryRootLabel(rootPath), exists: Boolean(identity) });
+      if (!identity) {
+        const key = mediaRootKey(source.kind, rootPath);
+        if (available.has(key)) throw new Error(`原影视目录暂不可用 ${rootPath}`);
+        // Older scoped scans could mark an unscanned root unavailable while
+        // leaving its rows in the snapshot. Those rows also prove ownership.
+        indexed ??= new Set(libraryStore.indexedMediaRoots().filter(root => typeof root.root === "string")
+          .map(root => mediaRootKey(root.kind, root.root)));
+        if (indexed.has(key)) throw new Error(`原影视目录暂不可用 ${rootPath}`);
         console.log(`[${source.kind}] missing ${rootPath}`);
         continue;
       }
+      checkedRoots.push({ rootPath, identity, label: "影视" });
       console.log(`[${source.kind}] scanning ${rootPath}`);
       const files = walkMatchingFiles(rootPath, isVideo, source.kind);
       console.log(`[${source.kind}] ${rootPath}: ${files.length.toLocaleString()} videos`);
@@ -410,32 +401,38 @@ function scanGalleryMediaLibrary(sources) {
       }
     }
   }
-  items.sort((a, b) => {
-    if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
-    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || indexNameCollator.compare(a.title, b.title);
-  });
-  return { mediaRoots: roots, mediaItems: items };
+  return { mediaRoots: roots, mediaItems: items.sort(compareGalleryMediaItems) };
 }
 
-function sortGalleryMediaItems(items) {
-  return (items || []).slice().sort((a, b) => {
-    if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
-    const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
-    return timeDiff || indexNameCollator.compare(a.title, b.title);
-  });
+function verifyScannedRoots(checkedRoots) {
+  for (const { rootPath, identity, label } of checkedRoots) {
+    const current = readScanRoot(rootPath);
+    if (!current || current.dev !== identity.dev || current.ino !== identity.ino || current.realPath !== identity.realPath) {
+      throw new Error(`扫描期间${label}目录已变化 ${rootPath}`);
+    }
+  }
 }
 
-function scanScopedMediaLibrary(sources, kind, previousIndex) {
-  if (!kind) return scanGalleryMediaLibrary(sources);
-  const selectedSources = sources.filter((source) => source.kind === kind);
-  const scanned = scanGalleryMediaLibrary(selectedSources);
+function compareGalleryMediaItems(a, b) {
+  if (a.mediaKind !== b.mediaKind) return a.mediaKind.localeCompare(b.mediaKind);
+  const timeDiff = new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime();
+  return timeDiff || indexNameCollator.compare(a.title, b.title);
+}
+
+function scanScopedMediaLibrary(sources, kind, previous, checkedRoots) {
+  const selectedSources = kind ? sources.filter((source) => source.kind === kind) : sources;
+  const scanned = scanGalleryMediaLibrary(selectedSources, previous.mediaRoots, checkedRoots);
+  if (!kind) return scanned;
+  const roots = new Map([...previous.mediaRoots.filter(root => root?.kind !== kind && typeof root?.root === "string"), ...scanned.mediaRoots]
+    .map(root => [mediaRootKey(root.kind, root.root), root]));
+  const configured = new Set(sources.flatMap(source => source.roots.map(root => mediaRootKey(source.kind, root))));
   return {
-    mediaRoots: mediaRootStatuses(sources),
-    mediaItems: sortGalleryMediaItems([
-      ...(previousIndex?.mediaItems || []).filter((item) => item.mediaKind !== kind),
+    mediaRoots: sources.flatMap(source => source.roots.map(root => roots.get(mediaRootKey(source.kind, root)))).filter(Boolean),
+    mediaItems: [
+      ...previous.mediaItems.filter(item => item.mediaKind !== kind
+        && (typeof item.sourceRoot !== "string" || configured.has(mediaRootKey(item.mediaKind, item.sourceRoot)))),
       ...scanned.mediaItems
-    ])
+    ].sort(compareGalleryMediaItems)
   };
 }
 
@@ -465,18 +462,18 @@ console.log(`[image-library] scope=${scope}`);
 console.log(`[image-library] sqlite=${IMAGE_GALLERY_DB_PATH}`);
 emitProgress({ phase: "start", percent: 1, message: "正在准备图库扫描" });
 try {
-  const expectedRevision = scanPhoto ? libraryStore.revision() : undefined;
-  const expectedMediaRevision = scanMedia ? libraryStore.mediaRevision() : undefined;
-  const previousMedia = mediaKind ? libraryStore.mediaIndex() : null;
-  const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots, libraryStore.summary()?.photoRoots || []) : null;
-  const media = scanMedia ? scanScopedMediaLibrary(mediaSources, mediaKind, previousMedia) : null;
+  const previous = libraryStore.rescanBaseline({ photo: scanPhoto, media: scanMedia, includeMediaItems: Boolean(mediaKind) });
+  const checkedRoots = [];
+  const photo = scanPhoto ? scanPhotoSetLibrary(photoRoots, previous.photoRoots, checkedRoots) : null;
+  const media = scanMedia ? scanScopedMediaLibrary(mediaSources, mediaKind, previous, checkedRoots) : null;
+  verifyScannedRoots(checkedRoots);
   const index = { ...photo, ...media, scannedAt: new Date().toISOString() };
   const photoCount = photo?.photoSets.length ?? 0;
   const mediaCount = media?.mediaItems.length ?? 0;
   const itemCount = scanPhoto ? photoCount : mediaCount;
 
   emitProgress({ phase: "write", percent: 94, itemCount, message: "正在写入图库索引" });
-  libraryStore.publish(index, { expectedRevision, expectedMediaRevision, photo: scanPhoto, media: scanMedia });
+  libraryStore.publish(index, { expectedPublication: previous, photo: scanPhoto, media: scanMedia });
   emitProgress({ phase: "complete", percent: 100, photoSets: photoCount, itemCount, message: "图库索引刷新完成" });
   console.log([
     `[image-library] done in ${Math.round((Date.now() - startedAt) / 1000)}s`,

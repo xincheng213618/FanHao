@@ -262,6 +262,13 @@ assert.equal(conservativeTvWorks.items.filter((item) => item.seriesName.startsWi
 
 const mergedEpisodeDetail = service.itemsPayload(url({ mode: "tv", seriesKey: mergedCrossDirectoryWork.seriesKey, limit: "20" }));
 assert.deepEqual(mergedEpisodeDetail.items.map((item) => item.id).sort(), ["cross-a", "cross-b"], "a merged TV work must still open every original episode file");
+const episodeSearch = service.itemsPayload(url({ mode: "tv", seriesKey: mergedCrossDirectoryWork.seriesKey, q: "S01E02", sort: "title", limit: "1" }));
+assert.equal(episodeSearch.query, "S01E02");
+assert.equal(episodeSearch.seriesKey, mergedCrossDirectoryWork.seriesKey);
+assert.deepEqual(episodeSearch.items.map(item => item.id), ["cross-b"], "episode title search filters inside the selected series before paging");
+const mediaEpisodeSearch = service.itemsPayload(url({ mode: "media", kind: "tv", seriesKey: mergedCrossDirectoryWork.seriesKey, q: "S01E02", sort: "title", limit: "1" }));
+assert.equal(mediaEpisodeSearch.total, 1);
+assert.deepEqual(mediaEpisodeSearch.items.map(item => item.id), ["cross-b"], "the unified media endpoint also filters the full selected series before paging");
 
 const westernFixtures = [
   ["western-shaded", "Veronika.Glam", "MetArt.com_19.12.18.Veronika.Glam.Shaded.XXX.IMAGESET-GAGBALL[rarbg]", "Shaded", "MetArt", "2019-12-18", "Veronika Glam"],

@@ -82,20 +82,22 @@ export function createMissingCodeSearchService({
     }
   }
 
-  function search(rawQuery) {
-    return withReadStatus(() => loadSearch(rawQuery)).value;
+  function search(rawQuery, { exact = false } = {}) {
+    return withReadStatus(() => loadSearch(rawQuery, exact)).value;
   }
 
-  function loadSearch(rawQuery) {
+  function loadSearch(rawQuery, exact) {
     const prefix = storedWorkCodeKey(rawQuery);
     if (!prefix) return [];
 
     try {
-      const entries = missingWorkPrefix(prefix);
+      const entries = missingWorkPrefix(prefix, exact);
       const start = lowerBound(entries, prefix);
       const works = [];
       for (let index = start; index < entries.length && entries[index].key.startsWith(prefix); index += 1) {
-        works.push(entries[index].work);
+        const entry = entries[index];
+        if (exact && entry.key !== prefix) break;
+        works.push(exact ? { ...entry.work, indexedCode: entry.code } : entry.work);
       }
       return works;
     } catch (error) {
@@ -105,7 +107,7 @@ export function createMissingCodeSearchService({
     }
   }
 
-  function missingWorkPrefix(prefix) {
+  function missingWorkPrefix(prefix, exact) {
     const stamp = `${getSourceStamp()}:${getCoverStamp()}`;
     if (missingWorkIndexCache.stamp !== stamp) {
       prefixBudget.clear();
@@ -140,7 +142,7 @@ export function createMissingCodeSearchService({
           ${metadataColumns.has("fields_json") ? compactTagFieldsSql() : "NULL"} AS trait_fields_json
         FROM works w
         WHERE w.status = 'ok'
-          AND w.code_search LIKE ?
+          AND ${exact ? "w.code_search = ?" : "w.code_search LIKE ?"}
           AND NOT EXISTS (
             SELECT 1
             FROM works local_code
@@ -154,12 +156,13 @@ export function createMissingCodeSearchService({
         if (!missing || !metadataColumns.delete(missing)) throw error;
       }
     }
-    const rows = statement.all(`${prefix}%`);
+    const rows = statement.all(exact ? prefix : `${prefix}%`);
     const entries = rows.map((row) => ({
       key: String(row.code_key || ""),
+      code: row.code,
       work: lightweightMissingWork(row, covers.ids.has(String(row.work_id)))
     }));
-    if (covers.cacheable && prefix.length <= MISSING_PREFIX_MAX_KEY_LENGTH) {
+    if (!exact && covers.cacheable && prefix.length <= MISSING_PREFIX_MAX_KEY_LENGTH) {
       prefixBudget.write(missingWorkIndexCache.prefixes, prefix, entries, entries.length);
     }
     return entries;

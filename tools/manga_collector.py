@@ -24,6 +24,7 @@ import re
 import sqlite3
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import webbrowser
@@ -77,6 +78,7 @@ LOCALIZABLE_IMAGE_RE = re.compile(
 )
 ATTR_RE_TEMPLATE = r"({attr}\s*=\s*)([\"'])(.*?)(\2)"
 PROGRESS_PREFIX = "MANGA_PROGRESS "
+SQLITE_PENDING_FILE = ".sqlite-index-pending"
 
 
 def emit_progress(event: str, **payload) -> None:
@@ -84,6 +86,10 @@ def emit_progress(event: str, **payload) -> None:
         PROGRESS_PREFIX + json.dumps({"event": event, **payload}, ensure_ascii=False),
         flush=True,
     )
+
+
+class SqliteIndexError(RuntimeError):
+    pass
 
 
 class ParsedPage(HTMLParser):
@@ -1794,33 +1800,22 @@ def read_chapter_record_file(path: Path) -> ChapterRecord | None:
     return chapter_record_from_dict(data)
 
 
-def load_existing_records(out_dir: Path) -> dict[str, ChapterRecord]:
-    manifest_path = out_dir / "manifest.json"
-    if not manifest_path.exists():
-        return {}
+def load_manifest_snapshot(out_dir: Path) -> tuple[str, list[ChapterRecord]]:
     try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    records: dict[str, ChapterRecord] = {}
-    for item in data.get("chapters", []):
-        if not isinstance(item, dict):
-            continue
-        record = chapter_record_from_dict(item)
-        if record.url:
-            records[chapter_identity(record.url)] = record
-    return records
+        content = (out_dir / "manifest.json").read_bytes()
+        data = json.loads(content)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "", []
+    chapters = data.get("chapters") if isinstance(data, dict) else None
+    if not isinstance(chapters, list):
+        return "", []
+    return hashlib.sha256(content).hexdigest(), [
+        chapter_record_from_dict(item) for item in chapters if isinstance(item, dict)
+    ]
 
 
 def load_manifest_chapters(out_dir: Path) -> list[ChapterRecord]:
-    manifest_path = out_dir / "manifest.json"
-    if not manifest_path.exists():
-        return []
-    data = read_json_file(manifest_path)
-    chapters = data.get("chapters", [])
-    if not isinstance(chapters, list):
-        return []
-    records = [chapter_record_from_dict(item) for item in chapters if isinstance(item, dict)]
+    _, records = load_manifest_snapshot(out_dir)
     return sorted(records, key=lambda item: item.index)
 
 
@@ -1905,15 +1900,21 @@ def completed_chapter_from_cache(
     return None
 
 
-def write_manifests(chapters: list[ChapterRecord], out_dir: Path) -> None:
+def write_manifests(chapters: list[ChapterRecord], out_dir: Path) -> str:
     manifest = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "chapters": [chapter_record_to_dict(chapter) for chapter in chapters],
     }
-    (out_dir / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    content = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=out_dir, prefix=".manifest-", suffix=".tmp", delete=False) as target:
+            temporary = Path(target.name)
+            target.write(content)
+        temporary.replace(out_dir / "manifest.json")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
     with (out_dir / "manifest.csv").open("w", encoding="utf-8-sig", newline="") as fh:
         writer = csv.writer(fh)
@@ -1957,6 +1958,7 @@ def write_manifests(chapters: list[ChapterRecord], out_dir: Path) -> None:
                 image_lines.append(image.local_path)
     (out_dir / "images.txt").write_text("\n".join(image_lines), encoding="utf-8")
     write_cache_state(chapters, out_dir)
+    return hashlib.sha256(content).hexdigest()
 
 
 def default_database_path() -> Path:
@@ -1988,6 +1990,28 @@ def load_catalog_meta(out_dir: Path, catalog_url: str = "", catalog_title: str =
     return meta_url, meta_title or clean_catalog_title("", out_dir.name)
 
 
+def manifest_is_indexed(database_path: Path, out_dir: Path, revision: str) -> bool:
+    if not revision or not database_path.is_file():
+        return False
+    try:
+        database = sqlite3.connect(f"{database_path.as_uri()}?mode=ro", timeout=1, uri=True)
+        try:
+            row = database.execute(
+                "SELECT manifest_revision FROM manga_comics WHERE cache_key = ?", (str(out_dir),),
+            ).fetchone()
+            return row == (revision,)
+        finally:
+            database.close()
+    except sqlite3.Error:
+        # Older indexes have no publication stamp. Reconcile them once from disk.
+        return False
+
+
+def report_index_failure(error: SqliteIndexError) -> None:
+    print(f"SQLite index failed: {error}", file=sys.stderr)
+    emit_progress("index-publication", status="failed", error=str(error))
+
+
 def write_sqlite_index(
     chapters: list[ChapterRecord],
     out_dir: Path,
@@ -1996,6 +2020,7 @@ def write_sqlite_index(
     catalog_url: str = "",
     catalog_title: str = "",
     replace_all: bool = False,
+    manifest_revision: str = "",
 ) -> None:
     """Publish cache metadata to a shared SQLite read model.
 
@@ -2009,7 +2034,6 @@ def write_sqlite_index(
 
     database_path = Path(database_path).resolve()
     out_dir = out_dir.resolve()
-    database_path.parent.mkdir(parents=True, exist_ok=True)
     source_url, title = load_catalog_meta(out_dir, catalog_url, catalog_title)
     catalog_metadata = load_catalog_metadata(out_dir)
     now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -2038,7 +2062,8 @@ def write_sqlite_index(
         region TEXT NOT NULL DEFAULT '',
         tags_json TEXT NOT NULL DEFAULT '[]',
         cover_url TEXT NOT NULL DEFAULT '',
-        cover_path TEXT NOT NULL DEFAULT ''
+        cover_path TEXT NOT NULL DEFAULT '',
+        manifest_revision TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_manga_comics_dir_name ON manga_comics(dir_name);
     CREATE TABLE IF NOT EXISTS manga_chapters (
@@ -2079,10 +2104,12 @@ def write_sqlite_index(
 
     database = None
     try:
+        database_path.parent.mkdir(parents=True, exist_ok=True)
         database = sqlite3.connect(str(database_path), timeout=30)
         database.execute("PRAGMA journal_mode = WAL")
         database.execute("PRAGMA synchronous = NORMAL")
         database.executescript(schema)
+        database.execute("BEGIN IMMEDIATE")
         existing_columns = {row[1] for row in database.execute("PRAGMA table_info(manga_comics)")}
         for column, definition in {
             "author": "TEXT NOT NULL DEFAULT ''",
@@ -2092,11 +2119,16 @@ def write_sqlite_index(
             "tags_json": "TEXT NOT NULL DEFAULT '[]'",
             "cover_url": "TEXT NOT NULL DEFAULT ''",
             "cover_path": "TEXT NOT NULL DEFAULT ''",
+            "manifest_revision": "TEXT NOT NULL DEFAULT ''",
         }.items():
             if column not in existing_columns:
                 database.execute(f"ALTER TABLE manga_comics ADD COLUMN {column} {definition}")
-        database.commit()
-        database.execute("BEGIN IMMEDIATE")
+        if not replace_all and not chapters and manifest_revision:
+            row = database.execute(
+                "SELECT manifest_revision FROM manga_comics WHERE cache_key = ?", (cache_key,),
+            ).fetchone()
+            if row != (manifest_revision,):
+                raise sqlite3.OperationalError("SQLite index snapshot changed during the update")
         database.execute(
             """
             INSERT INTO manga_comics (
@@ -2234,35 +2266,25 @@ def write_sqlite_index(
             """,
             (cache_key, cache_key, cache_key, cache_key, cache_key, now, now, cache_key),
         )
+        if replace_all or chapters:
+            database.execute(
+                "UPDATE manga_comics SET manifest_revision = ? WHERE cache_key = ?",
+                (manifest_revision if replace_all else "", cache_key),
+            )
         database.commit()
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, OSError) as exc:
         if database is not None:
             try:
                 database.rollback()
-            except Exception:
+            except sqlite3.Error:
                 pass
-        print(f"SQLite index warning: {exc}", file=sys.stderr)
+        raise SqliteIndexError(str(exc)) from exc
     finally:
         if database is not None:
             try:
                 database.close()
             except Exception:
                 pass
-
-
-def records_from_manifest(out_dir: Path) -> list[ChapterRecord]:
-    manifest_path = out_dir / "manifest.json"
-    if not manifest_path.exists():
-        return []
-    try:
-        data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    return [
-        chapter_record_from_dict(item)
-        for item in data.get("chapters", [])
-        if isinstance(item, dict)
-    ]
 
 
 def rebuild_sqlite_index(args: argparse.Namespace) -> int:
@@ -2278,8 +2300,9 @@ def rebuild_sqlite_index(args: argparse.Namespace) -> int:
             and re.match(r"^(?:smtt6|jmd9|55comic)_cache_[A-Za-z0-9_-]+$", entry.name, re.I)
         ]
     indexed = 0
+    failed = 0
     for out_dir in sorted(candidates, key=lambda item: item.name.lower()):
-        records = records_from_manifest(out_dir)
+        revision, records = load_manifest_snapshot(out_dir)
         if not records:
             continue
         source_url, title = load_catalog_meta(out_dir)
@@ -2295,20 +2318,28 @@ def rebuild_sqlite_index(args: argparse.Namespace) -> int:
             if getattr(args, "cache_covers", False) and not metadata.get("cover_path"):
                 cache_catalog_cover(metadata, out_dir, timeout=args.timeout, retries=args.retries)
             write_catalog_meta(out_dir, source_url, title, metadata)
-        write_sqlite_index(
-            records,
-            out_dir,
-            database_path,
-            catalog_url=source_url,
-            catalog_title=title,
-            replace_all=True,
-        )
+        try:
+            write_sqlite_index(
+                records,
+                out_dir,
+                database_path,
+                catalog_url=source_url,
+                catalog_title=title,
+                replace_all=True,
+                manifest_revision=revision,
+            )
+        except SqliteIndexError as exc:
+            report_index_failure(exc)
+            failed += 1
+            continue
         indexed += 1
         print(f"Indexed SQLite: {out_dir.name} ({len(records)} chapters)")
     write_library_index(library_root)
     print(f"SQLite database: {database_path}")
     print(f"Indexed caches: {indexed}")
-    return 0
+    if failed:
+        print(f"Failed caches: {failed}", file=sys.stderr)
+    return 2 if failed else 0
 
 
 def chapter_index_from_dir(chapter_dir: Path, fallback: int) -> int:
@@ -2333,6 +2364,8 @@ def repair_local_pages(args: argparse.Namespace) -> int:
     if not chapters_dir.exists():
         print(f"No chapters directory: {chapters_dir}", file=sys.stderr)
         return 2
+    index_pending = out_dir / SQLITE_PENDING_FILE
+    index_pending.touch()
 
     catalog_html = out_dir / "catalog.html"
     if catalog_html.exists():
@@ -2407,17 +2440,24 @@ def repair_local_pages(args: argparse.Namespace) -> int:
 
     records.sort(key=lambda item: item.index)
     write_chapter_viewers(records, out_dir)
-    write_manifests(records, out_dir)
-    write_sqlite_index(
-        records,
-        out_dir,
-        database_path,
-        catalog_url=catalog_url,
-        catalog_title=load_catalog_title(out_dir),
-        replace_all=True,
-    )
-    write_main_viewer(records, out_dir)
+    revision = write_manifests(records, out_dir)
+    title = load_catalog_title(out_dir)
+    write_main_viewer(records, out_dir, title)
     write_library_index(out_dir.parent)
+    try:
+        write_sqlite_index(
+            records,
+            out_dir,
+            database_path,
+            catalog_url=catalog_url,
+            catalog_title=title,
+            replace_all=True,
+            manifest_revision=revision,
+        )
+    except SqliteIndexError as exc:
+        report_index_failure(exc)
+        return 2
+    index_pending.unlink(missing_ok=True)
     print(f"Repaired local pages: {out_dir}")
     print(f"Open local viewer: {out_dir / 'index.html'}")
     return 0
@@ -2547,7 +2587,8 @@ def crawl(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_existed = (out_dir / "manifest.json").exists()
     remember_source(args, catalog_url)
-    existing_records = load_existing_records(out_dir)
+    manifest_revision, manifest_records = load_manifest_snapshot(out_dir)
+    existing_records = {chapter_identity(record.url): record for record in manifest_records if record.url}
 
     robots = None if args.no_robots else RobotsCache(timeout=args.timeout)
     if robots and not args.single_page and not robots.allowed(catalog_url):
@@ -2634,20 +2675,41 @@ def crawl(args: argparse.Namespace) -> int:
     catalog_structure_changed = catalog_sequence != existing_sequence
     removed_count = len(set(existing_records) - catalog_identities)
     cached_complete_count = len(records) - len(pending_chapters)
+    index_pending = out_dir / SQLITE_PENDING_FILE
+    publish_snapshot = bool(pending_chapters or catalog_structure_changed or index_pending.exists()
+                            or not manifest_is_indexed(database_path, out_dir, manifest_revision))
+    if publish_snapshot:
+        # Chapter state can advance before the manifest or SQLite. Leave this
+        # marker until the final transaction commits so a retry replays it.
+        index_pending.touch()
+
+    deferred_index = False
+
+    def publish_incremental(chapters_to_index: list[ChapterRecord], revision: str = "") -> None:
+        nonlocal deferred_index
+        if deferred_index:
+            return
+        try:
+            write_sqlite_index(
+                chapters_to_index,
+                out_dir,
+                database_path,
+                catalog_url=catalog_url,
+                catalog_title=catalog_title,
+                replace_all=bool(revision),
+                manifest_revision=revision,
+            )
+        except SqliteIndexError as exc:
+            # Finish saving media and try the complete snapshot once at the end.
+            deferred_index = True
+            print(f"SQLite index deferred: {exc}", file=sys.stderr)
+
     if not manifest_existed:
         # A new comic should appear in the library as soon as its remote
         # directory is known. Pending rows have no media paths until their
         # chapter finishes, when the normal incremental upsert replaces them.
         published_records = sorted(records, key=lambda item: item.index)
-        write_manifests(published_records, out_dir)
-        write_sqlite_index(
-            published_records,
-            out_dir,
-            database_path,
-            catalog_url=catalog_url,
-            catalog_title=catalog_title,
-            replace_all=True,
-        )
+        publish_incremental(published_records, write_manifests(published_records, out_dir))
     print(f"Cached complete: {cached_complete_count}")
     print(f"Need update: {len(pending_chapters)}")
     emit_progress(
@@ -2776,6 +2838,7 @@ def crawl(args: argparse.Namespace) -> int:
                 status=record.status,
                 downloadedImages=record.downloaded_count,
                 failedImages=record.failed_count,
+                skippedImages=record.skipped_count,
             )
         except Exception as exc:
             record.status = "failed"
@@ -2793,46 +2856,44 @@ def crawl(args: argparse.Namespace) -> int:
         # resume safely if the process stops before that final publish.
         if record.html_path:
             write_chapter_state(record, out_dir)
-        write_sqlite_index(
-            [record],
-            out_dir,
-            database_path,
-            catalog_url=catalog_url,
-            catalog_title=catalog_title,
-        )
+        publish_incremental([record])
         if args.delay:
             time.sleep(args.delay)
 
     records.sort(key=lambda item: item.index)
-    database_needs_rebuild = not database_path.exists()
-    if pending_chapters or catalog_structure_changed or database_needs_rebuild:
-        write_manifests(records, out_dir)
-        write_sqlite_index(
-            records,
-            out_dir,
-            database_path,
-            catalog_url=catalog_url,
-            catalog_title=catalog_title,
-            replace_all=True,
-        )
+    if publish_snapshot:
+        manifest_revision = write_manifests(records, out_dir)
         write_chapter_viewers(records, out_dir)
         write_main_viewer(records, out_dir, catalog_title)
-    else:
-        # Keep last-sync/catalog metadata current without rewriting every cached
-        # chapter and image row when the remote catalog did not change.
+    write_library_index(out_dir.parent)
+    index_failed = False
+    try:
         write_sqlite_index(
-            [],
+            records if publish_snapshot else [],
             out_dir,
             database_path,
             catalog_url=catalog_url,
             catalog_title=catalog_title,
+            replace_all=publish_snapshot,
+            manifest_revision=manifest_revision,
         )
-    write_library_index(out_dir.parent)
+    except SqliteIndexError as exc:
+        report_index_failure(exc)
+        index_failed = True
+    else:
+        index_pending.unlink(missing_ok=True)
+        emit_progress("index-publication", status="complete")
+    failed_chapters = sum(not is_chapter_complete(record) for record in records)
     emit_progress(
         "complete",
         totalChapters=len(records),
-        failedChapters=sum(1 for record in records if record.status == "failed"),
+        failedChapters=failed_chapters,
     )
+    if failed_chapters:
+        print(f"Saved partial result: {failed_chapters} chapter(s) incomplete: {out_dir}", file=sys.stderr)
+    if failed_chapters or index_failed:
+        print(f"Open local viewer: {out_dir / 'index.html'}")
+        return 2
     print(f"Done: {out_dir}")
     print(f"Open local viewer: {out_dir / 'index.html'}")
     return 0

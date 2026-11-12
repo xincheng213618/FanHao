@@ -236,12 +236,19 @@ export async function routeMusicApi(req, res, url, deps) {
   if (playlistTrackMatch && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
+      const playlistId = decodeURIComponent(playlistTrackMatch[1]);
+      if (body && Object.hasOwn(body, "trackIds")) {
+        const receipt = musicStore.addTracksToPlaylist(playlistId, body.trackIds);
+        if (receipt) sendJson(res, 200, receipt);
+        else notFound(res);
+        return true;
+      }
       const trackId = String(body?.trackId || body?.track_id || "").trim();
       if (!trackId) {
         sendJson(res, 400, { error: "缺少歌曲 ID" });
         return true;
       }
-      const data = musicStore.addToPlaylist(decodeURIComponent(playlistTrackMatch[1]), trackId, {
+      const data = musicStore.addToPlaylist(playlistId, trackId, {
         receiptOnly: url.searchParams.get("return") === "receipt"
       });
       if (!data) {
@@ -267,6 +274,19 @@ export async function routeMusicApi(req, res, url, deps) {
       sendJson(res, 200, data);
     } catch (error) {
       sendMusicPublicError(res, sendJson, error, "歌单排序保存失败");
+    }
+    return true;
+  }
+
+  const playlistTrackBatchRemove = /^\/api\/music\/playlists\/([^/]+)\/tracks\/remove$/.exec(url.pathname);
+  if (playlistTrackBatchRemove && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const receipt = musicStore.removeTracksFromPlaylist(decodeURIComponent(playlistTrackBatchRemove[1]), body?.trackIds);
+      if (receipt) sendJson(res, 200, receipt);
+      else notFound(res);
+    } catch (error) {
+      sendMusicPublicError(res, sendJson, error, "移出歌单失败");
     }
     return true;
   }

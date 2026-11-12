@@ -14,6 +14,10 @@ function finiteCacheLimit(value,fallback,maximum) {
   return Number.isFinite(number) ? Math.max(0,Math.min(maximum,Math.trunc(number))) : fallback;
 }
 
+function mediaImageStoppedError() {
+  return Object.assign(new Error("媒体图片服务正在停止"), { code: "MEDIA_IMAGE_STOPPED", statusCode: 503 });
+}
+
 export function createMediaResponseService({
   coreImageRow,
   corePersonAvatarRow,
@@ -169,7 +173,7 @@ export function createMediaResponseService({
   }
 
   async function cachedMediaBlobRow(key, loader) {
-    if (!accepting) throw Object.assign(new Error("媒体图片服务正在停止"), { code: "MEDIA_IMAGE_STOPPED", statusCode: 503 });
+    if (!accepting) throw mediaImageStoppedError();
     if (mediaBlobCache.has(key)) {
       const cached = mediaBlobCache.get(key);
       mediaBlobCache.delete(key);
@@ -741,8 +745,17 @@ export function createMediaResponseService({
       return;
     }
 
-    const cachedRow = await cachedMediaBlobRow(`remote:${remoteUrl}`, () => blobStore.remoteImage(remoteUrl));
+    const generation = mediaGeneration;
+    let cachedRow;
+    let cacheError;
+    try {
+      cachedRow = await cachedMediaBlobRow(`remote:${remoteUrl}`, () => blobStore.remoteImage(remoteUrl));
+    } catch (error) {
+      cacheError = error ?? "远程图片缓存读取失败";
+    }
     if (res.destroyed || res.writableEnded || req.aborted) return;
+    if (!accepting || generation !== mediaGeneration) throw mediaImageStoppedError();
+    if (cacheError) warn("[remote-image-cache]", cacheError.message || cacheError);
     if (serveRemoteImageRow(res, cachedRow)) {
       return;
     }

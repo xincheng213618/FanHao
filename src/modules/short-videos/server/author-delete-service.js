@@ -27,40 +27,54 @@ export function createShortVideoAuthorDeleteService(options = {}) {
         })
       : null;
     const cleanupReady = !deletion || deletion.physicalCleanupComplete === true;
-    const folderCleanup = cleanupReady
-      ? removeFolders(analysis)
-      : { complete: false, removed: [], removedCount: 0 };
-    return { preview: publicPreview(analysis), deletion, folderCleanup };
+    try {
+      const folderCleanup = cleanupReady
+        ? removeFolders(analysis)
+        : { complete: false, removed: [], removedCount: 0 };
+      return { preview: publicPreview(analysis), deletion, folderCleanup };
+    } catch (error) {
+      if (deletion?.logicalDeleteCommitted === true) {
+        error.authorWorksCommitted = true;
+        if (error.expose === true) error.message = `作品删除已提交。${error.message}`;
+      }
+      throw error;
+    }
   }
 
-  function deleteRecord(secUid) {
-    const analysis = analyze(secUid, { allowMissing: true });
-    if (analysis.totalCount > 0) {
-      throw publicError("作者仍有本地作品，请刷新后重试", 409, "SHORT_VIDEO_AUTHOR_DELETE_HAS_WORKS");
-    }
+  function deleteRecord(value) {
+    const secUid = normalizedSecUid(value);
     const db = database();
-    if (!analysis.userId) return { removed: false, userId: "", followRows: 0 };
     db.exec("BEGIN IMMEDIATE");
     try {
-      const followRows = Number(db.prepare("DELETE FROM short_video_follows WHERE target_user_id = ?").run(analysis.userId).changes || 0);
-      const removed = Number(db.prepare("DELETE FROM short_video_users WHERE id = ? AND sec_uid = ?").run(analysis.userId, analysis.secUid).changes || 0) > 0;
+      const userId = String(readAuthor(db, secUid)?.id || "");
+      const hasWorks = db.prepare("SELECT 1 FROM short_videos WHERE author_sec_uid = ? LIMIT 1").get(secUid)
+        || (userId && db.prepare("SELECT 1 FROM short_videos WHERE owner_user_id = ? LIMIT 1").get(userId));
+      if (hasWorks) {
+        throw publicError("作者仍有本地作品，请刷新后重试", 409, "SHORT_VIDEO_AUTHOR_DELETE_HAS_WORKS");
+      }
+      const followRows = userId ? Number(db.prepare("DELETE FROM short_video_follows WHERE target_user_id = ?").run(userId).changes || 0) : 0;
+      const removed = Boolean(userId && db.prepare("DELETE FROM short_video_users WHERE id = ? AND sec_uid = ?").run(userId, secUid).changes);
       db.exec("COMMIT");
-      return { removed, userId: analysis.userId, followRows };
+      return { removed, userId, followRows };
     } catch (error) {
       try { db.exec("ROLLBACK"); } catch {}
       throw error;
     }
   }
 
-  function analyze(value, options = {}) {
-    const secUid = normalizedSecUid(value);
-    const db = database();
-    const user = db.prepare(`
+  function readAuthor(db, secUid) {
+    return db.prepare(`
       SELECT id, nickname
       FROM short_video_users
       WHERE platform = 'douyin' AND sec_uid = ?
       LIMIT 1
     `).get(secUid);
+  }
+
+  function analyze(value) {
+    const secUid = normalizedSecUid(value);
+    const db = database();
+    const user = readAuthor(db, secUid);
     const columns = "id, author_name, is_liked, media_type, COALESCE(size_bytes, 0) AS size_bytes, source_path";
     const rows = db.prepare(`
       SELECT ${columns}
@@ -77,7 +91,7 @@ export function createShortVideoAuthorDeleteService(options = {}) {
         ORDER BY id
       `).all(user.id, secUid));
     }
-    if (!user && !rows.length && !options.allowMissing) {
+    if (!user && !rows.length) {
       throw publicError("没有找到这个作者的本地记录", 404, "SHORT_VIDEO_AUTHOR_DELETE_NOT_FOUND");
     }
     const folders = inspectFolders(secUid, rows);
@@ -113,51 +127,86 @@ export function createShortVideoAuthorDeleteService(options = {}) {
         addFolderCandidate(candidates, root, path.join(root, entry.name), secUid);
       }
     }
-    return [...candidates.values()].sort((left, right) => left.path.localeCompare(right.path));
+    return [...candidates.values()].filter(Boolean).sort((left, right) => left.path.localeCompare(right.path));
   }
 
   function addFolderCandidate(candidates, root, candidate, secUid) {
     const rootPath = path.resolve(root);
     const candidatePath = path.resolve(candidate);
-    if (path.dirname(candidatePath).toLocaleLowerCase("en-US") !== rootPath.toLocaleLowerCase("en-US")) return;
+    if (pathKey(path.dirname(candidatePath)) !== pathKey(rootPath)) return;
     if (!authorFolderNameMatches(path.basename(candidatePath), secUid)) return;
-    let entry;
-    try { entry = fsOps.lstatSync(candidatePath); } catch { return; }
-    if (!entry.isDirectory() || entry.isSymbolicLink()) return;
-    let rootReal;
-    let candidateReal;
+    const key = pathKey(candidatePath);
+    if (candidates.has(key)) return;
+    candidates.set(key, null);
     try {
-      rootReal = fsOps.realpathSync(rootPath);
-      candidateReal = fsOps.realpathSync(candidatePath);
-    } catch {
-      return;
+      const proof = readFolderProof(rootPath, candidatePath);
+      if (proof) candidates.set(key, { path: candidatePath, root: rootPath, name: path.basename(candidatePath), ...proof });
+    } catch { /* Discovery tolerates unavailable configured roots. */ }
+  }
+
+  function readFolderProof(root, folder, { allowMissing = false } = {}) {
+    const rootReal = path.resolve(fsOps.realpathSync(root));
+    const rootStat = fsOps.statSync(rootReal, { bigint: true });
+    if (!rootStat.isDirectory()) return null;
+    const rootIdentity = directoryIdentity(rootStat);
+    let folderStat;
+    try { folderStat = fsOps.lstatSync(folder, { bigint: true }); }
+    catch (error) {
+      if (allowMissing && error?.code === "ENOENT") return { rootReal, rootIdentity, identity: "" };
+      throw error;
     }
-    if (path.dirname(candidateReal).toLocaleLowerCase("en-US") !== path.resolve(rootReal).toLocaleLowerCase("en-US")) return;
-    candidates.set(candidatePath.toLocaleLowerCase("en-US"), { path: candidatePath, root: rootPath, name: path.basename(candidatePath) });
+    if (!folderStat.isDirectory() || folderStat.isSymbolicLink()) return null;
+    const realPath = path.resolve(fsOps.realpathSync(folder));
+    if (pathKey(path.dirname(realPath)) !== pathKey(rootReal)) return null;
+    return { rootReal, rootIdentity, realPath, identity: directoryIdentity(folderStat) };
+  }
+
+  function stillConfirmedFolder(folder) {
+    let proof;
+    try { proof = readFolderProof(folder.root, folder.path, { allowMissing: true }); }
+    catch (error) { throw folderChangedError(error); }
+    if (!proof || proof.rootIdentity !== folder.rootIdentity || pathKey(proof.rootReal) !== pathKey(folder.rootReal)
+      || (proof.identity && (proof.identity !== folder.identity || pathKey(proof.realPath) !== pathKey(folder.realPath)))) {
+      throw folderChangedError();
+    }
+    return Boolean(proof.identity);
   }
 
   function removeFolders(analysis) {
+    // A video delete can await filesystem cleanup. The later directory step
+    // must still refer to the directories accepted before that wait.
+    const acceptedPaths = new Set(analysis.folders.map(folder => pathKey(folder.path)));
+    if (inspectFolders(analysis.secUid).some(folder => !acceptedPaths.has(pathKey(folder.path)))) {
+      throw folderChangedError();
+    }
+    const removable = analysis.folders.filter(stillConfirmedFolder);
+    if (!removable.length) return { complete: true, removed: [], removedCount: 0 };
+
+    const references = database().prepare(`
+      SELECT 1
+      FROM (
+        SELECT source_path AS local_path FROM short_videos
+        UNION ALL
+        SELECT cover_path FROM short_videos
+        UNION ALL
+        SELECT music_path FROM short_videos
+        UNION ALL
+        SELECT data_path FROM short_videos
+        UNION ALL
+        SELECT local_path FROM short_video_assets
+      ) tracked_path
+      WHERE (replace(trim(local_path), char(92), '/') || '/') LIKE ? ESCAPE '\\'
+        OR (replace(trim(local_path), char(92), '/') || '/') LIKE ? ESCAPE '\\'
+      LIMIT 1
+    `);
     const removed = [];
-    for (const folder of inspectFolders(analysis.secUid, analysis.folders.map((item) => ({ source_path: path.join(item.path, "placeholder") })))) {
-      const tracked = database().prepare(`
-        SELECT owner_id AS id
-        FROM (
-          SELECT id AS owner_id, source_path AS local_path FROM short_videos
-          UNION ALL
-          SELECT id, cover_path FROM short_videos
-          UNION ALL
-          SELECT id, music_path FROM short_videos
-          UNION ALL
-          SELECT id, data_path FROM short_videos
-          UNION ALL
-          SELECT video_id, local_path FROM short_video_assets
-        ) tracked_path
-        WHERE COALESCE(local_path, '') LIKE ? ESCAPE '\\'
-        LIMIT 1
-      `).get(`${escapeLike(folder.path + path.sep)}%`);
-      if (tracked?.id) {
+    for (const folder of removable) {
+      if (references.get(descendantPattern(folder.path), descendantPattern(folder.realPath))) {
         throw publicError("作者文件夹仍被其他作品使用，已停止删除", 409, "SHORT_VIDEO_AUTHOR_FOLDER_IN_USE");
       }
+    }
+    for (const folder of removable) {
+      if (!stillConfirmedFolder(folder)) continue;
       try {
         fsOps.rmSync(folder.path, { recursive: true, force: false, maxRetries: 3, retryDelay: 100 });
         removed.push(folder.name);
@@ -216,6 +265,22 @@ function isInside(candidate, root) {
 
 function escapeLike(value) {
   return String(value || "").replace(/[\\%_]/g, (match) => `\\${match}`);
+}
+
+function descendantPattern(value) {
+  return `${escapeLike(value.replaceAll("\\", "/"))}/%`;
+}
+
+function pathKey(value) {
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function directoryIdentity(stat) {
+  return `${stat.dev}:${stat.ino}:${stat.birthtimeNs}`;
+}
+
+function folderChangedError(cause) {
+  return publicError("作者文件夹在删除期间发生变化，已保留目录，请重新预览后重试", 409, "SHORT_VIDEO_AUTHOR_FOLDER_CHANGED", cause);
 }
 
 function sumBytes(rows) {

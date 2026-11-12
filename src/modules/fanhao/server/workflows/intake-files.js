@@ -72,6 +72,11 @@ export async function intakeSearchRoots() {
   return folders;
 }
 
+function matchesIntakeDescriptor(item, file, stat) {
+  return stat?.isFile() && stat.size === item.size && Math.abs(stat.mtimeMs - item.modified) <= 2
+    && (!item.relative || file.replaceAll("\\", "/").toLowerCase().endsWith(`/${item.relative.replaceAll("\\", "/").toLowerCase()}`));
+}
+
 async function searchIntakeFiles(roots, excludedRoots, wanted) {
   const searchRoots = new Map(roots.map((root) => [pathKey(root), root]));
   const signal = AbortSignal.timeout(5000);
@@ -95,8 +100,7 @@ async function searchIntakeFiles(roots, excludedRoots, wanted) {
           const stat = await fsp.lstat(file).catch(() => null);
           if (signal.aborted || !stat?.isFile()) continue;
           for (const item of candidates) {
-            if (item.hits.size >= 10 || stat.size !== item.size || Math.abs(stat.mtimeMs - item.modified) > 2) continue;
-            if (item.relative && !file.replaceAll("\\", "/").toLowerCase().endsWith(`/${item.relative.replaceAll("\\", "/").toLowerCase()}`)) continue;
+            if (item.hits.size >= 10 || !matchesIntakeDescriptor(item, file, stat)) continue;
             try { item.hits.set(pathKey(file), checkedPath(file, [root])); }
             catch { /* The candidate disappeared or resolved through a link. */ }
           }
@@ -113,7 +117,7 @@ async function searchIntakeFiles(roots, excludedRoots, wanted) {
   finally { signal.removeEventListener("abort", onTimeout); }
 }
 
-export async function collectIntakeFiles(input, roots, { searchRoots = intakeSearchRoots, excludedRoots = [] } = {}) {
+export async function collectIntakeFiles(input, roots, { searchRoots = intakeSearchRoots, excludedRoots = [], findIndexed } = {}) {
   const paths = new Map(), folderOrigins = new Map();
   let visited = 0;
   async function collect(dir, depth, match) {
@@ -148,6 +152,14 @@ export async function collectIntakeFiles(input, roots, { searchRoots = intakeSea
     const key = item.name.toLowerCase();
     if (!wanted.has(key)) wanted.set(key, []);
     wanted.get(key).push({ ...item, hits: new Map() });
+  }
+  if (findIndexed) for (const items of wanted.values()) for (const item of items) {
+    for (const file of findIndexed(item.name, item.size)) {
+      if (item.hits.size >= 10) break;
+      try {
+        if (matchesIntakeDescriptor(item, file, await fsp.lstat(file))) item.hits.set(pathKey(file), checkedPath(file, excludedRoots));
+      } catch { /* The indexed file is unavailable. */ }
+    }
   }
   await searchIntakeFiles([...roots, ...await searchRoots()], excludedRoots, wanted);
   const unmatched = [];
@@ -201,8 +213,16 @@ export async function probeIntakeVideo(executable, file) {
   } catch { return null; }
 }
 
-export async function fetchIntakeMetadata({ python, script, profile, cwd }, code) {
-  const { stdout } = await runFile(python, [script, "--code", code, "--cookie-profile-dir", profile, "--headless"],
+export function intakeDetailUrl(value) {
+  if (typeof value !== "string" || value.length > 2048) return "";
+  const match = /^(?:https:\/\/)?(?:www\.)?javdb\.com\/v\/([a-z\d]+)\/?(?:[?#]\S*)?$/i.exec(value.trim());
+  return match ? `https://javdb.com/v/${match[1]}` : "";
+}
+
+export async function fetchIntakeMetadata({ python, script, profile, cwd }, code, detailUrl) {
+  const args = [script, "--code", code, "--cookie-profile-dir", profile, "--headless"];
+  if (detailUrl) args.push("--detail-url", detailUrl);
+  const { stdout } = await runFile(python, args,
     { cwd, windowsHide: true, timeout: 150000, maxBuffer: 512 * 1024 });
   const prefix = "FANHAO_INTAKE_METADATA=";
   const line = stdout.split(/\r?\n/).findLast((value) => value.startsWith(prefix));

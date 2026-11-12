@@ -15,6 +15,7 @@ try {
   fs.writeFileSync(path.join(collectionDir, "alpha.jpg"), "image-a");
   fs.writeFileSync(path.join(collectionDir, "beta.wmv"), "video-b");
   fs.writeFileSync(path.join(collectionDir, "folder.jpg"), "shared-image");
+  fs.writeFileSync(path.join(collectionDir, "beta.zh-CN.vtt"), "subtitle-b");
 
   const createService = (singleVideoRoots, libraryRoots = [westernRoot], excludedRoots = []) => createLocalLibraryScanService({
     compareNaturalName: (left, right) => left.name.localeCompare(right.name, undefined, { numeric: true }),
@@ -30,7 +31,7 @@ try {
     fileBase: (name) => path.parse(name).name,
     isExcludedDirName: () => false,
     isImage: (name) => [".jpg", ".jpeg", ".png"].includes(path.extname(name).toLowerCase()),
-    isInfo: (name) => [".nfo", ".txt"].includes(path.extname(name).toLowerCase()),
+    isInfo: (name) => [".nfo", ".txt", ".vtt"].includes(path.extname(name).toLowerCase()),
     isPlayableVideo: (name) => path.extname(name).toLowerCase() === ".mp4",
     isVideo: (name) => [".mp4", ".wmv"].includes(path.extname(name).toLowerCase()),
     libraryRoots,
@@ -47,6 +48,8 @@ try {
   assert.ok(westernWorks.every((work) => path.extname(work.relativePath)), "Western work identity must be its video path");
   assert.equal(westernWorks[0].imageCount, 1, "Same-basename image should stay with its video");
   assert.equal(westernWorks[1].imageCount, 0, "Shared folder image must not leak across multiple videos");
+  assert.deepEqual(westernWorks[0].infos, []);
+  assert.deepEqual(westernWorks[1].infos.map(({ name }) => name), ["beta.zh-CN.vtt"]);
 
   const groupedWorks = createService([]).scanPersonDirectory("person-1", personDir);
   assert.equal(groupedWorks.length, 1, "Non-Western scanning must retain folder grouping");
@@ -59,8 +62,10 @@ try {
   fs.mkdirSync(regularPersonDir, { recursive: true });
   fs.writeFileSync(path.join(animeRoot, "anime.mp4"), "anime");
   fs.writeFileSync(path.join(regularPersonDir, "regular.mp4"), "regular");
+  fs.writeFileSync(path.join(regularPersonDir, "regular.und.vtt"), "subtitle");
   const mainLibrary = createService([], [mainRoot], [animeRoot]).scanLibrary();
   assert.deepEqual(mainLibrary.people.map((person) => person.name), ["Aoi"], "anime media root must be excluded from the FanHao people scan");
+  assert.deepEqual([...mainLibrary.worksById.values()][0].infos.map(({ name }) => name), ["regular.und.vtt"]);
 
   console.log("Western video scan verification passed.");
 } finally {

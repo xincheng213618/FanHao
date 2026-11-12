@@ -18,6 +18,17 @@ export async function routeToolsApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/tools/txt-format/batch-download" && req.method === "GET") {
+    if (!requireLocalAdmin(req, res)) return true;
+    try {
+      await txtFormatToolService.serveBatchDownload(res, url.searchParams.getAll("id"));
+    } catch (error) {
+      if (!res.headersSent && !res.destroyed) sendJson(res, 500, { error: error.message || "整理结果打包失败" });
+      else if (!res.destroyed) res.destroy();
+    }
+    return true;
+  }
+
   const txtDownloadMatch = /^\/api\/tools\/txt-format\/download\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
   if (txtDownloadMatch && req.method === "GET") {
     txtFormatToolService.serveDownload(req, res, txtDownloadMatch[1]);

@@ -5,6 +5,21 @@ function normalizeStatus(status) {
   return ["running", "stopping", "stopped", "done", "error"].includes(status) ? status : "error";
 }
 
+function isActiveTask(task) {
+  return task.status === "running" || task.status === "stopping";
+}
+
+function trimFinishedTasks(tasks, historyLimit) {
+  const finished = tasks.filter((task) => !isActiveTask(task));
+  if (finished.length <= historyLimit) return;
+  // Keep a long task's result visible even if many newer tasks finished first.
+  finished.sort((left, right) => (right.finishedAt || right.startedAt).localeCompare(left.finishedAt || left.startedAt));
+  const expired = new Set(finished.slice(historyLimit));
+  for (let index = tasks.length - 1; index >= 0; index--) {
+    if (expired.has(tasks[index])) tasks.splice(index, 1);
+  }
+}
+
 function durationMs(task) {
   const started = Date.parse(task.startedAt || "");
   const ended = Date.parse(task.finishedAt || "") || Date.now();
@@ -61,12 +76,13 @@ export function createAdminTaskService({
       const now = new Date().toISOString();
       const loaded = [];
       let maxSeq = 0;
-      for (const rawTask of rawTasks.slice(0, historyLimit)) {
+      for (const rawTask of rawTasks) {
+        if (!rawTask || typeof rawTask !== "object") continue;
         const task = persistedTask(rawTask);
         if (!task.id) continue;
         const taskSeq = Number(String(task.id).replace(/^task_/, ""));
         if (Number.isFinite(taskSeq)) maxSeq = Math.max(maxSeq, taskSeq);
-        if (task.status === "running" || task.status === "stopping") {
+        if (isActiveTask(task)) {
           task.status = "stopped";
           task.finishedAt = task.finishedAt || now;
           task.logs.push("服务重启，未完成任务已标记为中断");
@@ -74,6 +90,7 @@ export function createAdminTaskService({
         loaded.push(task);
       }
       seq = maxSeq;
+      trimFinishedTasks(loaded, historyLimit);
       return loaded;
     } catch (error) {
       console.warn("[admin] 读取任务历史失败：", error.message);
@@ -82,12 +99,14 @@ export function createAdminTaskService({
   }
 
   function persist() {
+    clearTimeout(persistTimer);
+    persistTimer = null;
     try {
       ensureDataDir();
       const payload = {
         version: 1,
         updatedAt: new Date().toISOString(),
-        tasks: tasks.slice(0, historyLimit).map(persistedTask)
+        tasks: tasks.map(persistedTask)
       };
       const tempPath = `${tasksPath}.tmp`;
       fs.writeFileSync(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
@@ -114,6 +133,16 @@ export function createAdminTaskService({
     schedulePersist();
   }
 
+  function callTaskHook(task, callback, label, ...args) {
+    try {
+      callback?.(task, ...args);
+      return true;
+    } catch (error) {
+      pushLog(task, `${label}失败：${error?.message || String(error)}`);
+      return false;
+    }
+  }
+
   function summary() {
     const result = { total: tasks.length, running: 0, stopping: 0, done: 0, error: 0, stopped: 0 };
     for (const task of tasks) {
@@ -134,7 +163,7 @@ export function createAdminTaskService({
       status: task.status,
       exitCode: task.exitCode ?? null,
       pid: task.pid || null,
-      canStop: Boolean(task.child && (task.status === "running" || task.status === "stopping")),
+      canStop: Boolean(task.child && isActiveTask(task)),
       refreshHints: [...(task.refreshHints || [])],
       startedAt: task.startedAt,
       finishedAt: task.finishedAt || "",
@@ -148,7 +177,7 @@ export function createAdminTaskService({
   }
 
   function hasRunningScript(scriptId) {
-    return tasks.some((task) => task.scriptId === scriptId && (task.status === "running" || task.status === "stopping"));
+    return tasks.some((task) => task.scriptId === scriptId && isActiveTask(task));
   }
 
   function startProcessTask({ type, label, person, command, args, scriptId = "", refreshHints = [], invalidates = [], onDone, onStdout }) {
@@ -174,38 +203,46 @@ export function createAdminTaskService({
       logs: []
     };
     tasks.unshift(task);
-    if (tasks.length > historyLimit) tasks.length = historyLimit;
+
+    let outputFailed = false;
+    function finish(code, signal) {
+      task.exitCode = code;
+      task.status = task.stopRequested && task.pid ? "stopped" : code === 0 && !outputFailed ? "done" : "error";
+      task.finishedAt = new Date().toISOString();
+      task.child = null;
+      if (signal) pushLog(task, `退出信号 ${signal}`);
+      else if (code !== null) pushLog(task, `退出码 ${code}`);
+      if (task.status === "done" && !callTaskHook(task, onTaskDone, "任务完成后刷新")) task.status = "error";
+      if (!callTaskHook(task, onDone, "任务收尾")) task.status = "error";
+      trimFinishedTasks(tasks, historyLimit);
+      persist();
+    }
 
     pushLog(task, commandPreview(command, args));
-    const child = spawn(command, args, {
-      cwd,
-      windowsHide: true,
-      env: { ...process.env, ...preparedProcess.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
-    });
+    let child;
+    try {
+      child = spawn(command, args, {
+        cwd,
+        windowsHide: true,
+        env: { ...process.env, ...preparedProcess.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" }
+      });
+    } catch (error) {
+      pushLog(task, error.message);
+      finish(null, null);
+      return task;
+    }
     task.child = child;
     task.pid = child.pid || null;
     if (task.pid) pushLog(task, `PID ${task.pid}`);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       pushLog(task, chunk);
-      onStdout?.(task, String(chunk));
+      if (!outputFailed) outputFailed = !callTaskHook(task, onStdout, "任务输出处理", chunk);
     });
     child.stderr.on("data", (chunk) => pushLog(task, chunk));
-    child.on("error", (error) => {
-      task.status = "error";
-      task.finishedAt = new Date().toISOString();
-      pushLog(task, error.message);
-      persist();
-    });
-    child.on("close", (code) => {
-      task.exitCode = code;
-      task.status = task.stopRequested ? "stopped" : code === 0 ? "done" : "error";
-      task.finishedAt = new Date().toISOString();
-      task.child = null;
-      pushLog(task, `退出码 ${code}`);
-      if (task.status === "done") onTaskDone?.(task);
-      onDone?.(task);
-      persist();
-    });
+    child.on("error", (error) => pushLog(task, error.message));
+    child.once("close", finish);
     persist();
 
     return task;
@@ -218,22 +255,35 @@ export function createAdminTaskService({
       error.statusCode = 404;
       throw error;
     }
-    if (!task.child || (task.status !== "running" && task.status !== "stopping")) {
+    if (!task.child || !isActiveTask(task)) {
       const error = new Error("任务已经不在运行");
       error.statusCode = 400;
       throw error;
     }
+    if (task.status === "stopping") return task;
     task.stopRequested = true;
     task.status = "stopping";
     pushLog(task, "收到停止请求");
     persist();
+    const child = task.child;
+    function stopFailed(message) {
+      if (task.child !== child || child.exitCode !== null || child.signalCode !== null) return;
+      task.stopRequested = false;
+      task.status = "running";
+      pushLog(task, `停止请求失败：${message}`);
+      persist();
+    }
     if (process.platform === "win32" && task.pid) {
       const killer = spawn("taskkill", ["/PID", String(task.pid), "/T", "/F"], { windowsHide: true });
       killer.stdout.on("data", (chunk) => pushLog(task, chunk));
       killer.stderr.on("data", (chunk) => pushLog(task, chunk));
-      killer.on("error", (error) => pushLog(task, error.message));
-    } else {
-      task.child.kill("SIGTERM");
+      let launchError;
+      killer.once("error", (error) => { launchError = error.message; });
+      killer.once("close", (code, signal) => {
+        if (code !== 0) stopFailed(launchError || `taskkill 退出 ${code ?? signal}`);
+      });
+    } else if (!child.kill("SIGTERM")) {
+      stopFailed("未能向任务进程发送停止信号");
     }
     return task;
   }

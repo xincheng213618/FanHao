@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
+import { pageTasteEvidence } from "./profile.js";
 
 export function createTasteService({ dbPath, cacheMs = 30_000, timeoutMs = 20_000, now = Date.now,
   workerFactory = (options) => new Worker(new URL("./worker.js", import.meta.url), options) }) {
@@ -11,7 +12,7 @@ export function createTasteService({ dbPath, cacheMs = 30_000, timeoutMs = 20_00
       catch (error) { if (file !== dbPath && error.code === "ENOENT") return ""; throw error; }
     }))).join("|");
   }
-  async function profile() {
+  async function analysis() {
     if (stopping) throw unavailable();
     if (pending) return pending;
     const operation = (async () => {
@@ -28,7 +29,7 @@ export function createTasteService({ dbPath, cacheMs = 30_000, timeoutMs = 20_00
         };
         const timer = setTimeout(() => { worker.terminate().then(() => finish(unavailable()), () => finish(unavailable())); }, timeoutMs);
         active = { worker, cancel: () => finish(unavailable()) };
-        worker.once("message", (message) => finish(message?.profile ? null : unavailable(), message?.profile));
+        worker.once("message", (message) => finish(message?.profile ? null : unavailable(), message));
         worker.once("error", () => finish(unavailable()));
         worker.once("exit", () => finish(unavailable()));
       });
@@ -39,6 +40,16 @@ export function createTasteService({ dbPath, cacheMs = 30_000, timeoutMs = 20_00
     try { return await operation; }
     finally { if (pending === operation) pending = null; }
   }
+  async function profile() { return (await analysis()).profile; }
+  function evidence(request) {
+    if (stopping) throw unavailable();
+    if (!cached || !request.snapshot || cached.value.profile.snapshot !== request.snapshot) {
+      throw Object.assign(new Error("这份分析快照已过期，请重新读取后再查看作品。"), { statusCode: 409 });
+    }
+    const page = pageTasteEvidence(cached.value.evidence, request);
+    if (!page) throw Object.assign(new Error("这份分析中没有该特征。"), { statusCode: 404 });
+    return page;
+  }
   function beginStop() { stopping = true; cached = null; }
   async function stop() {
     beginStop();
@@ -46,5 +57,5 @@ export function createTasteService({ dbPath, cacheMs = 30_000, timeoutMs = 20_00
     if (owned) { await owned.worker.terminate(); owned.cancel(); }
     if (pending) await pending.catch(() => {});
   }
-  return { profile, beginStop, stop };
+  return { profile, evidence, beginStop, stop };
 }

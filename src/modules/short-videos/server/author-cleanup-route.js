@@ -52,6 +52,7 @@ export async function routeShortVideoAuthorCleanup(options) {
     }
     sendJson(res, deletionHttpStatus(deletion), { ...deletion, authorCleanup });
   } catch (error) {
+    if (deleteAll && error?.authorWorksCommitted === true) onMutation?.();
     sendShortVideoPublicError(res, sendJson, error, deleteAll ? "作者删除失败" : "作者清理失败", { includeDetails: true });
   }
   return true;
@@ -65,6 +66,7 @@ async function deleteAuthor(options) {
   });
   const deletion = authorDelete.deletion;
   if (deletion && (deletion.logicalDeleteCommitted !== true || deletion.physicalCleanupComplete !== true)) {
+    if (deletion.logicalDeleteCommitted === true) onMutation?.();
     sendJson(res, deletionHttpStatus(deletion), {
       ...deletion,
       authorDelete: deleteSummary(authorDelete, manager, false)

@@ -1,58 +1,87 @@
 import { Worker } from "node:worker_threads";
 
-export function createTableStampWorkerClient({ dbPath, imageDbPath }) {
+export function createTableStampWorkerClient({ dbPath, imageDbPath, WorkerCtor = Worker, requestTimeoutMs = 15_000 }) {
   const requests = new Map();
   let requestId = 0;
-  let worker = null;
+  let owner = null;
 
   function refresh(table) {
+    if (owner?.retiring) return Promise.reject(stampFault("TABLE_STAMP_RETIRING", "目录戳后台线程尚未退出"));
     return new Promise((resolve, reject) => {
-      const activeWorker = ensureWorker();
-      activeWorker.ref();
+      const current = ensureWorker();
+      current.worker.ref();
       const id = ++requestId;
-      requests.set(id, { reject, resolve });
+      const timer = setTimeout(() => {
+        retireOwner(current, stampFault("TABLE_STAMP_TIMEOUT", "目录戳后台查询超时"));
+      }, requestTimeoutMs);
+      requests.set(id, { reject, resolve, timer });
       try {
-        activeWorker.postMessage({ id, table });
+        current.worker.postMessage({ id, table });
       } catch (error) {
-        requests.delete(id);
-        if (!requests.size) activeWorker.unref();
+        takeRequest(id);
+        if (!requests.size) current.worker.unref();
         reject(error);
       }
     });
   }
 
   function ensureWorker() {
-    if (worker) return worker;
+    if (owner) return owner;
 
-    const nextWorker = new Worker(new URL("./table-stamp-worker.js", import.meta.url), {
+    const worker = new WorkerCtor(new URL("./table-stamp-worker.js", import.meta.url), {
       workerData: { dbPath, imageDbPath }
     });
-    worker = nextWorker;
-    nextWorker.on("message", (message) => {
-      const id = Number(message?.id || 0);
-      const request = requests.get(id);
+    const current = { worker, retiring: false };
+    owner = current;
+    worker.on("message", (message) => {
+      if (owner !== current || current.retiring) return;
+      const request = takeRequest(Number(message?.id || 0));
       if (!request) return;
-      requests.delete(id);
       if (message?.ok) request.resolve(message.row || null);
       else request.reject(workerMessageError(message));
-      if (!requests.size) nextWorker.unref();
+      if (!requests.size) worker.unref();
     });
-    nextWorker.on("error", (error) => failWorker(nextWorker, error));
-    nextWorker.on("exit", (code) => {
-      if (worker !== nextWorker) return;
-      failWorker(nextWorker, new Error(`目录戳后台线程退出 (${code})`));
+    worker.on("error", (error) => retireOwner(current, error));
+    worker.on("exit", (code) => {
+      if (owner !== current) return;
+      owner = null;
+      rejectRequests(stampFault("TABLE_STAMP_EXITED", `目录戳后台线程退出 (${code})`));
     });
-    return nextWorker;
+    return current;
   }
 
-  function failWorker(failedWorker, error) {
-    if (worker !== failedWorker) return;
-    worker = null;
-    for (const request of requests.values()) request.reject(error);
+  function takeRequest(id) {
+    const request = requests.get(id);
+    if (request) {
+      requests.delete(id);
+      clearTimeout(request.timer);
+    }
+    return request;
+  }
+
+  function rejectRequests(error) {
+    for (const request of requests.values()) {
+      clearTimeout(request.timer);
+      request.reject(error);
+    }
     requests.clear();
   }
 
+  function retireOwner(current, error) {
+    if (owner !== current || current.retiring) return;
+    current.retiring = true;
+    rejectRequests(error);
+    current.worker.unref();
+    // A blocked native read may outlive termination. Only exit frees ownership.
+    try { Promise.resolve(current.worker.terminate()).catch(() => {}); }
+    catch { /* Exit still owns the handoff. */ }
+  }
+
   return { refresh };
+}
+
+function stampFault(code, message) {
+  return Object.assign(new Error(message), { code });
 }
 
 function workerMessageError(message) {

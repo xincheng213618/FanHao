@@ -244,11 +244,12 @@ export function createWorkPresenterService({
       ? getLibrary().peopleById.get(String(work.personId || "")) || null
       : displayPersonForWork(work.personId);
     const profileRow = person && !options.lightweightInfo ? actorProfileRow(person.id) : null;
-    const coreCover = options.lightweightInfo && !options.includeCoreCovers ? null : publicCoreWorkCover(work.id);
     const manualCover = manualCoverStateService.manualCoverForWork(work);
-    const cachedCover = manualCover ? null : coreCover;
+    const preferCoreCover = !options.lightweightInfo || options.includeCoreCovers;
+    const cachedCover = !manualCover && (preferCoreCover || !work.coverId) ? publicCoreWorkCover(work.id) : null;
     const infoRow = options.lightweightInfo ? null : workInfoDetailRow(work.id, { includeMetadata: includeFiles });
     const infoSummary = publicWorkInfoSummary(infoRow, work.infoSummary);
+    const remoteCoverUrl = !manualCover && !work.coverId && !cachedCover ? infoSummary?.imageUrl || "" : "";
     const videos = work.videos || [];
     const favorite = options.includeUserState === false ? null : favoriteStateService.publicFavoriteForWork(work.id);
     const personName = person?.name || work.personName || "";
@@ -263,10 +264,11 @@ export function createWorkPresenterService({
       relativePath: work.relativePath,
       localMarkers: markers,
       compilation: isCompilationWork(work),
-      coverId: manualCover?.image.id || (coreCover ? null : work.coverId),
+      coverId: manualCover?.image.id || (cachedCover ? null : work.coverId),
       manualCoverId: manualCover?.image.id || "",
       autoCoverId: work.coverId || "",
       cachedCover,
+      ...(remoteCoverUrl ? { remoteCoverUrl } : {}),
       videoCount: work.videoCount,
       playableCount: work.playableCount,
       imageCount: work.imageCount,

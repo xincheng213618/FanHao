@@ -220,6 +220,7 @@ function workerMessageError(message) {
   error.code = String(message?.errorCode || "MUSIC_SCAN_WORKER_FAILED");
   error.statusCode = Number(message?.statusCode || 500);
   error.expose = true;
+  if (message?.retryable === true) error.retryable = true;
   return error;
 }
 

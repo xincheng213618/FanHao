@@ -7,6 +7,9 @@ const DEFAULT_FLUSH_INTERVAL_MS = 5_000;
 const DEFAULT_MAX_PENDING = 1_000;
 const UNKNOWN = "未知";
 const ACCESS_LOG_BOOTSTRAP_KEY = "access_log_bootstrap_v1";
+const STAGED_HISTORY = "temp.access_bootstrap_daily";
+const DAILY_COLUMNS = `day, ip, auth_reason, access_mode, request_count, page_view_count, api_count, media_count,
+        denied_count, error_count, response_bytes, first_seen, last_seen, last_path, user_agent`;
 
 function localDay(date = new Date()) {
   const year = date.getFullYear();
@@ -71,6 +74,7 @@ export function createAccessAnalyticsService({
   let closed = false;
   let geoClosed = false;
   let closePromise = null;
+  let bootstrapPromise = null;
   const serviceStartedAt = new Date().toISOString();
 
   initializeSchema(db);
@@ -118,45 +122,80 @@ export function createAccessAnalyticsService({
     else ensureFlushTimer();
   }
 
-  async function bootstrapFromAccessLogs(logPaths = []) {
+  function bootstrapFromAccessLogs(logPaths = []) {
+    if (bootstrapPromise) return bootstrapPromise;
+    if (closed || closePromise) return Promise.reject(new Error("访问统计服务正在关闭"));
+    bootstrapPromise = importAccessLogs(logPaths).finally(() => { bootstrapPromise = null; });
+    return bootstrapPromise;
+  }
+
+  async function importAccessLogs(logPaths) {
     if (statements.selectMeta.get(ACCESS_LOG_BOOTSTRAP_KEY)?.value) {
       return { imported: 0, scanned: 0, skipped: true };
     }
     const cutoff = statements.firstTracked.get()?.first_seen || serviceStartedAt;
     let imported = 0;
     let scanned = 0;
+    const batch = new Map();
 
-    for (const logPath of logPaths) {
-      if (!fs.statSync(logPath, { throwIfNoEntry: false })?.isFile()) continue;
-      const lines = readline.createInterface({
-        input: fs.createReadStream(logPath, { encoding: "utf8" }),
-        crlfDelay: Infinity
-      });
-      for await (const line of lines) {
-        scanned += 1;
-        let row;
-        try {
-          row = JSON.parse(line);
-        } catch {
-          continue;
+    try {
+      db.exec(`
+        CREATE TEMP TABLE access_bootstrap_daily AS SELECT ${DAILY_COLUMNS} FROM main.access_daily LIMIT 0;
+        CREATE UNIQUE INDEX temp.idx_access_bootstrap_daily_key ON access_bootstrap_daily(day, ip, auth_reason, access_mode);
+      `);
+      const staging = { upsertDaily: prepareDailyUpsert(db, STAGED_HISTORY) };
+      const stageBatch = () => {
+        if (!batch.size) return;
+        writeTransaction(db, "BEGIN", () => {
+          for (const entry of batch.values()) upsertEntry(staging, entry);
+        });
+        batch.clear();
+      };
+      for (const logPath of logPaths) {
+        const stat = await fs.promises.stat(logPath).catch(error => {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+          throw error;
+        });
+        if (!stat?.isFile()) continue;
+        const lines = readline.createInterface({
+          input: fs.createReadStream(logPath, { encoding: "utf8" }),
+          crlfDelay: Infinity
+        });
+        for await (const line of lines) {
+          scanned += 1;
+          let row;
+          try { row = JSON.parse(line); }
+          catch { continue; }
+          const entry = historicalLogEntry(row, cutoff);
+          if (!entry) continue;
+          const key = `${entry.day}\0${entry.ip}\0${entry.authReason}\0${entry.accessMode}`;
+          const current = batch.get(key);
+          if (current) mergeCounter(current, entry);
+          else batch.set(key, entry);
+          imported += 1;
+          if (batch.size >= maxPending) stageBatch();
         }
-        const entry = historicalLogEntry(row, cutoff);
-        if (!entry) continue;
-        const key = `${entry.day}\0${entry.ip}\0${entry.authReason}\0${entry.accessMode}`;
-        enqueue(key, entry);
-        imported += 1;
-        if (pending.size >= maxPending) await queueFlush();
       }
-    }
+      stageBatch();
+      const ips = db.prepare(`SELECT DISTINCT ip FROM ${STAGED_HISTORY}`).all().map(row => row.ip);
+      const geos = await locateAccessIps(ips);
 
-    await queueFlush();
-    statements.upsertMeta.run(ACCESS_LOG_BOOTSTRAP_KEY, JSON.stringify({
-      imported,
-      scanned,
-      cutoff,
-      completedAt: new Date().toISOString()
-    }));
-    return { imported, scanned, skipped: false, cutoff };
+      // Publish history and its receipt together. A second service may have
+      // finished importing while this connection was reading the log files.
+      return writeTransaction(db, "BEGIN IMMEDIATE", () => {
+        if (statements.selectMeta.get(ACCESS_LOG_BOOTSTRAP_KEY)?.value) {
+          return { imported: 0, scanned, skipped: true };
+        }
+        persistGeos(geos);
+        prepareDailyUpsert(db, "main.access_daily", STAGED_HISTORY).run();
+        statements.upsertMeta.run(ACCESS_LOG_BOOTSTRAP_KEY, JSON.stringify({
+          imported, scanned, cutoff, completedAt: new Date().toISOString()
+        }));
+        return { imported, scanned, skipped: false, cutoff };
+      });
+    } finally {
+      db.exec(`DROP TABLE IF EXISTS ${STAGED_HISTORY}`);
+    }
   }
 
   function ensureFlushTimer() {
@@ -179,58 +218,52 @@ export function createAccessAnalyticsService({
     return flushPromise;
   }
 
+  async function locateAccessIps(ips) {
+    const geos = [];
+    for (const ip of ips) {
+      const cached = statements.selectGeo.get(ip);
+      if (cached) {
+        geos.push(cached);
+        continue;
+      }
+      const located = await ipRegionService.lookup(ip);
+      geos.push({
+        ip,
+        country: located.country || UNKNOWN,
+        province: located.province || UNKNOWN,
+        city: located.city || UNKNOWN,
+        isp: located.isp || UNKNOWN,
+        isoCode: located.isoCode || "",
+        located: located.located ? 1 : 0,
+        ipVersion: Number(located.ipVersion || 0),
+        lookupError: located.reason || "",
+        updatedAt: new Date().toISOString()
+      });
+    }
+    return geos;
+  }
+
+  function persistGeos(geos) {
+    for (const geo of geos) {
+      statements.upsertGeo.run(
+        geo.ip, geo.country, geo.province, geo.city, geo.isp,
+        geo.isoCode || geo.iso_code || "", Number(geo.located || 0), Number(geo.ipVersion || geo.ip_version || 0),
+        geo.lookupError || geo.lookup_error || "", geo.updatedAt || geo.updated_at || new Date().toISOString()
+      );
+    }
+  }
+
   async function flushNow() {
     lastFlushFailure = null;
     if (!pending.size || closed) return;
     const batch = pending;
     pending = new Map();
-    const geoByIp = new Map();
-
     try {
-      for (const ip of new Set([...batch.values()].map((entry) => entry.ip))) {
-        const cached = statements.selectGeo.get(ip);
-        if (cached) {
-          geoByIp.set(ip, cached);
-          continue;
-        }
-        const located = await ipRegionService.lookup(ip);
-        const geo = {
-          ip,
-          country: located.country || UNKNOWN,
-          province: located.province || UNKNOWN,
-          city: located.city || UNKNOWN,
-          isp: located.isp || UNKNOWN,
-          isoCode: located.isoCode || "",
-          located: located.located ? 1 : 0,
-          ipVersion: Number(located.ipVersion || 0),
-          lookupError: located.reason || "",
-          updatedAt: new Date().toISOString()
-        };
-        geoByIp.set(ip, geo);
-      }
-
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        for (const geo of geoByIp.values()) {
-          statements.upsertGeo.run(
-            geo.ip,
-            geo.country,
-            geo.province,
-            geo.city,
-            geo.isp,
-            geo.isoCode || geo.iso_code || "",
-            Number(geo.located || 0),
-            Number(geo.ipVersion || geo.ip_version || 0),
-            geo.lookupError || geo.lookup_error || "",
-            geo.updatedAt || geo.updated_at || new Date().toISOString()
-          );
-        }
+      const geos = await locateAccessIps(new Set([...batch.values()].map(entry => entry.ip)));
+      writeTransaction(db, "BEGIN IMMEDIATE", () => {
+        persistGeos(geos);
         for (const entry of batch.values()) upsertEntry(statements, entry);
-        db.exec("COMMIT");
-      } catch (error) {
-        db.exec("ROLLBACK");
-        throw error;
-      }
+      });
     } catch (error) {
       lastFlushFailure = { error };
       for (const [key, entry] of batch) {
@@ -377,6 +410,7 @@ export function createAccessAnalyticsService({
     if (closePromise) return closePromise;
     if (closed && geoClosed && !db) return;
     closePromise = (async () => {
+      if (bootstrapPromise) await bootstrapPromise.catch(() => {});
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = null;
       do {
@@ -526,25 +560,39 @@ function createStatements(db) {
         lookup_error = excluded.lookup_error,
         updated_at = excluded.updated_at
     `),
-    upsertDaily: db.prepare(`
-      INSERT INTO access_daily (
-        day, ip, auth_reason, access_mode, request_count, page_view_count, api_count, media_count,
-        denied_count, error_count, response_bytes, first_seen, last_seen, last_path, user_agent
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(day, ip, auth_reason, access_mode) DO UPDATE SET
-        request_count = access_daily.request_count + excluded.request_count,
-        page_view_count = access_daily.page_view_count + excluded.page_view_count,
-        api_count = access_daily.api_count + excluded.api_count,
-        media_count = access_daily.media_count + excluded.media_count,
-        denied_count = access_daily.denied_count + excluded.denied_count,
-        error_count = access_daily.error_count + excluded.error_count,
-        response_bytes = access_daily.response_bytes + excluded.response_bytes,
-        first_seen = MIN(access_daily.first_seen, excluded.first_seen),
-        last_seen = MAX(access_daily.last_seen, excluded.last_seen),
-        last_path = CASE WHEN excluded.last_seen >= access_daily.last_seen THEN excluded.last_path ELSE access_daily.last_path END,
-        user_agent = CASE WHEN excluded.last_seen >= access_daily.last_seen THEN excluded.user_agent ELSE access_daily.user_agent END
-    `)
+    upsertDaily: prepareDailyUpsert(db, "access_daily")
   };
+}
+
+function prepareDailyUpsert(db, table, source = "") {
+  const values = source ? `SELECT ${DAILY_COLUMNS} FROM ${source} WHERE 1` : "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  return db.prepare(`
+    INSERT INTO ${table} AS previous (${DAILY_COLUMNS}) ${values}
+    ON CONFLICT(day, ip, auth_reason, access_mode) DO UPDATE SET
+      request_count = previous.request_count + excluded.request_count,
+      page_view_count = previous.page_view_count + excluded.page_view_count,
+      api_count = previous.api_count + excluded.api_count,
+      media_count = previous.media_count + excluded.media_count,
+      denied_count = previous.denied_count + excluded.denied_count,
+      error_count = previous.error_count + excluded.error_count,
+      response_bytes = previous.response_bytes + excluded.response_bytes,
+      first_seen = MIN(previous.first_seen, excluded.first_seen),
+      last_seen = MAX(previous.last_seen, excluded.last_seen),
+      last_path = CASE WHEN excluded.last_seen >= previous.last_seen THEN excluded.last_path ELSE previous.last_path END,
+      user_agent = CASE WHEN excluded.last_seen >= previous.last_seen THEN excluded.user_agent ELSE previous.user_agent END
+  `);
+}
+
+function writeTransaction(db, begin, write) {
+  db.exec(begin);
+  try {
+    const result = write();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (db.isTransaction !== false) db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 function upsertEntry(statements, entry) {

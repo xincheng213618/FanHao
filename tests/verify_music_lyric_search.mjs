@@ -278,6 +278,23 @@ try {
   }
   console.log(`music-lyric-search: ${oracles} all-ok full response byte oracles; forward/reverse/shuffled inserts, covering index, ANALYZE, Unicode/escaped LIKE/FTS/timed fallback/state/EOF`);
 
+  const smart = openStore(), smartRecords = snapshot();
+  smartRecords.tracks[2].title = "其他歌曲";
+  writeScanRecords(smart.db, smartRecords, [], "2026-10-04");
+  const favorite = smart.db.prepare("INSERT INTO music_track_state(track_id,favorite,updated_at) VALUES(?,1,?)");
+  for (const index of [1, 2, 3]) favorite.run(`track-${index}`, `2026-10-0${index}`);
+  const expectedSmart = ["track-3", "track-1"];
+  for (const offset of [0, 1, 2]) {
+    const url = new URL("http://fixture/api/music/tracks");
+    url.search = new URLSearchParams({ smart: "favorites", q: "测试歌曲", limit: "1", offset: String(offset) });
+    const page = smart.store.listTracks(url);
+    assert.equal(page.smartPlaylist.id, "favorites");
+    assert.equal(page.total, expectedSmart.length);
+    assert.deepEqual(page.tracks.map(track => track.id), expectedSmart.slice(offset, offset + 1));
+    assert.equal(page.hasMore, offset + 1 < expectedSmart.length);
+  }
+  console.log("music smart search: indexed query intersects rule membership, keeps rule order and pages matching results");
+
   const { store, db } = openStore();
   const data = snapshot(1000);
   writeScanRecords(db, data, [], "2026-10-04");

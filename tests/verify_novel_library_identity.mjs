@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { createNovelStore } from "../src/modules/novels/server/store.js";
@@ -228,6 +229,85 @@ test("legacy TXT downloads remain read-only and do not allocate a library identi
   const missing = newStore(factory); assert.throws(() => missing.store.openDownload("not-there")); assert.equal(fs.existsSync(missing.dbPath), false);
 });
 
+function startTxtDownload(store, id, { blockHeader = false } = {}) {
+  const response = Object.assign(new EventEmitter(), {
+    body: "",
+    writeHead(status, headers = {}) {
+      this.status = status;
+      this.headers = headers;
+      this.headersSent = true;
+    },
+    write(chunk) {
+      const isHeader = !this.body;
+      this.body += chunk;
+      return !(blockHeader && isHeader);
+    },
+    end(chunk = "") {
+      this.body += chunk;
+      this.writableEnded = true;
+    }
+  });
+  const request = routeNovelApi({ method: "GET" }, response, new URL(`http://synthetic.invalid/api/novels/${id}/download`), {
+    novelStore: store,
+    notFound: res => { res.writeHead(404); res.end(); },
+    sendJson: (_res, status, payload) => assert.fail(`unexpected TXT download error ${status}: ${JSON.stringify(payload)}`)
+  });
+  return { response, request };
+}
+
+test("TXT download retains the original title and chapters across an edit and reimport before body streaming", async ({ factory }) => {
+  const { store, dbPath } = newStore(factory);
+  const original = store.uploadBook(upload).book;
+  const { response, request } = startTxtDownload(store, original.id, { blockHeader: true });
+  try {
+    assert.equal(response.listenerCount("drain"), 1, "the route is waiting between the title and first chapter");
+    const writer = factory({ dbPath });
+    writer.updateBookMetadata(original.id, { title: "更新后的合成书籍" });
+    const replacement = "第一章 更新\n\n仅用于合成测试的新正文。";
+    writer.reimportBook(original.id, { fileName: "synthetic.txt", text: replacement });
+    response.emit("drain");
+    assert.equal(await request, true);
+    assert.equal(response.status, 200);
+    assert.ok(response.headers["Content-Disposition"].includes(encodeURIComponent(`${original.title}.txt`)));
+    assert.equal(response.body, `${original.title}\n\n${text}\n`);
+
+    const fresh = startTxtDownload(store, original.id);
+    assert.equal(await fresh.request, true);
+    assert.equal(fresh.response.status, 200);
+    assert.equal(fresh.response.body, `更新后的合成书籍\n\n${replacement}\n`);
+  } finally {
+    response.destroyed = true;
+    response.emit("close");
+    await request;
+  }
+});
+
+test("TXT download stays complete after deletion and releases its SQLite snapshot on disconnect", async ({ factory }) => {
+  for (const disconnect of [false, true]) {
+    const { store, dbPath } = newStore(factory);
+    const original = store.uploadBook(upload).book;
+    const { response, request } = startTxtDownload(store, original.id, { blockHeader: true });
+    try {
+      assert.equal(response.listenerCount("drain"), 1);
+      assert.equal(factory({ dbPath }).deleteBook(original.id).id, original.id);
+      if (disconnect) response.destroyed = true;
+      response.emit(disconnect ? "close" : "drain");
+      assert.equal(await request, true);
+      assert.equal(response.body, disconnect ? `${original.title}\n\n` : `${original.title}\n\n${text}\n`);
+      assert.equal(response.listenerCount("drain"), 0);
+      assert.equal(sql(dbPath, db => db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get().busy), 0, "download must release its SQLite reader");
+
+      const fresh = startTxtDownload(store, original.id);
+      assert.equal(await fresh.request, true);
+      assert.equal(fresh.response.status, 404);
+    } finally {
+      response.destroyed = true;
+      response.emit("close");
+      await request;
+    }
+  }
+});
+
 for (const value of ["bad identity", "", "SERVER:11111111-1111-4111-8111-111111111111"]) test(`invalid existing ID is refused without reassignment (${JSON.stringify(value)})`, ({ factory }) => {
   const { store, dbPath } = newStore(factory); store.uploadBook(upload);
   sql(dbPath, db => db.prepare("UPDATE novel_meta SET value = ? WHERE key = 'library_id'").run(value));
@@ -327,7 +407,8 @@ const mutants = [
   { name: "book DTO omits realm", test: "every public book", edits: [['...(sourceRealm ? { sourceRealm } : {}),', "/* no realm */"]] },
   { name: "progress ignores realm precondition", test: "wrong realm cannot write", edits: [["if (body.sourceRealm !== undefined && body.sourceRealm !== sourceRealmFromDb(database)) {", "if (false) {"]] },
   { name: "delete ignores realm precondition", test: "wrong realm cannot delete", edits: [["if (sourceRealm !== undefined && sourceRealm !== sourceRealmFromDb(database)) {", "if (false) {"]] },
-  { name: "future-version protection removed", test: "future schema is refused", edits: [['if (version > 6) throw new Error("小说库来自更新版本，当前程序不能修改");', "/* no future-version guard */"]] }
+  { name: "future-version protection removed", test: "future schema is refused", edits: [['if (version > 6) throw new Error("小说库来自更新版本，当前程序不能修改");', "/* no future-version guard */"]] },
+  { name: "TXT export drops its read snapshot", test: "TXT download retains the original", edits: [['database.exec("BEGIN DEFERRED");', "/* no download snapshot */"]] }
 ];
 
 let passed = 0, negatives = 0;

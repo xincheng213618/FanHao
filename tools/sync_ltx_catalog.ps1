@@ -47,6 +47,8 @@ if ($Refresh) {
             actors = $item.actors
             maker = $item.maker
             cover = $item.cover
+            url = $item.url
+            subtitle = $item.subtitle
             added_at = $item.added_at
             date = $item.date
             score = $item.score

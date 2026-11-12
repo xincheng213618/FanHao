@@ -110,8 +110,20 @@ try {
   }
   actual.service.invalidateSearch();
   assert.deepEqual(actual.page(), expected.page()); comparisons++;
+  const coverage = fixture(createRanking, 10, [3, 7, 9]);
+  const ranks = (page) => page.works.map(({ ranking }) => ranking.rankNo);
+  const all = coverage.page({ limit: "2" });
+  const local = coverage.page({ scope: "local", limit: "2" });
+  const missing = coverage.page({ scope: "missing", limit: "2" });
+  assert.deepEqual([ranks(all), ranks(local), ranks(missing)], [[1, 2], [3, 7], [1, 2]]);
+  assert.deepEqual([local.total, missing.total, local.rankingTotal, missing.localTotal], [3, 7, 10, 3]);
+  assert.deepEqual(ranks(coverage.page({ scope: "local", limit: "2", offset: "2" })), [9]);
+  assert.deepEqual(ranks(coverage.page({ scope: "missing", limit: "2", offset: "2" })), [4, 5]);
+  assert.equal(coverage.page({ missing: "1", limit: "2" }), missing, "legacy missing requests must share the same scoped cache");
+  assert.equal(coverage.page({ scope: "all", missing: "1", limit: "2" }), all);
+  assert.equal(coverage.page({ scope: "local", limit: "2" }), local, "other scopes cannot replace a cached local page");
   assert.ok(warnings.length >= 8);
-  console.log(JSON.stringify({ ok: true, comparisons, failurePhases: 2, retryKinds: 3, laterCoverBatch: true, nativeClosedRecovery: true, emptyHitsPreserved: true }));
+  console.log(JSON.stringify({ ok: true, comparisons, failurePhases: 2, retryKinds: 3, laterCoverBatch: true, nativeClosedRecovery: true, emptyHitsPreserved: true, coverageScopes: true }));
 } finally {
   console.warn = originalWarn;
   for (const db of databases) if (db.isOpen) db.close();
@@ -167,9 +179,10 @@ function seed(count = 6) {
   return db;
 }
 
-function fixture(create, count = 6) {
+function fixture(create, count = 6, localRanks = []) {
   const state = { db: seed(count), failure: null, user: "alice", stamp: "same" };
   const counts = { list: 0, missing: 0, cover: 0 };
+  const local = new Map(localRanks.map((rank) => [`abc${rank}`, { id: `local:${rank}`, title: `Local ${rank}` }]));
   const instrumented = new WeakSet();
   const getCoreDb = () => {
     const db = state.db;
@@ -193,7 +206,7 @@ function fixture(create, count = 6) {
   const service = create({ getCoreDb, getSearchStamp: () => state.stamp, userStateStamp: () => state.user,
     clampInteger: (value, fallback, min, max) => Math.max(min, Math.min(max, value === null ? fallback : Number(value))),
     maxWorkLimit: 1000, createId: (prefix, value) => `${prefix}:${value}`, dbBoolOrNull: value => value == null ? null : Boolean(value),
-    localWorkByCodeKey: () => new Map(), localWorkCodeKeys: () => new Set(), looseWorkCodeKey: value => String(value || ""),
+    localWorkByCodeKey: () => local, localWorkCodeKeys: () => new Set(local.keys()), looseWorkCodeKey: value => String(value || ""),
     storedWorkCodeKey: value => String(value || ""), normalizeWorkCode: value => String(value || ""), parseJsonTextArray: () => [],
     proxiedRemoteImageUrl: value => value, prewarmCoreWorkCovers: () => {}, prewarmWorkInfoDetails: () => {},
     prewarmRemoteImagesForWorks: () => {}, publicWork: work => ({ ...structuredClone(work), owner: state.user })

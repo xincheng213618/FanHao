@@ -8,7 +8,7 @@
 
 | 分类 | 工具 |
 | --- | --- |
-| 下载后整理与归档 | [`fanhao.py`](fanhao.py)、[`movefile.py`](movefile.py)、[`clean.py`](clean.py)、[`fanhao_file_workflows.mjs`](fanhao_file_workflows.mjs)、[`windows_folder_move.ps1`](windows_folder_move.ps1) |
+| 下载后整理与归档 | [`fanhao.py`](fanhao.py)、[`movefile.py`](movefile.py)、[`clean.py`](clean.py)、[`recover_115_suffix.py`](recover_115_suffix.py)、[`fanhao_file_workflows.mjs`](fanhao_file_workflows.mjs)、[`windows_folder_move.ps1`](windows_folder_move.ps1) |
 | 人物目录与身份 | [`organize_person_library.mjs`](organize_person_library.mjs)、[`fetch_person_organization_metadata.py`](fetch_person_organization_metadata.py)、[`audit_person_identities.mjs`](audit_person_identities.mjs) |
 | JavDB 资料采集 | [`javdb.py`](javdb.py)、[`javlibrary.py`](javlibrary.py)、[`run_javdb_source_pipeline.py`](run_javdb_source_pipeline.py)、[`import_javdb_actor.py`](import_javdb_actor.py)、[`batch_import_javdb_actors.py`](batch_import_javdb_actors.py)、[`refresh_core_javdb_actor_movies.py`](refresh_core_javdb_actor_movies.py) |
 | 番号资料补全与同步 | [`backfill_javdb_actor_page.py`](backfill_javdb_actor_page.py)、[`backfill_javdb_metadata.py`](backfill_javdb_metadata.py)、[`cache_javdb_rankings.py`](cache_javdb_rankings.py)、[`import_info_metadata.mjs`](import_info_metadata.mjs)、[`sync_core_info_metadata.mjs`](sync_core_info_metadata.mjs)、[`sync_javdb_sidecars.py`](sync_javdb_sidecars.py)、[`full_scan_core_library.py`](full_scan_core_library.py) |
@@ -29,6 +29,13 @@
 ## 执行边界
 
 归档、清理、扫描、修复和迁移工具可能修改真实文件或数据库。执行前阅读当前脚本的参数和默认路径；分类索引不代表需要逐个执行。共用模块由其他脚本导入，保留原路径以兼容应用调用和已有操作命令。
+
+`recover_115_suffix.py` 扫描 D 盘的 `.115chrome_*` 视频。它只读核对 115 的任务状态和字节数，再对 MP4 或 MKV 做全程读包及抽样解码。使用 `--apply` 时，每个视频一通过校验，就复核任务和文件身份并原地去掉后缀。下载中的任务、校验失败的文件和已有同名目标均跳过。运行需要 Windows、`rg`、`ffprobe` 和 `ffmpeg`。
+
+```powershell
+python .\tools\recover_115_suffix.py          # 只检查
+python .\tools\recover_115_suffix.py --apply  # 检查并恢复通过的文件
+```
 
 `movefile.py` 按只读人物身份快照匹配：同名或别名必须唯一归属同一个已确认的 ID。独立人物先在人物映射中确认合并；同名歧义、不同人物的目录归属和多个别名目标会跳过。普通与 VR 目标根分别匹配，VR 包含旧 `V:\AV` 布局；只归档到已经存在的正式人物目录。旧桌面 Tool 入口转到本项目脚本。
 

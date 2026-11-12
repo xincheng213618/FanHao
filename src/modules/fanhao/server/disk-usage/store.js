@@ -12,7 +12,10 @@ const TREEMAP_NODE_BUDGET = 12000;
 const CACHED_NODE_SQL = "SELECT * FROM nodes WHERE path = ?";
 const POINT_READER_IDLE_MS = 1500;
 
-export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [], warn = console.warn } = {}) {
+export function createDiskUsageStore({
+  cacheDir, excludedNames = [], sources = [], warn = console.warn,
+  createWorker = (file, options) => new Worker(file, options)
+} = {}) {
   const drives = createDriveCatalog(sources);
   const drivesById = new Map(drives.map((drive) => [drive.id, drive]));
   const lastTasks = new Map();
@@ -214,7 +217,8 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
     if (stopping) throw publicError("服务正在停止，暂时不能扫描", 503);
     if (active) throw publicError(`正在扫描 ${active.drive.name}，请完成后再刷新其他磁盘`, 409);
     const drive = requireDrive(driveId);
-    if (!fs.statSync(drive.root, { throwIfNoEntry: false })?.isDirectory()) {
+    const rootStat = fs.statSync(drive.root, { bigint: true, throwIfNoEntry: false });
+    if (!rootStat?.isDirectory()) {
       throw publicError(`磁盘 ${drive.name} 当前不可访问`, 404);
     }
 
@@ -222,12 +226,13 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
     cleanupDriveCaches(drive);
     const scanId = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     const outputPath = path.join(cacheDir, `${drive.id.toLocaleLowerCase("en-US")}-${scanId}.sqlite`);
-    const worker = new Worker(new URL("./scan-worker.js", import.meta.url), {
+    const worker = createWorker(new URL("./scan-worker.js", import.meta.url), {
       workerData: {
         allowedLinkedRoots: [...(drive.linkedRoots || [])],
         excludedNames: [...excludedNames],
         outputPath,
         root: drive.root,
+        rootIdentity: { dev: rootStat.dev, ino: rootStat.ino },
         scanId
       }
     });
@@ -254,7 +259,7 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
     });
     worker.once("error", (error) => failTask(task, error?.message || error));
     worker.once("exit", (code) => {
-      if (code !== 0 && ["scanning", "publishing"].includes(task.state)) failTask(task, `扫描线程异常退出（${code}）`);
+      failTask(task, code === 0 ? "扫描线程退出前没有返回结果" : `扫描线程异常退出（${code}）`);
     });
     return publicTask(task);
   }
@@ -264,6 +269,10 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
     task.state = "publishing";
     task.progress = { ...task.progress, ...result, currentPath: task.drive.root };
     try {
+      if (result?.scanId !== task.scanId || result.outputPath !== task.outputPath
+        || !fs.statSync(task.outputPath, { throwIfNoEntry: false })?.isFile()) {
+        throw new Error("扫描结果文件不可用，缓存未更新");
+      }
       const manifest = {
         bytes: Number(result.bytes || 0),
         completedAt: result.completedAt,
@@ -379,7 +388,20 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
   }
 
   function writeManifest(drive, manifest) {
-    fs.writeFileSync(manifestPath(drive), JSON.stringify(manifest, null, 2), "utf8");
+    const target = manifestPath(drive);
+    const staged = `${target}.${manifest.scanId}.tmp`;
+    let written = false;
+    try {
+      fs.writeFileSync(staged, JSON.stringify(manifest, null, 2), { encoding: "utf8", flag: "wx", flush: true });
+      written = true;
+      fs.renameSync(staged, target);
+    } catch (error) {
+      if (written || error?.code !== "EEXIST") {
+        try { fs.rmSync(staged, { force: true }); }
+        catch (cleanupError) { warn("[disk-usage-cleanup]", cleanupError?.message || cleanupError); }
+      }
+      throw error;
+    }
   }
 
   function manifestPath(drive) {
@@ -403,6 +425,7 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
   }
 
   function cleanupDriveCaches(drive) {
+    if (active?.drive.id === drive.id) return;
     const current = readManifest(drive)?.databaseFile || "";
     let entries = [];
     try {
@@ -411,8 +434,13 @@ export function createDiskUsageStore({ cacheDir, excludedNames = [], sources = [
       return;
     }
     const prefix = `${drive.id.toLocaleLowerCase("en-US")}-`;
+    const stagingPrefix = `${drive.id.toLocaleLowerCase("en-US")}.json.`;
     for (const entry of entries) {
-      if (!entry.isFile() || entry.name === current || !entry.name.startsWith(prefix) || !entry.name.endsWith(".sqlite")) continue;
+      if (!entry.isFile() || entry.name === current) continue;
+      const obsoleteDatabase = entry.name.startsWith(prefix) && entry.name.endsWith(".sqlite");
+      const interruptedManifest = entry.name.startsWith(stagingPrefix)
+        && /^\d+-[a-z0-9]+\.tmp$/u.test(entry.name.slice(stagingPrefix.length));
+      if (!obsoleteDatabase && !interruptedManifest) continue;
       const target = path.join(cacheDir, entry.name);
       try {
         fs.rmSync(target, { force: true });

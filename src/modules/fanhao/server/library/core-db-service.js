@@ -18,6 +18,8 @@ function ensureColumn(db, table, column, definition) {
 function ensureCoreTables(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_works_updated_at ON works(updated_at);
+    CREATE INDEX IF NOT EXISTS idx_works_code_search ON works(code_search);
+    CREATE INDEX IF NOT EXISTS idx_works_code_nocase ON works(code COLLATE NOCASE);
     CREATE INDEX IF NOT EXISTS idx_works_status_code_search ON works(status, code_search, id);
     CREATE INDEX IF NOT EXISTS idx_work_people_updated_at ON work_people(updated_at);
     CREATE INDEX IF NOT EXISTS idx_people_updated_at ON people(updated_at);
@@ -46,6 +48,9 @@ function ensureCoreTables(db) {
     CREATE INDEX IF NOT EXISTS idx_local_files_work ON local_files(work_id, file_type, sort_order);
     CREATE INDEX IF NOT EXISTS idx_local_files_local_work ON local_files(local_work_id);
     CREATE INDEX IF NOT EXISTS idx_local_files_path ON local_files(file_path);
+    -- Match media intake's path-ownership and subtitle descriptor lookups.
+    CREATE INDEX IF NOT EXISTS idx_local_files_normalized_path ON local_files(lower(replace(file_path, char(92), '/')));
+    CREATE INDEX IF NOT EXISTS idx_local_files_video_name_size ON local_files(name COLLATE NOCASE, size) WHERE file_type = 'video';
   `);
 }
 

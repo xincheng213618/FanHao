@@ -164,6 +164,38 @@ try {
   const concurrent = await Promise.all([pair.upload(work.id, uploadBody), pair.upload(work.id, { ...uploadBody, videoId: other.videos[0].id })]);
   assert(concurrent.every(value => value.track), "first uploads to two videos share parent creation safely"); checks++;
   await pair.stop();
+
+  const german = Buffer.from(srt.replace("字幕验证", "Untertitel"));
+  const limited = createSubtitleService({ ...options, cacheDir: path.join(directory, "full-upload-cache"),
+    provider: { ...provider, download: async (_resultId, fileId) => ({
+      bytes: fileId === "conflict" ? Buffer.from(srt.replace("字幕验证", "Konflikt")) : german,
+      name: "fixture.de.srt", language: "de"
+    }) }
+  });
+  try {
+    const targetVideo = other.videos[0];
+    for (let index = 0; index < 32; index++) {
+      await limited.upload(other.id, { videoId: targetVideo.id, name: `upload-${index}.srt`, text: srt.replace("字幕验证", `Upload ${index}`) });
+    }
+    const overflow = { videoId: targetVideo.id, name: "overflow.srt", text: srt.replace("字幕验证", "Overflow") };
+    await reject(limited.upload(other.id, overflow), "SUBTITLE_CACHE_LIMIT");
+    const request = { videoId: targetVideo.id, resultId: "result", fileId: "german" };
+    const download = await limited.download(other.id, request);
+    assert.equal(download.savedBesideVideo, true);
+    assert.equal(download.track.name, "ABC-002.de.srt");
+    assert.equal(download.track.source, "local");
+    assert.equal(download.track.language, "de");
+    assert.equal(download.tracks.length, 33);
+    assert.deepEqual((await limited.content(other.id, targetVideo.id, download.track.id, { download: true })).bytes, german);
+    assert.equal((await limited.download(other.id, request)).track.id, download.track.id);
+    assert.deepEqual((await service.list(other.id, targetVideo.id)).tracks, [download.track], "discovery works with an independent cache");
+    await reject(limited.download(other.id, { ...request, fileId: "conflict" }), "SUBTITLE_SIDECAR_CONFLICT");
+    assert.deepEqual(fs.readFileSync(path.join(media, download.sidecarName)), german);
+    await reject(limited.upload(other.id, overflow), "SUBTITLE_CACHE_LIMIT");
+    checks++;
+  } finally {
+    await limited.stop();
+  }
   console.log(`Subtitle service verified: ${checks} behavior checks (temporary media/cache and HTTP server).`);
 } finally {
   await service.stop(); await runtime?.stop();

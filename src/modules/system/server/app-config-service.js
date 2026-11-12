@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 
 const DEFAULT_CONFIG = {
@@ -108,15 +109,38 @@ export function createAppConfigService({
     return config;
   }
 
-  function save() {
+  function persist(value) {
     ensureDataDir();
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+    const temporaryPath = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+    let created = false;
+    try {
+      const fd = fs.openSync(temporaryPath, "wx");
+      created = true;
+      try {
+        fs.writeFileSync(fd, JSON.stringify(value, null, 2), "utf8");
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(temporaryPath, configPath);
+    } catch (error) {
+      if (created) {
+        try { fs.unlinkSync(temporaryPath); }
+        catch (cleanupError) { if (cleanupError.code !== "ENOENT") warn(`[config] failed to remove staged config: ${cleanupError.message}`); }
+      }
+      throw error;
+    }
+  }
+
+  function save() {
+    persist(config);
     return config;
   }
 
   function set(value) {
-    config = normalize(value);
-    save();
+    const next = normalize(value);
+    persist(next);
+    config = next;
     return config;
   }
 

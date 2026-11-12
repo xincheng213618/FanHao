@@ -1,3 +1,8 @@
+const exclusiveScriptMessages = new Map([
+  ["image-library-rescan", "图库索引刷新已经在后台运行"],
+  ["core-local-scan", "核心本地扫描已经在后台运行"]
+]);
+
 export function createAdminTaskOrchestrationService({
   adminScriptService,
   adminTaskService,
@@ -30,8 +35,9 @@ export function createAdminTaskOrchestrationService({
       error.statusCode = 404;
       throw error;
     }
-    if (script.id === "image-library-rescan" && adminTaskService.hasRunningScript(script.id)) {
-      const error = new Error("图库索引刷新已经在后台运行");
+    const runningMessage = exclusiveScriptMessages.get(script.id);
+    if (runningMessage && adminTaskService.hasRunningScript(script.id)) {
+      const error = new Error(runningMessage);
       error.statusCode = 409;
       throw error;
     }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -206,11 +207,25 @@ try {
   // The production worker must neither fall back to a full scan on an old
   // downloader nor leave a draining backlog alive after stop().
   source.exec("UPDATE links SET last_seen_at='worker'");
-  service = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath, roots: [root], intervalMs: 60_000 });
-  const worker = await service.sync({ force: true });
+  const sourceKeys = [];
+  service = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath, roots: [root], intervalMs: 60_000,
+    onStateKey: key => sourceKeys.push(key) });
+  const originalStatSync = fs.statSync;
+  let mainThreadSourceStats = 0;
+  let worker;
+  try {
+    fs.statSync = (file, ...args) => {
+      if (file === sourcePath || file === `${sourcePath}-wal`) mainThreadSourceStats++;
+      return originalStatSync(file, ...args);
+    };
+    worker = await service.sync({ force: true });
+  } finally { fs.statSync = originalStatSync; }
+  assert.equal(mainThreadSourceStats, 0, "the download database and WAL must be inspected in the sync Worker");
   assert.equal(worker.ok, true);
   assert.equal(worker.changeJournal, true);
   assert.equal(worker.hasMore, true);
+  assert.equal(sourceKeys.length, 1);
+  assert.match(sourceKeys[0], /^manager\.sqlite:/);
   await service.stop(); service = null;
   const stoppedCursor = cursor();
   await new Promise(resolve => setTimeout(resolve, 250));
@@ -220,6 +235,46 @@ try {
   service = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath, roots: [root], intervalMs: 60_000 });
   const unavailable = await service.sync({ force: true });
   assert.equal(unavailable.requiresJournalUpgrade, true);
+
+  const workers = [], changes = [], imports = [], syncedKeys = [];
+  class HeldSyncWorker extends EventEmitter {
+    constructor() { super(); workers.push(this); this.terminateCalls = 0; }
+    terminate() { this.terminateCalls++; return Promise.resolve(0); }
+    reply(key) { this.emit("message", { ok: true, result: { ok: true, advanced: true, imported: 1, catalogChanged: true }, sourceStateKey: key }); }
+  }
+  const recovering = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath,
+    roots: [root], WorkerCtor: HeldSyncWorker, syncTimeoutMs: 80, workerCloseTimeoutMs: 20,
+    onCatalogChanged: change => changes.push(change), onItemsImported: result => imports.push(result), onStateKey: key => syncedKeys.push(key) });
+  try {
+    assert.equal(await recovering.sync({ force: true }), null, "a hung worker must finish the caller's request at the deadline");
+    const hung = workers[0];
+    assert.equal(hung.terminateCalls, 1);
+    assert.equal(await recovering.sync({ force: true }), null);
+    await assert.rejects(recovering.stop(), { code: "SHORT_VIDEO_SYNC_CLOSE_UNCONFIRMED" });
+    recovering.start();
+    hung.reply("late");
+    assert.equal(await recovering.sync({ force: true }), null);
+    assert.equal(workers.length, 1, "a successful terminate request must not free an unexited worker");
+    assert.deepEqual(changes, []);
+    hung.emit("exit", 0);
+    assert.deepEqual(changes, [{ uncertain: true }], "a possibly committed batch with a lost result must invalidate catalog reads");
+    assert.deepEqual(syncedKeys, [], "a retired worker cannot publish its source stamp");
+    assert.deepEqual(imports, []);
+
+    let settled = false;
+    const next = recovering.sync({ force: true }).then(result => { settled = true; return result; });
+    assert.equal(workers.length, 2);
+    workers[1].reply("recovered");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(settled, false, "a result must await actual worker exit before giving up its slot");
+    workers[1].emit("exit", 0);
+    assert.equal((await next).imported, 1);
+    assert.deepEqual(syncedKeys, ["recovered"]);
+    assert.equal(imports.length, 1);
+  } finally {
+    for (const worker of workers) worker.emit("exit", 0);
+    await recovering.stop();
+  }
   console.log("short-video-incremental-sync: correctness, rollback, concurrency, restart, query and IO budgets passed");
 } finally {
   trace = null; DatabaseSync.prototype.prepare = originalPrepare;

@@ -113,10 +113,10 @@ function verifySearchPersonProfileRecovery() {
     }
   });
   const page = offset => query.searchPayload(searchUrl("needle phrase", "all", "codeAsc", 1, offset));
-  assert.deepEqual(page(0).people, [{ id: target.person.id, displayName: "Older profile" }]);
+  assert.deepEqual(page(0).people, [{ id: target.person.id, displayName: "Older profile", searchScopes: ["main", "western"] }]);
   profileAvailable = true;
   const recovered = page(1).people;
-  assert.deepEqual(recovered, [{ id: target.person.id, displayName: "Recovered profile" }],
+  assert.deepEqual(recovered, [{ id: target.person.id, displayName: "Recovered profile", searchScopes: ["main", "western"] }],
     "another page at the same stamp retries an incomplete people source");
   assert.deepEqual(page(0).people, recovered, "the original incomplete page also retries");
   assert.equal(searchReads, 2, "only the successful source is retained");

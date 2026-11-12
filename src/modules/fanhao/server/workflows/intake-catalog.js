@@ -97,7 +97,10 @@ export function personIntakeTargets(db, actors, roots) {
   return actors.flatMap((name) => {
     const person = findPersonByIdentity(db, { name });
     const known = person ? [person.folder_path, ...personLocations(db, person.id).map((row) => row.path)].filter(Boolean) : [];
-    const names = person ? [...new Set([name, person.name, person.display_name].map((value) => safeName(value, "").slice(0, 100)).filter(Boolean))] : [];
+    const leaf = safeName(name, "").slice(0, 100);
+    const names = person
+      ? [...new Set([name, person.name, person.display_name].map((value) => safeName(value, "").slice(0, 100)).filter(Boolean))]
+      : leaf && leaf === name ? [leaf] : [];
     const discovered = roots.flatMap((root) => names.map((leaf) => path.join(root, leaf)));
     const unique = new Map();
     for (const folder of [...known, ...discovered]) {
@@ -109,17 +112,18 @@ export function personIntakeTargets(db, actors, roots) {
       const key = pathKey(target);
       if (unique.has(key) || roots.some((root) => pathKey(root) === key)) continue;
       const owner = findPersonByIdentity(db, { folderPath: target });
-      if (!owner || Number(owner.id) === Number(person.id)) unique.set(key, target);
+      if (!owner || Number(owner.id) === Number(person?.id)) unique.set(key, target);
     }
-    if (unique.size) return [...unique.values()].map((folder) => ({ name, personId: Number(person.id), folder }));
+    const personId = person ? Number(person.id) : null;
+    if (unique.size) return [...unique.values()].map((folder) => ({ name, personId, folder }));
     if (known.length) return [];
     const root = roots.find((value) => lstat(value)?.isDirectory());
     if (!root) return [];
-    const folder = checkedPath(path.join(root, safeName(name, "").slice(0, 100)), roots);
+    const folder = checkedPath(path.join(root, leaf), roots);
     if (pathKey(folder) === pathKey(root)) return [];
     const owner = findPersonByIdentity(db, { folderPath: folder });
-    if ((owner && Number(owner.id) !== Number(person?.id)) || (lstat(folder) && !owner && !person)) return [];
-    return [{ name, personId: person ? Number(person.id) : null, folder }];
+    if ((owner && Number(owner.id) !== personId) || (lstat(folder) && !owner && !person)) return [];
+    return [{ name, personId, folder }];
   });
 }
 
@@ -257,6 +261,16 @@ export function commitIntakeCatalog(db, plan, relativeFromRoot) {
 }
 
 function makeFileId(type, file) { return `${type[0]}_${Buffer.from(file).toString("base64url")}`; }
+
+export function indexIntakeSubtitle(db, { workId, localId }, file, relativeFromRoot) {
+  if (indexedMarkFile(db, file, localId, "info")) return false;
+  const stat = regular(file);
+  const name = path.basename(file), { name: title, ext } = path.parse(name);
+  db.prepare(`INSERT INTO local_files (work_id,local_work_id,file_id,file_type,file_path,name,title,ext,relative_path,size,modified_at,playable,sort_order)
+    VALUES (?,?,?,'info',?,?,?,?,?,?,?,0,0)`).run(workId, localId, makeFileId("info", file), file, name, title, ext.toLowerCase(),
+    relativeFromRoot(file), stat.size, new Date(stat.mtimeMs).toISOString());
+  return true;
+}
 
 export function describeIntakeFile(file, probe) {
   const stat = regular(file);

@@ -6,6 +6,10 @@ import { extractCoverFrameAsync } from "../../../lib/cover-frame.js";
 import { createArchiveTaskPool, runArchiveChild, archiveStoppedError } from "./archive-task-pool.js";
 
 export const ARCHIVE_IMAGE_INDEXER_VERSION = 3;
+const PREVIEW_BOX_SIZE = 384;
+const PREVIEW_MAX_BYTES = 96 * 1024;
+const PREVIEW_CACHE_BYTES = 12 * 1024 * 1024;
+const PREVIEW_CACHE_ENTRIES = 256;
 
 export function archiveImageRevision(archiveIdentity) {
   return crypto.createHash("sha256").update(archiveIdentity).digest("hex").slice(0, 24);
@@ -32,10 +36,13 @@ function verifyImageRevision(source, expected) {
 export function createArchiveImageService(options) {
   const pool = createArchiveTaskPool({ concurrency: options.concurrency, capacity: options.capacity, stopTimeoutMs: options.stopTimeoutMs });
   const videoPool = createArchiveTaskPool({ concurrency: 2, capacity: 32, stopTimeoutMs: options.stopTimeoutMs });
+  const previewPool = createArchiveTaskPool({ concurrency: 2, capacity: 64, stopTimeoutMs: options.stopTimeoutMs });
   const listCache = new Map(), children = new Set();
   const videoLists = new Map();
+  const previews = new Map();
   const statFile = options.statFile || (value => fs.promises.stat(value));
   let listCacheBytes = 0;
+  let previewCacheBytes = 0;
   const warn = options.warn || console.warn;
 
   async function signature(archivePath) {
@@ -280,18 +287,88 @@ export function createArchiveImageService(options) {
     return pool.run(`compress:${path.resolve(filePath)}:${options.coverBoxSize}`, async context => {
       const source = await signature(filePath);
       if (!source) throw Object.assign(new Error("Image does not exist"), { statusCode: 404 });
-      const result = await runArchiveChild(options.ffmpegPath, ["-hide_banner", "-loglevel", "error", "-i", filePath,
-        "-frames:v", "1", "-vf", `scale=${options.coverBoxSize}:${options.coverBoxSize}:force_original_aspect_ratio=decrease`,
-        "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1"], {
-        signal: context.signal, timeoutMs: 30_000, maxBytes: options.coverMaxBytes,
-        spawnProcess: options.spawnProcess, onChild: (child, owned) => owned ? children.add(child) : children.delete(child)
-      });
+      const buffer = await encodeJpeg(filePath, `${options.coverBoxSize}:${options.coverBoxSize}`, options.coverMaxBytes, context);
       await verifySource(source, context);
-      const buffer = result.stdout;
-      if (!buffer.length || buffer[0] !== 0xff || buffer[1] !== 0xd8) throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
+      if (buffer[0] !== 0xff || buffer[1] !== 0xd8) throw new Error("FFmpeg 没有生成有效的 JPEG 封面");
       return buffer;
     }, request);
   }
+
+  async function encodeJpeg(filePath, dimensions, maxBytes, context, preview = false) {
+    const threads = preview ? ["-threads", "1"] : [];
+    const filterThreads = preview ? ["-filter_threads", "1"] : [];
+    const { stdout } = await runArchiveChild(options.ffmpegPath, ["-hide_banner", "-loglevel", "error", ...threads, ...filterThreads, "-i", filePath,
+      "-frames:v", "1", "-vf", `scale=${dimensions}:force_original_aspect_ratio=decrease`,
+      "-q:v", "5", "-f", "image2pipe", "-vcodec", "mjpeg", ...threads, "pipe:1"], {
+      signal: context.signal, timeoutMs: preview ? 10_000 : 30_000, maxBytes,
+      spawnProcess: options.spawnProcess, onChild: (child, owned) => owned ? children.add(child) : children.delete(child)
+    });
+    return stdout;
+  }
+
+  function prepareArchiveMemberImage(key, request, signal) {
+    const { archivePath, expectedImageRevision } = request;
+    return pool.run(key, async context => {
+      const source = await signature(archivePath), member = String(request.memberPath || "").replace(/[\\/]+/g, "/");
+      if (!context.isCurrent()) throw archiveStoppedError();
+      verifyImageRevision(source, expectedImageRevision);
+      if (!source || !member || !options.archiveImageExts.has(options.normalizeExt(member))) {
+        return request.fallbackPath ? { filePath: request.fallbackPath, contentType: request.contentType, current: context.isCurrent } : null;
+      }
+      const target = cacheFile(request.sourceType, source, member);
+      await safeTarget(target, context);
+      let exists = false;
+      try { exists = (await statFile(target)).isFile(); } catch (error) { if (error.code !== "ENOENT") throw error; }
+      if (!exists) await extract(source.archivePath, member, target, context, source);
+      await options.imageReaderCacheService.touch(target);
+      await verifySource(source, context);
+      await safeTarget(target, context);
+      options.imageReaderCacheService.scheduleCleanup();
+      return {
+        filePath: target,
+        contentType: request.contentType || options.mimeTypes[options.normalizeExt(member)] || "",
+        current: context.isCurrent,
+        validate: async streamContext => {
+          await verifySource(source, streamContext);
+          await safeTarget(target, streamContext, { create: false });
+        }
+      };
+    }, { signal });
+  }
+
+  function preparePreview(key, request, signal) {
+    return previewPool.run(`preview:${key}`, async context => {
+      const prepared = await prepareArchiveMemberImage(key, request, context.signal);
+      if (!prepared?.validate) return { prepared };
+      const target = prepared.filePath;
+      let buffer = previews.get(target);
+      if (buffer) {
+        previews.delete(target);
+        previews.set(target, buffer);
+      } else {
+        try {
+          buffer = await encodeJpeg(target, `w='min(iw,${PREVIEW_BOX_SIZE})':h='min(ih,${PREVIEW_BOX_SIZE})'`, PREVIEW_MAX_BYTES, context, true);
+          if (buffer[0] !== 0xff || buffer[1] !== 0xd8) throw new Error("FFmpeg 没有生成有效的 JPEG 预览");
+        } catch {
+          // Some archive images open in the browser without an available encoder.
+          if (!context.isCurrent()) throw archiveStoppedError();
+          await prepared.validate(context);
+          return { prepared };
+        }
+        await prepared.validate(context);
+        previewCacheBytes -= previews.get(target)?.length || 0;
+        previews.set(target, buffer);
+        previewCacheBytes += buffer.length;
+        while (previews.size > PREVIEW_CACHE_ENTRIES || previewCacheBytes > PREVIEW_CACHE_BYTES) {
+          const oldest = previews.keys().next().value;
+          previewCacheBytes -= previews.get(oldest).length;
+          previews.delete(oldest);
+        }
+      }
+      return { prepared, buffer };
+    }, { signal });
+  }
+
   async function serveArchiveMemberImage(res, request) {
     if (res.destroyed || res.writableEnded) return;
     const controller = new AbortController();
@@ -299,36 +376,24 @@ export function createArchiveImageService(options) {
     res.once?.("close", disconnect);
     try {
       const { archivePath, expectedImageRevision } = request;
-      const prepared = await pool.run(`serve:${imageTaskPath(archivePath, expectedImageRevision)}:${request.sourceType || "common"}:${request.memberPath}:${request.fallbackPath || ""}:${request.contentType || ""}`, async context => {
-        const source = await signature(archivePath), member = String(request.memberPath || "").replace(/[\\/]+/g, "/");
-        if (!context.isCurrent()) throw archiveStoppedError();
-        verifyImageRevision(source, expectedImageRevision);
-        if (!source || !member || !options.archiveImageExts.has(options.normalizeExt(member))) {
-          return request.fallbackPath ? { filePath: request.fallbackPath, contentType: request.contentType, current: context.isCurrent } : null;
-        }
-        const target = cacheFile(request.sourceType, source, member);
-        await safeTarget(target,context);
-        let exists = false;
-        try { exists = (await statFile(target)).isFile(); } catch (error) { if (error.code !== "ENOENT") throw error; }
-        if (!exists) await extract(source.archivePath, member, target, context, source);
-        await options.imageReaderCacheService.touch(target);
-        await verifySource(source, context);
-        await safeTarget(target,context);
-        options.imageReaderCacheService.scheduleCleanup();
-        return {
-          filePath: target,
-          contentType: request.contentType || options.mimeTypes[options.normalizeExt(member)] || "",
-          current: context.isCurrent,
-          validate: async streamContext => {
-            await verifySource(source, streamContext);
-            await safeTarget(target, streamContext, { create: false });
-          }
-        };
-      }, { signal: controller.signal });
+      const key = `serve:${imageTaskPath(archivePath, expectedImageRevision)}:${request.sourceType || "common"}:${request.memberPath}:${request.fallbackPath || ""}:${request.contentType || ""}`;
+      const { prepared, buffer } = request.preview
+        ? await preparePreview(key, request, controller.signal)
+        : { prepared: await prepareArchiveMemberImage(key, request, controller.signal) };
       if (res.destroyed || res.writableEnded || controller.signal.aborted) return;
       if (prepared && !prepared.current()) throw archiveStoppedError();
       if (!prepared) {
         options.notFound(res);
+        return;
+      }
+      if (buffer) {
+        await prepared.validate({ isCurrent: () => prepared.current() && !controller.signal.aborted && previewPool.isAccepting() });
+        if (res.destroyed || res.writableEnded || controller.signal.aborted) return;
+        res.writeHead(200, {
+          "Content-Type": "image/jpeg", "Content-Length": buffer.length, "Content-Disposition": "inline",
+          "Cache-Control": expectedImageRevision ? "private, max-age=3600" : "no-store",
+          "X-Content-Type-Options": "nosniff"
+        }).end(buffer);
         return;
       }
       // A response owns its stream even when preparation was shared with
@@ -432,13 +497,18 @@ export function createArchiveImageService(options) {
     });
   }
 
-  function clearListCache() { listCache.clear(); listCacheBytes = 0; videoLists.clear(); pool.invalidate(); videoPool.invalidate(); }
+  function clearPreviews() { previews.clear(); previewCacheBytes = 0; }
+  function clearListCache() {
+    listCache.clear(); listCacheBytes = 0; videoLists.clear(); clearPreviews();
+    pool.invalidate(); videoPool.invalidate(); previewPool.invalidate();
+  }
   return { archiveSignature, archiveImagesPayload, archiveVideosPayload, clearListCache, compressImageFileToJpeg, extractArchiveMemberToCache, extractArchiveVideoCover,
     listArchiveImages, serveArchiveMemberImage, serveArchiveMemberVideo,
-    start: () => Promise.all([pool.start(), videoPool.start()]),
-    beginStop: () => { pool.beginStop(); videoPool.beginStop(); },
+    start: () => Promise.all([pool.start(), videoPool.start(), previewPool.start()]),
+    beginStop: () => { pool.beginStop(); videoPool.beginStop(); previewPool.beginStop(); clearPreviews(); },
     stop: async () => {
-      const results = await Promise.allSettled([pool.stop(), videoPool.stop()]);
+      const results = await Promise.allSettled([pool.stop(), videoPool.stop(), previewPool.stop()]);
+      clearPreviews();
       const failed = results.find(result => result.status === "rejected");
       if (failed) throw failed.reason;
     },

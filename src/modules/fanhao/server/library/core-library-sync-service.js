@@ -177,6 +177,7 @@ export function createCoreLibrarySyncService({
             rating: parsed.rating ?? work.infoSummary?.rating ?? null,
             ratingCount: parsed.ratingCount ?? work.infoSummary?.ratingCount ?? null,
             director: parsed.director || work.infoSummary?.director || "",
+            imageUrl: /^https?:\/\//i.test(parsed.imageUrl) && URL.canParse(parsed.imageUrl) ? parsed.imageUrl : work.infoSummary?.imageUrl || "",
             actors: parsed.actors?.length ? parsed.actors : (work.infoSummary?.actors || []),
             tags: parsed.tags?.length ? parsed.tags : (work.infoSummary?.tags || [])
           }

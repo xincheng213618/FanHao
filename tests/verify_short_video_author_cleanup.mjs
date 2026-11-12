@@ -133,6 +133,113 @@ async function verifyAuthorDeleteService() {
     assert.equal(fs.existsSync(emptyFolder), false, "an empty author's folder must be removed");
     assert.equal(service.deleteRecord("author-b").removed, true);
     assert.equal(service.deleteRecord("author-without-record").removed, false, "record cleanup must be idempotent after an orphan author's works are gone");
+
+    database.exec(`
+      INSERT INTO short_video_users VALUES
+        ('douyin:author-c', 'douyin', 'author-c', '共享文件作者'),
+        ('douyin:author-d', 'douyin', 'author-d', '目录变化作者'),
+        ('douyin:author-e', 'douyin', 'author-e', '原目录已移除作者'),
+        ('douyin:author-f', 'douyin', 'author-f', '新增目录作者'),
+        ('douyin:author-g', 'douyin', 'author-g', '新增记录作者'),
+        ('douyin:author-h', 'douyin', 'author-h', '大型目录作者');
+    `);
+    const sharedFolder = path.join(root, "共享_作者_author-c");
+    const sharedFile = path.join(sharedFolder, "keep.txt");
+    fs.mkdirSync(sharedFolder);
+    fs.writeFileSync(sharedFile, "a reference belonging to another work");
+    database.prepare("INSERT INTO short_video_assets VALUES (?, ?, ?)")
+      .run("shared-asset", "another-work", ` ${sharedFile.replaceAll("\\", "/")} `);
+    await assert.rejects(service.execute("author-c", { totalCount: 0 }),
+      (error) => error?.code === "SHORT_VIDEO_AUTHOR_FOLDER_IN_USE");
+    assert.equal(fs.readFileSync(sharedFile, "utf8"), "a reference belonging to another work");
+    database.prepare("UPDATE short_video_assets SET local_path = ? WHERE id = 'shared-asset'")
+      .run(sharedFolder.replaceAll("\\", "/"));
+    await assert.rejects(service.execute("author-c", { totalCount: 0 }),
+      (error) => error?.code === "SHORT_VIDEO_AUTHOR_FOLDER_IN_USE");
+    assert.equal(fs.readFileSync(sharedFile, "utf8"), "a reference belonging to another work", "a reference to the author directory itself must also protect its contents");
+
+    const source = path.join(root, "author-d");
+    const previous = path.join(root, "previous-directory");
+    const existing = path.join(root, "author-f");
+    const unexpected = path.join(root, "new_author-f");
+    const removedByVideoJob = path.join(root, "author-e");
+    fs.mkdirSync(source);
+    fs.writeFileSync(path.join(source, "old.txt"), "original directory");
+    fs.mkdirSync(removedByVideoJob);
+    fs.mkdirSync(existing);
+    fs.writeFileSync(path.join(existing, "old.txt"), "confirmed sibling");
+    const insertVideo = database.prepare(`
+      INSERT INTO short_videos (id, owner_user_id, author_name, author_sec_uid, source_path)
+      VALUES (?, ?, 'fixture', ?, ?)
+    `);
+    insertVideo.run("replaced-folder", "douyin:author-d", "author-d", path.join(source, "old.txt"));
+    insertVideo.run("removed-folder", "douyin:author-e", "author-e", path.join(removedByVideoJob, "old.txt"));
+    insertVideo.run("new-folder", "douyin:author-f", "author-f", path.join(existing, "old.txt"));
+    const duringDelete = createShortVideoAuthorDeleteService({
+      database: () => database,
+      roots: [root],
+      async deleteVideos(ids) {
+        await Promise.resolve();
+        if (ids[0] === "replaced-folder") {
+          fs.renameSync(source, previous);
+          fs.mkdirSync(source);
+          fs.writeFileSync(path.join(source, "new.txt"), "replacement directory");
+        } else if (ids[0] === "new-folder") {
+          fs.mkdirSync(unexpected);
+          fs.writeFileSync(path.join(unexpected, "new.txt"), "new sibling directory");
+        } else {
+          fs.rmdirSync(removedByVideoJob);
+        }
+        database.prepare("DELETE FROM short_videos WHERE id = ?").run(ids[0]);
+        return completedDeletion(ids);
+      }
+    });
+    await assert.rejects(duringDelete.execute("author-d", { totalCount: 1 }),
+      (error) => error?.code === "SHORT_VIDEO_AUTHOR_FOLDER_CHANGED" && error.authorWorksCommitted === true);
+    assert.equal(fs.readFileSync(path.join(source, "new.txt"), "utf8"), "replacement directory");
+    assert.equal(fs.readFileSync(path.join(previous, "old.txt"), "utf8"), "original directory");
+    await assert.rejects(duringDelete.execute("author-f", { totalCount: 1 }),
+      (error) => error?.code === "SHORT_VIDEO_AUTHOR_FOLDER_CHANGED");
+    assert.equal(fs.readFileSync(path.join(unexpected, "new.txt"), "utf8"), "new sibling directory");
+    assert.equal(fs.readFileSync(path.join(existing, "old.txt"), "utf8"), "confirmed sibling", "unexpected discovery must abort before removing confirmed siblings");
+
+    const alreadyRemoved = await duringDelete.execute("author-e", { totalCount: 1 });
+    assert.equal(alreadyRemoved.folderCleanup.complete, true);
+    assert.equal(alreadyRemoved.folderCleanup.removedCount, 0, "a folder emptied by the confirmed job can already be absent");
+
+    database.prepare("INSERT INTO short_video_follows VALUES ('local:self', 'douyin:author-g')").run();
+    const recordRace = createShortVideoAuthorDeleteService({
+      database: () => ({
+        prepare: database.prepare.bind(database),
+        exec(sql) {
+          if (sql === "BEGIN IMMEDIATE") insertVideo.run("late-work", "douyin:author-g", "other-id", "");
+          database.exec(sql);
+        }
+      }),
+      deleteVideos: () => assert.fail("record cleanup must not delete newly observed work")
+    });
+    assert.throws(() => recordRace.deleteRecord("author-g"),
+      (error) => error?.code === "SHORT_VIDEO_AUTHOR_DELETE_HAS_WORKS");
+    assert.equal(database.prepare("SELECT id FROM short_video_users WHERE sec_uid = 'author-g'").get().id, "douyin:author-g");
+    assert.equal(database.prepare("SELECT target_user_id FROM short_video_follows WHERE target_user_id = 'douyin:author-g'").get().target_user_id, "douyin:author-g");
+
+    const large = path.join(root, "author-h");
+    fs.mkdirSync(large);
+    database.exec("BEGIN");
+    for (let index = 0; index < 5000; index++) {
+      insertVideo.run(`large-${index}`, "douyin:author-h", "author-h", path.join(large, String(index), "fixture.mp4"));
+    }
+    database.exec("COMMIT");
+    let realpathReads = 0;
+    const largePreview = createShortVideoAuthorDeleteService({
+      database: () => database,
+      roots: [root],
+      fsOps: { ...fs, realpathSync(value) { realpathReads++; return fs.realpathSync(value); } },
+      deleteVideos: () => assert.fail("previews must not delete files")
+    }).preview("author-h");
+    assert.equal(largePreview.totalCount, 5000);
+    assert.equal(largePreview.folderCount, 1);
+    assert.equal(realpathReads, 2, "folder preview should resolve the root and unique directory once");
   } finally {
     database.close();
     fs.rmSync(root, { recursive: true, force: true });
@@ -238,6 +345,35 @@ async function verifyCleanupRoute() {
   assert.equal(emptyDelete.data.status, "author_deleted");
   assert.deepEqual(emptyDelete.data.authorDelete.removal.removed, [41, 42]);
   assert(deleteCalls.some((call) => call[0] === "record"), "the local author record must be removed after manager records succeed");
+
+  const partialCases = [
+    { status: 409, error: Object.assign(new Error("作品删除已提交。作者文件夹在删除期间发生变化"), { statusCode: 409, authorWorksCommitted: true }) },
+    { status: 202, deletion: { ...completedDeletion(["one"]), status: "cleanup_pending", pending: true, physicalCleanupComplete: false } }
+  ];
+  for (const scenario of partialCases) {
+    const preview = { secUid: "author-a", totalCount: 1, folderCount: 1 };
+    let mutations = 0;
+    const partial = await callRoute({
+      action: "delete",
+      store: {
+        authorDeletePreview: () => preview,
+        deleteAuthorAllWorks: async () => {
+          if (scenario.error) throw scenario.error;
+          return { preview, deletion: scenario.deletion, folderCleanup: { complete: false } };
+        },
+        deleteAuthorRecord: () => assert.fail("incomplete folder cleanup must preserve the author record")
+      },
+      managerRequest: async pathname => {
+        assert(pathname.startsWith("/api/profiles?"), "incomplete folder cleanup must preserve the monitor");
+        return { profiles: [{ id: 41, sec_uid: "author-a" }] };
+      },
+      method: "POST",
+      body: { totalCount: 1, operationId: "partial-delete-author" },
+      onMutation: () => { mutations++; }
+    });
+    assert.equal(partial.status, scenario.status);
+    assert.equal(mutations, 1, "list cache must reflect committed work deletion even when folder cleanup stops");
+  }
 }
 
 async function verifyCleanupClient() {

@@ -15,9 +15,8 @@ const moduleUrl = new URL("../src/modules/fanhao/server/catalog/code-prefix-serv
 let oldSource = fs.readFileSync(moduleUrl, "utf8");
 assert.equal(oldSource.split("cacheable: loadedMakers.cacheable").length, 2);
 oldSource = oldSource.replace("cacheable: loadedMakers.cacheable", "cacheable: true");
-for (const relative of ["../works/work-code-prefix.js", "../works/work-cache-budget.js"]) {
-  oldSource = oldSource.replace(JSON.stringify(relative), JSON.stringify(new URL(relative, moduleUrl).href));
-}
+oldSource = oldSource.replace(/from\s+"(\.{1,2}\/[^"\r\n]+)"/g,
+  (_match, relative) => `from ${JSON.stringify(new URL(relative, moduleUrl).href)}`);
 const { createCodePrefixService: previousFactory } = await import(`data:text/javascript;base64,${Buffer.from(oldSource).toString("base64")}`);
 const factories = [], warn = console.warn, warnings = [];
 let cases = 0, comparisons = 0, fallbacks = 0, replacements = 0;

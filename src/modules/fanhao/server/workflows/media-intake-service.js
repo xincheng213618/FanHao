@@ -1,25 +1,29 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { deriveWorkTraits } from "../../../../../lib/work-traits.js";
-import { workCodeKey } from "../../../../../lib/code-parser.js";
+import { extractWorkCodes, workCodeKey } from "../../../../../lib/code-parser.js";
 import { hasLocalWorkMarkerPrefix } from "../../../../../lib/local-work-marker.js";
 import {
-  VIDEO, assertFinished, checkedPath, collectIntakeFiles, identity, inside, intakeError, is4kOrHigher, lstat,
+  VIDEO, assertFinished, checkedPath, collectIntakeFiles, identity, inside, intakeDetailUrl, intakeError, is4kOrHigher, lstat,
   nameForIntake, nameWithIntakeMarks, openIntakePath, pathKey, regular, same, signature, stageIntakeFile, subtitleFiles
 } from "./intake-files.js";
 import {
   assertNoIntakeConflict, assertUnindexed, catalogForIntake, cleanIntakeMetadata,
-  commitIntakeCatalog, describeIntakeFile, indexedMarkFile, intakeCode, intakeLibraryPartGroups, intakeNameCode,
+  commitIntakeCatalog, describeIntakeFile, indexIntakeSubtitle, indexedMarkFile, intakeCode, intakeLibraryPartGroups, intakeNameCode,
   libraryFilesForLocal, metadataInfo, personIntakeTargets
 } from "./intake-catalog.js";
 import {
-  classifyIntakeVideoAds, inspectIntakePackage, packageMediaFingerprint, packageSubtitles, packageSummary,
+  classifyIntakeVideoAds, inspectIntakePackage, matchesIntakePackageFingerprint, packageSubtitles, packageSummary,
   removeIntakePackage, removeMigratedIntakePackage, requireIntakePackage, requireIntakePackageFolder, snapshotIntakeDirectory
 } from "./intake-packages.js";
 import { hasIdentityTable } from "../people/person-identity.js";
+import { createSubtitlecatProvider } from "../playback/subtitlecat-provider.js";
+import { writeSubtitleBesideVideo } from "../playback/subtitle-sidecars.js";
+import { importedIntakeSubtitle, isChineseSubtitleLanguage, MAX_INTAKE_SUBTITLE_BYTES, validateIntakeSubtitle } from "./intake-subtitles.js";
 
-const ACTIONS = new Set(["replace", "keep", "new", "discard", "discardBoth", "mark"]);
+const ACTIONS = new Set(["replace", "keep", "new", "discard", "discardBoth", "discardLibraryVideo", "mark"]);
 const DISCARD_REASONS = {
   "keep-4k": "保留 4K 馆藏",
   "keep-subtitled": "保留中字馆藏",
@@ -56,14 +60,17 @@ function volumeDevice(folder) {
 }
 
 export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, relativeFromRoot,
-  probeVideo, fetchMetadata, searchRoots, classifyAds = async () => [], openPath = openIntakePath,
-  onIndexChanged = () => {}, markFavorite = () => {}, targetDevice = volumeDevice }) {
+  probeVideo, fetchMetadata, findLocalMetadata, searchRoots, classifyAds = async () => [], openPath = openIntakePath,
+  onIndexChanged = () => {}, markFavorite = () => {}, targetDevice = volumeDevice, resolveWork,
+  subtitleProvider = createSubtitlecatProvider({ maxDownloadBytes: MAX_INTAKE_SUBTITLE_BYTES }), subtitleBackupRoot }) {
   const incomingRoots = sourceRoots.map((value) => path.resolve(value));
   const targetRoots = libraryRoots.map((value) => path.resolve(value));
   const metadata = new Map(), probes = new Map(), pending = new Set(), initialized = new WeakSet();
   const owner = `${process.pid}:${randomUUID()}`;
   const active = new Map();
-  let closing = false, retryTimer;
+  const completions = new Map();
+  const subtitleSearches = new Map(), subtitleWrites = new Map();
+  let closing = false, retryTimer, metadataLookup;
 
   function volumeLabel(folder) {
     if (!folder) return "";
@@ -89,6 +96,11 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       );
       CREATE TABLE IF NOT EXISTS media_intake_queue (
         sequence INTEGER PRIMARY KEY, job_id TEXT NOT NULL UNIQUE REFERENCES media_intake_jobs(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS intake_video_playback_ids (
+        local_work_id INTEGER NOT NULL REFERENCES local_works(id) ON DELETE CASCADE,
+        work_id INTEGER NOT NULL, file_id TEXT NOT NULL, public_id TEXT NOT NULL,
+        PRIMARY KEY (local_work_id, work_id, file_id)
       )`);
       initialized.add(db);
     }
@@ -111,10 +123,15 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     return incomingRoots.some((root) => inside(fullPath, root)) ? incomingRoots : [path.parse(fullPath).root];
   }
 
-  function incoming(file, { missing = false } = {}) {
+  function incomingPath(file) {
     const source = checkedPath(file, sourcePathRoots(file));
     if (!VIDEO.test(source)) throw intakeError("请选择视频文件", 400);
     if (targetRoots.some((root) => inside(source, root))) throw intakeError("馆藏盘内的文件请在作品详情操作", 400);
+    return source;
+  }
+
+  function incoming(file, { missing = false } = {}) {
+    const source = incomingPath(file);
     const stat = lstat(source);
     if (stat || !missing) {
       regular(source);
@@ -157,7 +174,12 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     return "";
   }
 
-  async function selectedPackage(input, source) {
+  function isActiveSubtitleTemporary(file) {
+    const key = pathKey(file);
+    return [...subtitleWrites.values()].some((write) => write.temporaryKey === key);
+  }
+
+  async function selectedPackage(input, source, ignoreTemporaryFile) {
     const candidate = input.packageFolder || matchingPackageParent(source);
     if (!candidate) {
       const enclosing = enclosingPackage(source);
@@ -170,7 +192,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     }
     const folder = packageFolder(candidate);
     if (!inside(source, folder)) throw intakeError("视频不在所选下载包内", 400);
-    const bundle = await inspectIntakePackage(folder, incomingRoots, classifyAds);
+    const bundle = await inspectIntakePackage(folder, incomingRoots, classifyAds, ignoreTemporaryFile);
     if (!bundle && !input.packageFolder) return null;
     if (!bundle || pathKey(bundle.videos[0].path) !== pathKey(source)) throw intakeError("下载包正片已改变，请重新拖入核对");
     return bundle;
@@ -232,8 +254,11 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
   }
 
   async function scan(input = {}) {
+    const findIndexed = input.subtitleMode === true ? (name, size) => database().prepare(
+      "SELECT file_path FROM local_files WHERE file_type='video' AND name=? COLLATE NOCASE AND size=?"
+    ).all(name, size).map((row) => row.file_path) : undefined;
     const found = await collectIntakeFiles(input, input.path ? sourcePathRoots(input.path) : incomingRoots,
-      { searchRoots, excludedRoots: targetRoots });
+      { searchRoots, excludedRoots: targetRoots, findIndexed });
     const packages = new Map(), items = new Map();
     const downloadOrigins = new Map([...found.folderOrigins].filter(([, folder]) => incomingRoots.some((root) => inside(folder, root))));
     const videos = found.files.filter((file) => downloadOrigins.has(pathKey(file))).map((file) => {
@@ -245,12 +270,19 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     for (const file of found.files) {
       try {
         checkOpen();
+        if (findIndexed && targetRoots.some((root) => inside(file, root))) {
+          const source = checkedPath(file, targetRoots);
+          const indexed = indexedSubtitleVideo(source);
+          items.set(pathKey(source), { path: source, name: path.basename(source), size: regular(source).size,
+            code: intakeCode(source) || indexed.code, library: true });
+          continue;
+        }
         const origin = downloadOrigins.get(pathKey(file)) || matchingPackageParent(file);
         let bundle = null;
         if (origin) for (let dir = path.dirname(file); inside(dir, origin); dir = path.dirname(dir)) {
           if (packageCode(dir)) {
             const key = pathKey(dir);
-            if (!packages.has(key)) packages.set(key, inspectIntakePackage(packageFolder(dir), incomingRoots, classifyAds));
+            if (!packages.has(key)) packages.set(key, inspectIntakePackage(packageFolder(dir), incomingRoots, classifyAds, isActiveSubtitleTemporary));
             bundle = await packages.get(key);
             if (bundle) break;
           }
@@ -265,7 +297,8 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         }
         const source = incoming(bundle?.videos[0].path || file);
         const { size } = regular(source);
-        items.set(pathKey(source), { path: source, name: path.basename(source), size, code: bundle?.code || intakeCode(source), package: packageSummary(bundle) });
+        items.set(pathKey(source), { path: source, name: path.basename(source), size, code: bundle?.code || intakeCode(source),
+          package: packageSummary(bundle) });
       } catch (error) { items.set(pathKey(file), { path: file, name: path.basename(file), error: error.statusCode ? error.message : "文件无法读取" }); }
     }
     return { unmatched: found.unmatched, items: [...items.values()], skippedAds };
@@ -278,55 +311,109 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       ? cleanIntakeMetadata(catalog.works[0], "本地目录资料") : null;
   }
 
-  async function compare(input = {}) {
-    const source = incoming(input.path);
-    const bundle = await selectedPackage(input, source);
+  async function compare(input = {}, { signal } = {}) {
+    signal?.throwIfAborted();
+    const { phase } = input;
+    const indexOnly = phase === "index", libraryOnly = phase === "library";
+    if (phase !== undefined && !indexOnly && !libraryOnly && phase !== "source") throw intakeError("对照读取阶段无效", 400);
+    const source = indexOnly || libraryOnly ? incomingPath(input.path) : incoming(input.path);
+    const bundle = indexOnly || libraryOnly ? null : await selectedPackage(input, source, isActiveSubtitleTemporary);
+    signal?.throwIfAborted();
     const code = intakeCode(source, input.code || bundle?.code);
-    const catalog = catalogForIntake(database(), code);
+    const db = database();
+    const catalog = catalogForIntake(db, code);
     const meta = currentMetadata(code, catalog);
-    const sourceDetails = fileDetails(source, await probe(source), bundle ? path.basename(bundle.folder) : "");
+    const actors = () => meta && !catalog.videos.length ? personIntakeTargets(db, meta.actors, targetRoots) : [];
+    const sourceDetails = libraryOnly ? null : fileDetails(source, indexOnly ? null : await probe(source),
+      bundle ? path.basename(bundle.folder) : "");
+    signal?.throwIfAborted();
+    if (!indexOnly && !libraryOnly) {
+      const sides = bundle ? packageSubtitles(bundle).filter((item) => item.video === 0) : subtitleFiles(source, { exclusive: true });
+      sourceDetails.subtitles = sides.map(({ file }) => path.basename(file));
+    }
+    if (phase === "source") return { source: sourceDetails, package: packageSummary(bundle), metadata: meta, actors: actors() };
     const candidates = catalog.videos.slice(0, 40);
     const groups = intakeLibraryPartGroups(catalog.videos);
+    const indexedFiles = candidates.map((row) => ({ id: Number(row.id), workId: row.work.id, title: row.work.title, name: row.name,
+      path: row.file_path, folder: row.folder, size: row.size, a: hasLocalWorkMarkerPrefix(path.basename(row.folder || "")),
+      partIds: groups.get(Number(row.id)) }));
+    const moreFiles = catalog.videos.length > indexedFiles.length;
+    if (indexOnly) return { code, source: { ...sourceDetails, probePending: true }, works: catalog.works,
+      files: indexedFiles.map((file) => ({ ...file, probePending: true })), moreFiles, metadata: meta, actors: [] };
     const files = [];
     // Bounded batches avoid opening a stack of remote media simultaneously.
-    for (let index = 0; index < candidates.length; index += 4) {
+    for (let index = 0; index < indexedFiles.length; index += 4) {
       checkOpen();
-      files.push(...await Promise.all(candidates.slice(index, index + 4).map(async (row) => {
-        const base = { id: Number(row.id), workId: row.work.id, title: row.work.title, name: row.name,
-          path: row.file_path, folder: row.folder, size: row.size, a: hasLocalWorkMarkerPrefix(path.basename(row.folder || "")),
-          partIds: groups.get(Number(row.id)) };
+      signal?.throwIfAborted();
+      files.push(...await Promise.all(indexedFiles.slice(index, index + 4).map(async (base) => {
         try {
-          const file = checkedPath(row.file_path, targetRoots);
+          const file = checkedPath(base.path, targetRoots);
           const measured = await probe(file);
-          const details = fileDetails(file, measured, path.basename(row.folder || ""));
-          return { ...base, ...details, folder: row.folder, marks: filenameFlags(file), protected4k: is4kOrHigher(measured), available: true };
+          const details = fileDetails(file, measured, path.basename(base.folder || ""));
+          return { ...base, ...details, folder: base.folder, marks: filenameFlags(file), protected4k: is4kOrHigher(measured), available: true };
         } catch { return { ...base, available: false, labels: [], probe: null }; }
       })));
     }
-    return { code, source: sourceDetails, package: packageSummary(bundle), works: catalog.works, files, moreFiles: catalog.videos.length > files.length,
-      metadata: meta, actors: meta && !files.length ? personIntakeTargets(database(), meta.actors, targetRoots) : [] };
+    if (libraryOnly) return { files, moreFiles };
+    return { code, source: sourceDetails, package: packageSummary(bundle), works: catalog.works, files, moreFiles, metadata: meta, actors: actors() };
+  }
+
+  async function readRemoteMetadata(code, key, detailUrl) {
+    try {
+      const raw = await fetchMetadata(code, detailUrl);
+      if (raw?.accessBlocked === "login") {
+        throw intakeError(detailUrl ? "这个详情页需要 JavDB 登录，后台会话当前不可用"
+          : "JavDB 把后台搜索跳到了登录页，可以尝试粘贴详情页网址读取", 502);
+      }
+      if (raw?.accessBlocked === "blocked") throw intakeError("JavDB 限制了后台访问，请稍后重试", 502);
+      if (detailUrl) {
+        const status = raw?.upstreamStatus;
+        if (Number.isInteger(status) && status >= 400 && status <= 599) {
+          throw intakeError(`JavDB 详情页返回 HTTP ${status}，请确认网址或稍后重试`, 502);
+        }
+        const resolvedUrl = intakeDetailUrl(raw?.detailUrl);
+        if (!raw?.code || !resolvedUrl) throw intakeError("详情页未读到作品番号，请检查网址或 115Chrome 登录状态", 422);
+        if (workCodeKey(raw.code) !== key) throw intakeError(`详情页的番号与 ${code} 不一致`, 409);
+        raw.detailUrl = resolvedUrl;
+      } else if (!raw || workCodeKey(raw.code) !== key) {
+        throw intakeError("115Chrome／JavDB 没有查到相同番号，可以粘贴详情页网址读取", 404);
+      }
+      const value = cleanIntakeMetadata(raw, "115Chrome / JavDB");
+      if (!value.title || !value.actors.length) throw intakeError("查到了番号，但缺少标题或演员，暂无法自动归档");
+      return value;
+    } catch (error) {
+      if (error.statusCode) throw error;
+      if (detailUrl) throw intakeError("无法读取 JavDB 详情页，请检查网址、代理或 115Chrome 登录状态", 502);
+      throw intakeError("115Chrome／JavDB 查询失败。请检查 115 登录、代理或浏览器配置后重试", 502);
+    }
   }
 
   async function lookupMetadata(input = {}) {
     const source = incoming(input.path);
     const code = intakeCode(source, input.code);
     if (!code) throw intakeError("请先填写番号", 400);
-    const key = workCodeKey(code), cached = metadata.get(key);
-    if (cached?.promise) return cached.promise;
-    if ([...metadata.values()].some((item) => item.promise)) throw intakeError("115Chrome 正在查询另一部作品，请稍后重试");
-    const promise = Promise.resolve().then(async () => {
-      const raw = await fetchMetadata(code);
-      if (!raw || workCodeKey(raw.code) !== key) throw intakeError("115Chrome／JavDB 没有查到相同番号", 404);
-      const value = cleanIntakeMetadata(raw, "115Chrome / JavDB");
-      if (!value.title || !value.actors.length) throw intakeError("查到了番号，但缺少标题或演员，暂无法自动归档");
+    const detailUrl = intakeDetailUrl(input.detailUrl);
+    if (input.detailUrl !== undefined && !detailUrl) throw intakeError("请粘贴 JavDB 作品详情页网址（javdb.com/v/…）", 400);
+    const key = workCodeKey(code);
+    if (metadataLookup) {
+      if (metadataLookup.key === key && metadataLookup.detailUrl === detailUrl) return metadataLookup.promise;
+      throw intakeError("115Chrome 正在读取资料，请稍后重试");
+    }
+    const promise = readRemoteMetadata(code, key, detailUrl).catch(async (error) => {
+      if (detailUrl || !findLocalMetadata) throw error;
+      const raw = await findLocalMetadata(code).catch(() => null);
+      if (!raw || workCodeKey(raw.code) !== key) throw error;
+      const value = cleanIntakeMetadata(raw, "LTX 本地目录");
+      if (!value.title || !value.actors.length) throw error;
+      return value;
+    }).then((value) => {
+      const actors = personIntakeTargets(database(), value.actors, targetRoots);
       bounded(metadata, key, { value, expiresAt: Date.now() + 30 * 60_000 }, 40);
-      return { metadata: value, actors: personIntakeTargets(database(), value.actors, targetRoots) };
-    }).catch((error) => {
-      metadata.delete(key);
-      if (error.statusCode) throw error;
-      throw intakeError("115Chrome／JavDB 查询失败。请检查 115 登录、代理或浏览器配置后重试", 502);
+      return { metadata: value, actors };
+    }).finally(() => {
+      metadataLookup = undefined;
     });
-    bounded(metadata, key, { promise }, 40);
+    metadataLookup = { key, detailUrl, promise };
     return promise;
   }
 
@@ -361,6 +448,8 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       active: live, position, progress: progressView(running?.progress), targetVolume: volumeLabel(plan.folder), action: plan.action, code: plan.code, source: plan.source, old: plan.old?.path || "",
       target: job.result?.target || plan.files[0]?.target || "", tags: plan.tags, result: job.result,
       oldPaths: plan.action === "replace" ? originals.map((old) => old.path) : undefined,
+      workId: plan.action === "discardLibraryVideo" ? String(plan.workId) : undefined,
+      missingSource: plan.missingSource || undefined,
       replaces4k: originals.some((old) => old.quality4k), oldQualityUnknown: originals.some((old) => old.qualityUnknown),
       items: plan.files.map((file) => ({ source: file.source, target: file.target, retainedSubtitle: file.retainedSubtitle })), package: packageSummary(plan.bundle),
       libraryRemoval: plan.libraryRemoval ? { folder: plan.folder, videos: plan.libraryRemoval.videos, files: plan.libraryRemoval.files } : null,
@@ -411,19 +500,46 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       eta: rate && remaining > 0 ? remaining / rate : null };
   }
 
+  function sharesSourceIdentity(plan, other) {
+    const reported = plan.sourceSignature?.slice(0, 2);
+    if (!reported?.[1] || !same(reported, other.sourceSignature?.slice(0, 2))) return false;
+    if (reported.every(Number.isSafeInteger)) return true;
+    // Some NTFS file IDs differ only in bits that the Number stat loses.
+    // Separate the plans only if both paths still prove their identity.
+    const exactStat = (file) => {
+      const roots = targetRoots.some(root => inside(file, root)) ? targetRoots : sourcePathRoots(file);
+      return fs.lstatSync(checkedPath(file, roots), { bigint: true });
+    };
+    try {
+      const current = exactStat(plan.source);
+      const pending = exactStat(other.source);
+      if (!current.isFile() || !pending.isFile()
+          || !same(reported, [Number(current.dev), Number(current.ino)])
+          || !same(reported, [Number(pending.dev), Number(pending.ino)])) return true;
+      return current.dev === pending.dev && current.ino === pending.ino;
+    } catch {
+      return true;
+    }
+  }
+
   function assertSeparatePlans(plan, other) {
     const pathsFor = (value) => [value.source, ...oldFiles(value).map((old) => old.path), value.retained?.path, value.bundle?.folder,
       ...value.files.flatMap((item) => [item.source, item.target])].filter(Boolean).map(pathKey);
     const paths = pathsFor(plan), otherPaths = pathsFor(other);
     if (otherPaths.some((file) => paths.includes(file) || (plan.bundle && inside(file, pathKey(plan.bundle.folder))))
-      || (other.bundle && paths.some((file) => inside(file, pathKey(other.bundle.folder)))) || (plan.sourceSignature?.[1]
-      && same(plan.sourceSignature.slice(0, 2), other.sourceSignature?.slice(0, 2)))) throw intakeError("这个视频已在执行队列中");
+      || (other.bundle && paths.some((file) => inside(file, pathKey(other.bundle.folder)))) || sharesSourceIdentity(plan, other)) {
+      throw intakeError("这个视频已在执行队列中");
+    }
     if (plan.action !== "discard" && other.action !== "discard" && workCodeKey(other.code) === workCodeKey(plan.code)) {
       throw intakeError(`${plan.code} 已有任务在执行队列中，等它完成后再提交`);
     }
   }
 
   function assertNotPending(plan, jobId) {
+    for (const write of subtitleWrites.values()) {
+      try { assertSeparatePlans(plan, write); }
+      catch { throw intakeError("该视频正在保存外挂字幕，请等字幕保存完成后重试"); }
+    }
     const rows = database().prepare(`SELECT j.id,j.plan_json,j.owner,q.job_id AS queued FROM media_intake_jobs j
       LEFT JOIN media_intake_queue q ON q.job_id=j.id WHERE q.job_id IS NOT NULL OR j.owner<>''`).all();
     for (const row of rows) {
@@ -431,10 +547,217 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     }
   }
 
-  function save(job) {
+  function indexedSubtitleVideo(source) {
+    const rows = database().prepare(`SELECT f.id,f.work_id AS workId,f.local_work_id AS localId,w.code
+      FROM local_files f JOIN works w ON w.id=f.work_id
+      WHERE f.file_type='video' AND lower(replace(f.file_path,char(92),'/'))=lower(?)`).all(source.replaceAll("\\", "/"));
+    if (rows.length !== 1 || rows[0].localId == null) throw intakeError("未找到唯一的馆藏视频记录", 404);
+    return rows[0];
+  }
+
+  function subtitleTarget(input, { allowMissingCode = false } = {}) {
+    const indexed = input.subtitleMode === true && typeof input.path === "string" && path.isAbsolute(input.path)
+      && targetRoots.some((root) => inside(path.resolve(input.path), root));
+    const source = indexed ? checkedPath(input.path, targetRoots) : incoming(input.path);
+    const library = indexed ? indexedSubtitleVideo(source) : null;
+    const detected = intakeCode(source) || library?.code || "";
+    const code = input.code ? intakeCode(source, input.code) : detected;
+    if (!code && !allowMissingCode) throw intakeError("请先确认视频番号", 400);
+    if (detected && workCodeKey(detected) !== workCodeKey(code)) throw intakeError("源视频番号与当前输入不一致，请重新核对", 422);
+    const sourceSignature = signature(regular(source));
+    return { source, code, sourceSignature, library, action: "subtitle", files: [],
+      key: JSON.stringify([pathKey(source), workCodeKey(code), sourceSignature]) };
+  }
+
+  function requireSubtitleSource(target) {
+    const { source, library, sourceSignature } = target;
+    const file = library ? checkedPath(source, targetRoots) : incoming(source);
+    requireSame(file, sourceSignature);
+    if (library) {
+      const current = indexedSubtitleVideo(file);
+      if (current.id !== library.id || current.workId !== library.workId || current.localId !== library.localId) {
+        throw intakeError("馆藏索引已改变，请重新加入字幕工作台");
+      }
+    }
+  }
+
+  function subtitleSource(input = {}) {
+    const { source, code } = subtitleTarget(input, { allowMissingCode: true });
+    return { code, source: { path: source, name: path.basename(source),
+      subtitles: subtitleFiles(source, { exclusive: true }).map(({ file }) => path.basename(file)) } };
+  }
+
+  function subtitleChoice(target, resultId) {
+    const selection = subtitleSearches.get(target.key);
+    const result = selection?.expires > Date.now() && selection.results.get(resultId);
+    if (!result) throw intakeError("请为当前视频重新搜索并选择字幕", 409);
+    return result;
+  }
+
+  async function subtitleSearch(input = {}, { signal } = {}) {
+    const target = subtitleTarget(input);
+    const search = await subtitleProvider.search(target.code, { signal });
+    const codeKey = workCodeKey(target.code);
+    const results = search.results.filter((result) => extractWorkCodes(result.title).some((code) => workCodeKey(code) === codeKey));
+    bounded(subtitleSearches, target.key, { expires: Date.now() + 5 * 60_000,
+      results: new Map(results.map((result) => [result.id, { files: new Set() }])) }, 40);
+    return { results };
+  }
+
+  async function subtitleLanguageFiles(input = {}, { signal } = {}) {
+    const target = subtitleTarget(input);
+    const result = subtitleChoice(target, input.resultId);
+    const listing = await subtitleProvider.files(input.resultId, { signal });
+    const files = listing.files.filter((file) => isChineseSubtitleLanguage(file.languageCode || file.language));
+    result.files = new Set(files.map((file) => file.id));
+    return { files };
+  }
+
+  function hasSourceSubtitle(source) {
+    return filenameFlags(source).subtitled || subtitleFiles(source, { exclusive: true, legacy: true })
+      .some(({ file }) => !/\.(?:en|eng|ja|jpn)\.(?:srt|ass|ssa|vtt)$/i.test(file));
+  }
+
+  async function saveSourceSubtitle(target, file, signal, automatic = false) {
+    const { source, code, sourceSignature, key, library } = target;
+    // Use the checked source selected in the workbench even after an online request.
+    const bundle = library ? null : await selectedPackage({}, incoming(source));
+    const measured = await probe(source);
+    signal?.throwIfAborted();
+    const language = file.languageCode || file.language;
+    validateIntakeSubtitle({ ...file, language }, { code, videoName: path.basename(source), duration: measured?.duration });
+    checkOpen();
+    requireSubtitleSource(target);
+    assertNoIntakeConflict(database(), source, library?.workId || 0);
+    const write = { ...target, bundle };
+    assertNotPending(write);
+    if (automatic && hasSourceSubtitle(source)) return { available: false, reason: "existing-subtitle" };
+    subtitleWrites.set(key, write);
+    try {
+      const roots = library ? targetRoots : sourcePathRoots(source);
+      const result = await writeSubtitleBesideVideo({ path: source, size: sourceSignature[2] }, file.bytes,
+        { language, name: file.name, roots, signal, onTemporaryFile: (file) => { write.temporaryKey = pathKey(file); } });
+      if (library) {
+        requireSubtitleSource(target);
+        if (indexIntakeSubtitle(database(), library, checkedPath(result.path, roots), relativeFromRoot)) onIndexChanged();
+      } else if (automatic && result.created) {
+        result.signature = signature(regular(checkedPath(result.path, roots)));
+      }
+      return result;
+    } finally { subtitleWrites.delete(key); }
+  }
+
+  async function subtitleDownload(input = {}, { signal } = {}) {
+    const target = subtitleTarget(input);
+    if (!subtitleChoice(target, input.resultId).files.has(input.fileId)) throw intakeError("请选择当前结果中的中文字幕", 400);
+    const file = await subtitleProvider.download(input.resultId, input.fileId, { signal });
+    return saveSourceSubtitle(target, file, signal);
+  }
+
+  async function subtitleDownloadDirect(input = {}, { signal } = {}) {
+    const target = subtitleTarget(input);
+    const automatic = input.automatic === true;
+    if (automatic && hasSourceSubtitle(target.source)) {
+      return { available: false, reason: "existing-subtitle" };
+    }
+    const checkCatalogFile = automatic && !sourceIsLtx(target.source, path.dirname(target.source));
+    const entry = await findLocalMetadata?.(target.code, checkCatalogFile
+      ? { name: path.basename(target.source), size: target.sourceSignature[2] } : undefined).catch(() => null);
+    signal?.throwIfAborted();
+    if (!entry?.subtitleUrl || workCodeKey(entry.code) !== workCodeKey(target.code)) {
+      return { available: false, reason: "no-direct-link" };
+    }
+    if (checkCatalogFile && !entry.matchesFile) return { available: false, reason: "different-version" };
+    let file;
+    try {
+      file = await subtitleProvider.downloadDirect(entry.subtitleUrl, { signal });
+    } catch (error) {
+      if (!automatic || !error.retryable || error.code === "SUBTITLECAT_RATE_LIMIT") throw error;
+      await delay(800, undefined, { signal });
+      if (hasSourceSubtitle(target.source)) return { available: false, reason: "existing-subtitle" };
+      file = await subtitleProvider.downloadDirect(entry.subtitleUrl, { signal });
+    }
+    return saveSourceSubtitle(target, file, signal, automatic);
+  }
+
+  function subtitleImport(input = {}, { signal } = {}) {
+    return saveSourceSubtitle(subtitleTarget(input), importedIntakeSubtitle(input), signal);
+  }
+
+  async function subtitleRemove(input = {}, { signal } = {}) {
+    const target = subtitleTarget(input);
+    const { source, key, library } = target;
+    const roots = library ? targetRoots : sourcePathRoots(source);
+    const sidecar = subtitleFiles(source, { exclusive: true }).find(({ file }) => path.basename(file) === input.name);
+    if (!sidecar) throw intakeError("未找到这份源视频的外挂字幕，请重新匹配", 404);
+    if (!subtitleBackupRoot) throw intakeError("字幕备份目录不可用", 503);
+    const file = checkedPath(sidecar.file, roots);
+    const original = signature(regular(file));
+    const bundle = library ? null : await selectedPackage({}, incoming(source));
+    requireSubtitleSource(target);
+    assertNoIntakeConflict(database(), source, library?.workId || 0);
+    if (library) indexedMarkFile(database(), file, library.localId, "info");
+    else assertUnindexed(database(), file);
+    const write = { ...target, bundle, files: [{ source: file }] };
+    assertNotPending(write);
+    subtitleWrites.set(key, write);
+    try {
+      const backupDir = path.join(subtitleBackupRoot, randomUUID());
+      await fs.promises.mkdir(backupDir, { recursive: true });
+      const backup = path.join(backupDir, path.basename(file));
+      requireSame(file, original);
+      await fs.promises.copyFile(file, backup, fs.constants.COPYFILE_EXCL);
+      const checksum = async (value) => {
+        const digest = createHash("sha256");
+        for await (const chunk of fs.createReadStream(value, { signal })) digest.update(chunk);
+        return digest.digest("hex");
+      };
+      const [before, after] = await Promise.all([checksum(file), checksum(backup)]);
+      if (before !== after) throw intakeError("字幕备份校验失败，原文件已保留");
+      signal?.throwIfAborted();
+      checkOpen();
+      requireSubtitleSource(target);
+      if (library) {
+        const db = database();
+        db.exec("BEGIN IMMEDIATE");
+        let removed = false;
+        try {
+          const indexed = indexedMarkFile(db, file, library.localId, "info");
+          if (indexed) db.prepare("DELETE FROM local_files WHERE id=?").run(indexed.id);
+          removeOwned(file, original, roots);
+          removed = true;
+          db.exec("COMMIT");
+        } catch (error) {
+          if (db.isTransaction) db.exec("ROLLBACK");
+          if (removed) fs.copyFileSync(backup, file, fs.constants.COPYFILE_EXCL);
+          throw error;
+        }
+        onIndexChanged();
+      } else {
+        assertUnindexed(database(), file);
+        removeOwned(file, original, roots);
+      }
+      return { name: path.basename(file), backupPath: backup };
+    } finally { subtitleWrites.delete(key); }
+  }
+
+  function assertSubtitlesPlanned(plan) {
+    if (!usesVolumeQueue(plan)) return;
+    const listed = new Set(plan.files.filter((item) => item.type === "info" && item.source).map((item) => pathKey(item.source)));
+    for (const { source } of plan.files.filter((item) => item.type === "video")) {
+      if (subtitleFiles(source, { exclusive: true }).some(({ file }) => !listed.has(pathKey(file)))) {
+        throw intakeError("源视频增加了外挂字幕，请返回核对并重新提交，让字幕一起迁移");
+      }
+    }
+  }
+
+  function save(job, { db = database(), releaseOwner = false } = {}) {
     job.updatedAt = stamp();
-    database().prepare(`UPDATE media_intake_jobs SET state=?,plan_json=?,result_json=?,error=?,updated_at=? WHERE id=?`)
-      .run(job.state, JSON.stringify(job.plan), job.result ? JSON.stringify(job.result) : null, job.error || "", job.updatedAt, job.id);
+    const values = [job.state, JSON.stringify(job.plan), job.result ? JSON.stringify(job.result) : null, job.error || "", job.updatedAt, job.id];
+    if (releaseOwner) {
+      db.prepare(`UPDATE media_intake_jobs SET state=?,plan_json=?,result_json=?,error=?,updated_at=?,owner=''
+        WHERE id=? AND owner=?`).run(...values, owner);
+    } else db.prepare("UPDATE media_intake_jobs SET state=?,plan_json=?,result_json=?,error=?,updated_at=? WHERE id=?").run(...values);
   }
 
   function targetForExisting(catalog, input, action) {
@@ -455,9 +778,85 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     if (owners.length !== 1 || owners[0].id !== id) throw intakeError("馆藏视频的身份或索引归属已变，请先刷新馆藏");
   }
 
+  function libraryVideoStat(source) {
+    const stat = lstat(checkedPath(source, targetRoots));
+    if (stat) {
+      if (!stat.isFile()) throw intakeError("所选路径已变成链接或其他类型，馆藏记录已保留");
+      return stat;
+    }
+    const parent = checkedPath(path.dirname(source), targetRoots);
+    let names;
+    try { names = fs.readdirSync(parent); }
+    catch { throw intakeError("无法读取视频所在目录，馆藏记录已保留"); }
+    if (names.some((name) => pathKey(path.join(parent, name)) === pathKey(source))) {
+      throw intakeError("无法确认视频是否缺失，馆藏记录已保留");
+    }
+    return null;
+  }
+
+  function verifyLibraryVideoDiscard(plan) {
+    const { source, folder, localId, workId, bindings } = plan;
+    const db = database();
+    assertNoIntakeConflict(db, folder, workId);
+    const local = db.prepare("SELECT work_id,local_path FROM local_works WHERE id=?").get(localId);
+    if (local?.work_id !== workId || !same(identity(lstat(checkedPath(folder, targetRoots))), plan.folderIdentity)
+      || pathKey(local.local_path) !== pathKey(folder)) throw intakeError("馆藏文件夹已改变，请重新选择视频");
+    const rows = libraryFilesForLocal(db, localId);
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    if (rows.length !== bindings.length || bindings.some(({ id, fileId, file }) => {
+      const row = byId.get(id);
+      return row?.file_id !== fileId || pathKey(row.file_path) !== pathKey(file);
+    })) throw intakeError("馆藏文件列表已改变，请重新选择视频");
+    assertVideoOwner(source, plan.videoRowId);
+    assertFinished(source);
+    if (!bindings.some(({ file }) => {
+      if (pathKey(file) === pathKey(source)) return false;
+      try { return regular(checkedPath(file, targetRoots)).size > 0; }
+      catch { return false; }
+    })) throw intakeError("作品必须至少保留一份可读取的馆藏视频");
+  }
+
+  function prepareLibraryVideoDiscard(input) {
+    if (!resolveWork) throw intakeError("单文件删除不可用", 503);
+    const work = resolveWork(input.workId);
+    const video = work?.videos?.find((item) => String(item.id) === input.videoId);
+    const source = checkedPath(input.path, targetRoots);
+    if (!video || typeof input.modifiedAt !== "string" || (video.modifiedAt || "") !== input.modifiedAt
+      || !Number.isSafeInteger(input.size) || video.size !== input.size || pathKey(video.path) !== pathKey(source)) {
+      throw intakeError("所选馆藏视频已改变，请重新选择");
+    }
+    const stat = libraryVideoStat(source);
+    if (stat) {
+      const indexedMtime = video.modifiedAt ? Date.parse(video.modifiedAt) : stat.mtimeMs;
+      if (stat.nlink !== 1 || stat.size !== video.size || !(Math.abs(stat.mtimeMs - indexedMtime) < 2)) {
+        throw intakeError("馆藏视频的身份或大小已改变，请先刷新馆藏");
+      }
+    }
+    const { id: videoRowId, workId, localId, code } = indexedSubtitleVideo(source);
+    if (String(workId) !== String(work.id)) throw intakeError("视频已不属于所选作品");
+    const db = database();
+    const local = db.prepare("SELECT local_path FROM local_works WHERE id=? AND work_id=?").get(localId, workId);
+    if (!local) throw intakeError("未找到馆藏目录");
+    const folder = checkedPath(local.local_path, targetRoots);
+    if (!inside(source, folder) || pathKey(source) === pathKey(folder)) throw intakeError("视频不在登记的馆藏目录内");
+    const indexed = new Map(libraryFilesForLocal(db, localId).map((row) => [pathKey(row.file_path), row]));
+    const bindings = work.videos.map((item) => {
+      const row = indexed.get(pathKey(item.path));
+      if (!row?.file_id || !item.id) throw intakeError("馆藏文件缺少索引身份，请先刷新馆藏");
+      return { id: row.id, fileId: row.file_id, file: row.file_path, publicId: String(item.id) };
+    });
+    const id = randomUUID();
+    const plan = { action: "discardLibraryVideo", source, sourceSignature: signature(stat), missingSource: !stat, videoRowId, workId, localId, code,
+      folder, folderIdentity: identity(lstat(folder)), bindings, files: [], tags: {},
+      sourceTrash: path.join(path.dirname(source), `.fh-${id}.discard`) };
+    verifyLibraryVideoDiscard(plan);
+    return registerPlan(id, plan, stamp());
+  }
+
   async function prepare(input = {}) {
     const action = input.action;
     if (!ACTIONS.has(action)) throw intakeError("请选择处理方式", 400);
+    if (action === "discardLibraryVideo") return prepareLibraryVideoDiscard(input);
     if (action === "mark") return prepareMark(input);
     const source = incoming(input.path);
     const sourceStat = regular(source);
@@ -471,10 +870,10 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       if (!input.packageFingerprint && (!usesVolumeQueue(plan) || input.supportsPackageConfirmation !== true)) {
         throw intakeError("此视频属于下载包，请重新匹配并确认整个文件夹");
       }
-      if (usesVolumeQueue(plan) && input.packageMediaFingerprint) {
-        if (input.packageMediaFingerprint !== packageMediaFingerprint(bundle)) throw intakeError("下载包的正片或字幕已改变，请重新核对");
-      } else if (input.packageFingerprint && input.packageFingerprint !== bundle.fingerprint) {
-        throw intakeError("下载包内容已改变，请重新对照后确认");
+      const mediaOnly = Boolean(usesVolumeQueue(plan) && input.packageMediaFingerprint);
+      const expected = mediaOnly ? input.packageMediaFingerprint : input.packageFingerprint;
+      if (expected && !matchesIntakePackageFingerprint(bundle, expected, { mediaOnly, source, subtitle: input.automaticSubtitle })) {
+        throw intakeError(mediaOnly ? "下载包的正片或字幕已改变，请重新核对" : "下载包内容已改变，请重新对照后确认");
       }
       assertPackageUnindexed(bundle.folder);
       bundle.quarantine = checkedPath(path.join(path.dirname(bundle.folder), `.fh-${id}.discard`), incomingRoots);
@@ -508,7 +907,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       if (action === "new") {
         if (catalog.videos.length || catalog.works.length > 1) throw intakeError("这个番号已有馆藏或多个索引归属，请先对照已有记录");
         plan.meta = currentMetadata(code, catalog);
-        if (!plan.meta) throw intakeError("请先通过 115Chrome 查询标题和人物资料");
+        if (!plan.meta) throw intakeError("请先查询标题和人物资料，可用 115Chrome 搜索或粘贴详情页网址");
         const options = personIntakeTargets(db, plan.meta.actors, targetRoots);
         plan.actor = options.find((item) => item.folder === input.actorFolder && item.name === input.actorName) || (options.length === 1 ? options[0] : null);
         if (!plan.actor) throw intakeError("请选择要归档的人物目录", 400);
@@ -568,7 +967,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         plan.files.push({ type: "video", source: video, target, sourceSignature: entry.signature, probe: videoProbe });
       }
       const target = plan.files[0].target;
-      const sides = bundle ? packageSubtitles(bundle) : subtitleFiles(source).map((side) => ({ ...side, video: 0 }));
+      const sides = bundle ? packageSubtitles(bundle) : subtitleFiles(source, { exclusive: true }).map((side) => ({ ...side, video: 0 }));
       for (const side of sides) {
         checkedPath(side.file, sourcePathRoots(source));
         assertUnindexed(db, side.file);
@@ -629,7 +1028,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
 
   function registerPlan(id, plan, createdAt) {
     checkOpen();
-    requireSame(plan.source, plan.sourceSignature);
+    if (!plan.missingSource) requireSame(plan.source, plan.sourceSignature);
     assertNotPending(plan, id);
     database().prepare("INSERT INTO media_intake_jobs (id,state,plan_json,created_at,updated_at) VALUES (?,'prepared',?,?,?)")
       .run(id, JSON.stringify(plan), createdAt, createdAt);
@@ -645,6 +1044,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     const marking = plan.action === "mark";
     if (!marking) incoming(plan.source);
     requireSame(plan.source, plan.sourceSignature);
+    assertSubtitlesPlanned(plan);
     if (plan.bundle) {
       assertPackageUnindexed(packageFolder(plan.bundle.folder));
       requireIntakePackageFolder(plan.bundle, incomingRoots);
@@ -783,7 +1183,6 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
     }
     job.state = "completed";
     job.error = "";
-    save(job);
   }
 
   function cleanPackage(job) {
@@ -802,6 +1201,10 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       original: plan.source, quarantine: plan.sourceTrash, roots: sourcePathRoots(plan.source),
       verify: (file) => requireSame(file, plan.sourceSignature)
     }, directory(plan.libraryRemoval, targetRoots)];
+    moveDiscardEntries(entries, restore);
+  }
+
+  function moveDiscardEntries(entries, restore) {
     for (const { original, quarantine, roots, verify } of restore ? entries.reverse() : entries) {
       const from = checkedPath(restore ? quarantine : original, roots);
       const to = checkedPath(restore ? original : quarantine, roots);
@@ -814,6 +1217,48 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       verify(from);
       fs.renameSync(from, to);
       verify(to);
+    }
+  }
+
+  function moveLibraryVideoDiscard(plan, restore = false) {
+    moveDiscardEntries([{ original: plan.source, quarantine: plan.sourceTrash, roots: targetRoots, verify(file) {
+      requireSame(file, plan.sourceSignature);
+      if (regular(file).nlink !== 1) throw intakeError("馆藏视频已有多个硬链接，请先核对归属");
+    } }], restore);
+  }
+
+  function commitLibraryVideoDiscard(job) {
+    const { plan } = job, db = database();
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      verifyLibraryVideoDiscard(plan);
+      assertUnindexed(db, plan.sourceTrash);
+      const missingSource = !libraryVideoStat(plan.source) && !lstat(checkedPath(plan.sourceTrash, targetRoots));
+      if (plan.missingSource && !missingSource) throw intakeError("视频已重新出现，请刷新后重新选择");
+      if (!missingSource) moveLibraryVideoDiscard(plan);
+      const pin = db.prepare(`INSERT INTO intake_video_playback_ids (local_work_id,work_id,file_id,public_id) VALUES (?,?,?,?)
+        ON CONFLICT(local_work_id,work_id,file_id) DO UPDATE SET public_id=excluded.public_id`);
+      for (const { id, fileId, publicId } of plan.bindings) {
+        if (id !== plan.videoRowId) pin.run(plan.localId, plan.workId, fileId, publicId);
+      }
+      const deleted = plan.bindings.find(({ id }) => id === plan.videoRowId);
+      db.prepare("DELETE FROM intake_video_playback_ids WHERE local_work_id=? AND work_id=? AND file_id=?")
+        .run(plan.localId, plan.workId, deleted.fileId);
+      if (db.prepare("DELETE FROM local_files WHERE id=? AND local_work_id=? AND file_id=? AND file_type='video'")
+        .run(deleted.id, plan.localId, deleted.fileId).changes !== 1) throw intakeError("馆藏视频索引已改变");
+      if (hasIdentityTable(db, "video_probe_cache")) {
+        db.prepare("DELETE FROM video_probe_cache WHERE file_path=? OR file_path=?").run(plan.source, deleted.file);
+      }
+      job.result = { discarded: true, missingSource, workId: String(plan.workId), videoId: deleted.publicId };
+      job.state = "committed";
+      save(job);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      job.result = null;
+      job.state = "working";
+      if (!plan.missingSource) moveLibraryVideoDiscard(plan, true);
+      throw error;
     }
   }
 
@@ -865,14 +1310,27 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       removeOwned(plan.sourceTrash, plan.sourceSignature, sourcePathRoots(plan.source));
     }
     cleanup(plan.libraryRemoval, targetRoots);
+    finishDiscard(job);
+  }
+
+  function finishDiscard(job) {
     if (onIndexChanged() === null) throw intakeError("删除已写入数据库，馆藏刷新失败，可重试收尾");
     job.state = "completed";
     job.error = "";
-    save(job);
   }
 
   async function execute(job, progress) {
     const { plan } = job;
+    if (plan.action === "discardLibraryVideo") {
+      setPhase(progress, "delete");
+      if (job.state !== "committed") commitLibraryVideoDiscard(job);
+      if (!job.result?.missingSource) {
+        assertUnindexed(database(), plan.sourceTrash);
+        removeOwned(plan.sourceTrash, plan.sourceSignature, targetRoots);
+      }
+      finishDiscard(job);
+      return;
+    }
     if (plan.action === "discardBoth") {
       setPhase(progress, "delete");
       if (job.state !== "committed") commitDiscardPair(job);
@@ -889,7 +1347,6 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       job.result = { discarded: true };
       job.state = "completed";
       job.error = "";
-      save(job);
       return;
     }
     if (job.state !== "committed") {
@@ -950,14 +1407,34 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
       job.error = error.statusCode ? error.message : error.code === "ENOSPC" ? "目标盘空间不足，释放空间后可从此任务重试。"
         : "文件操作失败。请检查目标磁盘空间、文件占用或目录权限后重试。";
       if (!error.statusCode) console.warn("[media-intake]", job.id, error.code || error.message);
-      save(job);
-    }).catch((error) => console.warn("[media-intake-receipt]", job.id, error.code || error.message)).finally(() => {
-      try { database().prepare("UPDATE media_intake_jobs SET owner='' WHERE id=? AND owner=?").run(id, owner); }
-      catch (error) { console.warn("[media-intake-release]", job.id, error.code || error.message); }
-      active.delete(id);
+    }).finally(() => {
+      completions.set(id, { job, warned: false });
       pump();
     });
     active.set(id, { disk, progress, promise });
+    return true;
+  }
+
+  function flushCompletions() {
+    for (const [id, completion] of completions) {
+      try {
+        // The terminal receipt and claim release are one SQLite write. Keep the
+        // disk lane until it succeeds, so a retry never runs the file work twice.
+        const db = database();
+        const { timeout } = db.prepare("PRAGMA busy_timeout").get();
+        // Retry the receipt from the queue timer without blocking unrelated
+        // requests for the connection's usual synchronous busy timeout.
+        if (timeout) db.exec("PRAGMA busy_timeout=0");
+        try { save(completion.job, { db, releaseOwner: true }); }
+        finally { if (timeout) db.exec(`PRAGMA busy_timeout=${timeout}`); }
+        completions.delete(id);
+        active.delete(id);
+      } catch (error) {
+        if (!completion.warned) console.warn("[media-intake-receipt]", id, error.code || error.message);
+        completion.warned = true;
+        if (sqliteBusy(error)) return false;
+      }
+    }
     return true;
   }
 
@@ -995,9 +1472,10 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
   }
 
   function pump() {
+    const writerAvailable = flushCompletions();
     if (closing) return;
     let retry = true;
-    try { retry = drainQueue(); }
+    try { if (writerAvailable) retry = drainQueue() || completions.size > 0; }
     catch (error) { if (!sqliteBusy(error)) console.warn("[media-intake-queue]", error.code || error.message); }
     if (retry && !retryTimer) retryTimer = setTimeout(() => { retryTimer = undefined; pump(); }, 1000).unref();
   }
@@ -1014,6 +1492,7 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         const current = readJob(id);
         if (current.state !== "completed" && !ownerAlive(current.owner) && !db.prepare("SELECT 1 FROM media_intake_queue WHERE job_id=?").get(id)) {
           assertNotPending(current.plan, id);
+          if (current.state !== "committed") assertSubtitlesPlanned(current.plan);
           current.plan.disk = disk;
           save(current);
           db.prepare("INSERT INTO media_intake_queue(job_id) VALUES (?)").run(id);
@@ -1028,6 +1507,10 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
   // Nothing is committed in these states, so the job's own staged files are safe to remove.
   function abandon(job) {
     const { plan } = job;
+    if (plan.action === "discardLibraryVideo") {
+      if (!plan.missingSource) moveLibraryVideoDiscard(plan, true);
+      return;
+    }
     if (plan.action === "discardBoth") {
       moveDiscardPair(plan, true);
       return;
@@ -1090,10 +1573,18 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
   }
 
   return {
-    config: () => ({ roots: incomingRoots, maxFiles: 120, discardReasons: DISCARD_REASONS }),
+    config: () => ({ roots: incomingRoots, maxFiles: 120, discardReasons: DISCARD_REASONS, subtitleRemoval: Boolean(subtitleBackupRoot),
+      libraryVideoDeletion: Boolean(resolveWork) }),
     discardStats,
-    scan: (input) => track(() => scan(input)), compare: (input) => track(() => compare(input)),
+    scan: (input) => track(() => scan(input)), compare: (input, options) => track(() => compare(input, options)),
     metadata: (input) => track(() => lookupMetadata(input)), prepare: (input) => track(() => prepare(input)),
+    "subtitle-source": (input) => track(() => subtitleSource(input)),
+    "subtitle-search": (input, options) => track(() => subtitleSearch(input, options)),
+    "subtitle-files": (input, options) => track(() => subtitleLanguageFiles(input, options)),
+    "subtitle-download": (input, options) => track(() => subtitleDownload(input, options)),
+    "subtitle-download-direct": (input, options) => track(() => subtitleDownloadDirect(input, options)),
+    "subtitle-import": (input, options) => track(() => subtitleImport(input, options)),
+    "subtitle-remove": (input, options) => track(() => subtitleRemove(input, options)),
     open: (input) => track(() => open(input)), run, cancel,
     list: () => {
       const db = database();
@@ -1105,8 +1596,17 @@ export function createMediaIntakeService({ getDb, sourceRoots, libraryRoots, rel
         .map((id) => read.get(id)).filter(Boolean).map((row) => present(decodeJob(row), waiting));
     },
     detail: (id) => present(readJob(id)), start: pump, beginStop,
-    async close() { beginStop(); await Promise.allSettled([...active.values()].map(({ promise }) => promise).concat([...pending])); }
+    async close() {
+      beginStop();
+      await Promise.allSettled([...active.values()].map(({ promise }) => promise).concat([...pending, subtitleProvider.stop?.()]));
+      flushCompletions();
+    }
   };
 
-  function beginStop() { closing = true; clearTimeout(retryTimer); }
+  function beginStop() {
+    if (closing) return;
+    closing = true;
+    clearTimeout(retryTimer);
+    subtitleProvider.beginStop?.();
+  }
 }

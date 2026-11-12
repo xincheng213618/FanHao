@@ -19,6 +19,7 @@ const startedAt = new Date().toISOString();
 let database = null;
 
 try {
+  const rootIdentity = readRootIdentity(workerData.rootIdentity);
   fs.mkdirSync(path.dirname(workerData.outputPath), { recursive: true });
   if (fs.statSync(workerData.outputPath, { throwIfNoEntry: false })) fs.rmSync(workerData.outputPath, { force: true });
   database = new DatabaseSync(workerData.outputPath);
@@ -61,6 +62,7 @@ try {
   database.exec("ANALYZE");
   database.close();
   database = null;
+  readRootIdentity(rootIdentity, true);
 
   parentPort?.postMessage({
     type: "complete",
@@ -89,6 +91,22 @@ try {
     type: "failed",
     error: String(error?.message || error || "磁盘扫描失败")
   });
+}
+
+function readRootIdentity(expected, checkReadable = false) {
+  let stat;
+  try {
+    stat = fs.statSync(workerData.root, { bigint: true });
+    if (!stat.isDirectory()) throw new Error("Scan root is not a directory");
+    if (checkReadable) fs.opendirSync(workerData.root).closeSync();
+  } catch (error) {
+    throw new Error("磁盘根目录在扫描时不可访问，缓存未更新", { cause: error });
+  }
+  const { dev, ino } = stat;
+  if (expected && (dev !== expected.dev || ino !== expected.ino)) {
+    throw new Error("磁盘根目录在扫描时发生变化，缓存未更新");
+  }
+  return { dev, ino };
 }
 
 function prepareDatabase(db) {
@@ -128,6 +146,7 @@ function scanDirectory(directoryPath, parentPath, depth, insertNode) {
     directoryModifiedMs = Number(directoryStat.mtimeMs || 0);
     entries = fs.readdirSync(directoryPath, { withFileTypes: true });
   } catch (error) {
+    if (depth === 0) throw new Error("磁盘根目录在扫描时不可访问，缓存未更新", { cause: error });
     state.errors += 1;
     reportProgress(directoryPath, true);
     return { directories: 0, errors: 1, files: 0, modifiedMs: directoryModifiedMs, size: 0 };

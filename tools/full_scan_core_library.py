@@ -726,8 +726,6 @@ def scan_all(
 ) -> dict:
     available_roots = [root for root in roots if root.exists()]
     nested_roots = {path_key(root) for root in available_roots}
-    people = load_people(conn)
-    indexes = build_indexes(conn)
     scanned_paths: set[str] = set()
     stats = {
         "roots": len(available_roots),
@@ -745,8 +743,9 @@ def scan_all(
     }
 
     conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-    people = load_people(conn)
     try:
+        people = load_people(conn)
+        indexes = build_indexes(conn)
         processed_people = 0
         for root in available_roots:
             root_nested = nested_roots - {path_key(root)}
@@ -932,8 +931,6 @@ def scan_candidates(
     limit_people: int = 0,
 ) -> dict:
     available_roots = [root for root in roots if root.exists()]
-    people = load_people(conn)
-    indexes = build_indexes(conn)
     scanned_paths: set[str] = set()
     stats = {
         "roots": len(available_roots),
@@ -953,6 +950,7 @@ def scan_candidates(
     conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
     try:
         people = load_people(conn)
+        indexes = build_indexes(conn)
         for person_dir in person_dirs[: limit_people or None]:
             stats["person_dirs_seen"] += 1
             person_source = clean_path(person_dir)

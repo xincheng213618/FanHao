@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createCoreDbService } from "../src/modules/fanhao/server/library/core-db-service.js";
 import { readTableStampRow } from "../src/modules/fanhao/server/library/table-stamp-query.js";
 import { createManualCoverStateService } from "../src/modules/fanhao/server/works/manual-cover-state-service.js";
+import { assertUnindexed } from "../src/modules/fanhao/server/workflows/intake-catalog.js";
 import { attachCoreImageStore } from "../src/platform/server/core-image-store.js";
 import { verifyActorProfileAtomicity } from "./verify_actor_profile_atomicity.mjs";
 import { verifyDestructiveImageMigrations } from "./verify_destructive_image_migrations.mjs";
@@ -137,6 +138,7 @@ function verifyCoreDbInitializationRetry(directory) {
     CREATE TABLE works (
       id INTEGER PRIMARY KEY,
       status TEXT,
+      code TEXT,
       code_search TEXT,
       updated_at TEXT
     );
@@ -147,13 +149,13 @@ function verifyCoreDbInitializationRetry(directory) {
     CREATE TABLE work_external_refs (id INTEGER PRIMARY KEY);
     CREATE TABLE person_aliases (id INTEGER PRIMARY KEY);
     CREATE TABLE people (id INTEGER PRIMARY KEY, folder_path TEXT, updated_at TEXT);
-    CREATE TABLE idx_local_files_path (id INTEGER PRIMARY KEY);
+    CREATE TABLE idx_local_files_video_name_size (id INTEGER PRIMARY KEY);
   `);
   fixture.close();
 
   let opened = 0;
   let closed = 0;
-  const service = createCoreDbService({
+  const options = {
     createDatabase(filePath) {
       opened += 1;
       const connection = new DatabaseSync(filePath);
@@ -175,9 +177,10 @@ function verifyCoreDbInitializationRetry(directory) {
     imageDbPath: imagePath,
     refreshTableStampRow: async () => null,
     warn() {}
-  });
+  };
+  const service = createCoreDbService(options);
 
-  assert.throws(() => service.tableDataStamp("actor_profiles"), /idx_local_files_path|already a table/i);
+  assert.throws(() => service.tableDataStamp("actor_profiles"), /idx_local_files_video_name_size|already a table/i);
   assert.equal(opened, 1);
   assert.equal(closed, 1, "a failed schema migration must close its connection");
 
@@ -201,13 +204,15 @@ function verifyCoreDbInitializationRetry(directory) {
     "idx_person_aliases_updated_at",
     "idx_collection_items_updated_at",
     "idx_local_files_work",
-    "idx_local_files_local_work"
+    "idx_local_files_local_work",
+    "idx_local_files_path",
+    "idx_local_files_normalized_path"
   ]) {
     assert.equal(rolledBack.prepare("SELECT type FROM sqlite_schema WHERE type = 'index' AND name = ?").get(index), undefined, `a late DDL failure must roll back ${index}`);
   }
-  assert.equal(rolledBack.prepare("SELECT type FROM sqlite_schema WHERE name = 'idx_local_files_path'").get().type, "table", "the pre-existing failure fixture must survive rollback");
+  assert.equal(rolledBack.prepare("SELECT type FROM sqlite_schema WHERE name = 'idx_local_files_video_name_size'").get().type, "table", "the pre-existing failure fixture must survive rollback");
   assert.equal(rolledBack.prepare("PRAGMA integrity_check").get().integrity_check, "ok", "a rolled-back schema migration must leave the core database healthy");
-  rolledBack.exec("DROP TABLE idx_local_files_path");
+  rolledBack.exec("DROP TABLE idx_local_files_video_name_size");
   rolledBack.close();
 
   const stamp = service.tableDataStamp("actor_profiles");
@@ -217,9 +222,36 @@ function verifyCoreDbInitializationRetry(directory) {
   assert.equal(service.getDb(), retried, "only a fully initialized connection may be cached");
   assert.equal(retried.isTransaction, false, "schema initialization must release its savepoint before publishing the connection");
   assert.equal(retried.prepare("SELECT type FROM sqlite_schema WHERE name = 'local_files'").get().type, "table", "a repaired retry must create local_files");
-  assert.equal(retried.prepare("SELECT type FROM sqlite_schema WHERE name = 'idx_local_files_path'").get().type, "index", "a repaired retry must complete the final core index");
+  assert.equal(retried.prepare("SELECT type FROM sqlite_schema WHERE name = 'idx_local_files_video_name_size'").get().type, "index", "a repaired retry must complete the final core index");
+  retried.exec("INSERT INTO works(id, code) VALUES (1, 'TST-001')");
+  const add = retried.prepare("INSERT INTO local_files(work_id, file_id, file_type, file_path, name, size) VALUES (1, ?, ?, ?, ?, ?)");
+  add.run("legacy-video", "video", "F:\\Fixture\\TST-001.MP4", "TST-001.MP4", 420);
+  add.run("duplicate-video", "video", "f:/fixture/tst-001.mp4", "tst-001.mp4", 420);
+  add.run("other-size", "video", "F:/Fixture/other-size/tst-001.mp4", "tst-001.mp4", 421);
+  add.run("other-type", "info", "F:/Fixture/other-type/tst-001.mp4", "tst-001.mp4", 420);
+  retried.exec("DROP INDEX idx_local_files_normalized_path; DROP INDEX idx_local_files_video_name_size;");
   retried.close();
   assert.equal(closed, 2);
+
+  const upgraded = createCoreDbService(options).getDb();
+  try { verifyIntakeLookupIndexes(upgraded); }
+  finally { upgraded.close(); }
+}
+
+function verifyIntakeLookupIndexes(db) {
+  const normalizedPath = "SELECT 1 FROM local_files WHERE lower(replace(file_path,char(92),'/'))=lower(?) LIMIT 1";
+  const duplicatePaths = "SELECT id FROM local_files WHERE lower(replace(file_path,char(92),'/'))=lower(?)";
+  const videoByName = "SELECT file_path FROM local_files WHERE file_type='video' AND name=? COLLATE NOCASE AND size=?";
+  const targetPath = "f:/FIXTURE/tst-001.mp4";
+  const explain = (query, ...params) => db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...params).map(row => row.detail).join("\n");
+  assert.match(explain(normalizedPath, targetPath), /SEARCH.*idx_local_files_normalized_path/);
+  assert.match(explain(duplicatePaths, targetPath), /SEARCH.*idx_local_files_normalized_path/);
+  assert.match(explain(videoByName, "TsT-001.Mp4", 420), /SEARCH.*idx_local_files_video_name_size/);
+  assert.throws(() => assertUnindexed(db, "f:\\FIXTURE\\tst-001.mp4"), /文件已被馆藏索引引用/);
+  assert.doesNotThrow(() => assertUnindexed(db, "F:/Incoming/TST-001.MP4"));
+  assert.equal(db.prepare(duplicatePaths).all(targetPath).length, 2, "ambiguous file ownership must remain visible");
+  assert.deepEqual(db.prepare(videoByName).all("TsT-001.Mp4", 420).map(row => row.file_path).sort(),
+    ["F:\\Fixture\\TST-001.MP4", "f:/fixture/tst-001.mp4"].sort());
 }
 
 function verifyManualAvatarRollback(directory) {

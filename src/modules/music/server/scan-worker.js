@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
-import { scanMusicRoots, scanSummary, writeScanRecords } from "./scan.js";
+import { captureMusicScanSources, MUSIC_SCAN_SOURCE_UNAVAILABLE, musicScanSourceUnavailable, scanMusicRoots, scanSummary, writeScanRecords } from "./scan.js";
 import { configureMusicDatabase, ensureSchema } from "./schema.js";
 
 parentPort?.postMessage({ type: "ready", ok: true });
@@ -25,14 +25,19 @@ function runScan(message) {
     const request = message.request || {};
     const roots = Array.isArray(request.roots) ? request.roots.map(String) : [];
     const dryRun = Boolean(request.dryRun);
+    const verifySources = dryRun ? null : captureMusicScanSources(roots);
     const records = scanMusicRoots(roots, {
       ffprobePath: workerData.ffprobePath,
       ffprobeTimeoutMs: workerData.ffprobeTimeoutMs,
       ffprobeArgsPrefix: workerData.ffprobeArgsPrefix,
-      limit: request.limit
+      limit: request.limit,
+      requireCompleteRead: !dryRun
     });
     const result = scanSummary(records, roots, dryRun);
-    if (!dryRun) publishScan(message.id, records, roots, result.scannedAt);
+    if (!dryRun) {
+      if (result.roots.some(root => !root.exists)) throw musicScanSourceUnavailable();
+      publishScan(message.id, records, roots, result.scannedAt, verifySources);
+    }
     parentPort?.postMessage({ type: "result", id: message.id, ok: true, data: result });
     if (!dryRun) scheduleBestEffortCheckpoint();
   } catch (error) {
@@ -43,14 +48,15 @@ function runScan(message) {
       ok: false,
       error: details.message,
       errorCode: details.code,
-      statusCode: details.statusCode
+      statusCode: details.statusCode,
+      retryable: details.retryable
     });
   } finally {
     scanActive = false;
   }
 }
 
-function publishScan(requestId, records, roots, scannedAt) {
+function publishScan(requestId, records, roots, scannedAt, verifySources) {
   const dbPath = String(workerData.dbPath || "");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   const database = new DatabaseSync(dbPath);
@@ -62,8 +68,11 @@ function publishScan(requestId, records, roots, scannedAt) {
     parentPort?.postMessage({ type: "phase", id: requestId, phase: "publishing" });
     const publishDelayMs = Math.min(5_000, Math.max(0, Math.trunc(Number(workerData.publishDelayMs || 0))));
     if (publishDelayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, publishDelayMs);
+    // Scanning and waiting for SQLite's write lock can both outlive a mount.
+    verifySources();
     ensureSchema(database, { configureConnection: false });
     writeScanRecords(database, records, roots, scannedAt, { manageTransaction: false });
+    verifySources();
     database.exec("COMMIT");
     transactionActive = false;
   } catch (error) {
@@ -93,6 +102,14 @@ function scheduleBestEffortCheckpoint() {
 }
 
 function publicScanError(error) {
+  if (error?.code === MUSIC_SCAN_SOURCE_UNAVAILABLE) {
+    return {
+      code: error.code,
+      message: error.message,
+      statusCode: 503,
+      retryable: true
+    };
+  }
   const value = `${String(error?.code || "")} ${String(error?.message || error || "")}`;
   if (/SQLITE_BUSY|SQLITE_LOCKED|database is locked/i.test(value)) {
     return {

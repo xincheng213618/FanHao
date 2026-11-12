@@ -300,6 +300,7 @@ export function createRankingService({
     const source = {
       cacheable: loaded.cacheable && workInfoReadCacheable() !== false,
       allWorks,
+      localWorks,
       localTotal: localWorks.length,
       missingTotal: missingWorks.length,
       missingWorks,
@@ -322,15 +323,17 @@ export function createRankingService({
   function worksPayloadValue(url, listType = "top") {
     const listKey = url.searchParams.get("key") || "";
     const onlyMissing = ["1", "true", "yes"].includes(String(url.searchParams.get("missing") || "").toLowerCase());
+    const requestedScope = url.searchParams.get("scope");
+    const scope = ["all", "local", "missing"].includes(requestedScope) ? requestedScope : onlyMissing ? "missing" : "all";
     const limit = clampInteger(url.searchParams.get("limit"), maxWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const pageCacheKey = `${listType}:${listKey}:${onlyMissing ? "missing" : "all"}:${limit}:${offset}`;
+    const pageCacheKey = `${listType}:${listKey}:${scope}:${limit}:${offset}`;
     const cachedPage = readCachedPage(pageCacheKey);
     if (cachedPage) return cachedPage;
 
     const source = preparedWorkSource(listType, listKey);
     const { allWorks, localTotal, missingTotal, rankingRows } = source;
-    const sourceWorks = onlyMissing ? source.missingWorks : allWorks;
+    const sourceWorks = scope === "local" ? source.localWorks : scope === "missing" ? source.missingWorks : allWorks;
     const pageSource = sourceWorks.slice(offset, offset + limit);
     prewarmCoreWorkCovers(pageSource);
     prewarmWorkInfoDetails(pageSource);
@@ -344,6 +347,7 @@ export function createRankingService({
     const payload = {
       type: listType,
       key: listKey,
+      scope,
       label: listLabel(listType, listKey, rankingRows[0]?.list_label || ""),
       count: page.length,
       total: sourceWorks.length,

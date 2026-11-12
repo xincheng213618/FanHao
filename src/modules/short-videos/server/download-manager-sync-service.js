@@ -1,5 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
 import { Worker } from "node:worker_threads";
 
 export function createDownloadManagerSyncService({
@@ -8,6 +6,9 @@ export function createDownloadManagerSyncService({
   dbPath,
   ffmpegPath,
   roots,
+  WorkerCtor = Worker,
+  syncTimeoutMs = 60_000,
+  workerCloseTimeoutMs = 2_000,
   initialStateKey = "",
   onStateKey = () => {},
   onCatalogChanged = () => {},
@@ -15,18 +16,24 @@ export function createDownloadManagerSyncService({
 }) {
   const resolvedSourceDbPath = String(sourceDbPath || "").trim();
   const resolvedIntervalMs = Number(intervalMs || 0);
+  const syncDeadline = Math.max(1, Math.min(600_000, Math.trunc(Number(syncTimeoutMs) || 60_000)));
+  const closeDeadline = Math.max(1, Math.min(60_000, Math.trunc(Number(workerCloseTimeoutMs) || 2_000)));
   let initialTimer = null;
   let timer = null;
   let continuationTimer = null;
   let running = false;
   let stopped = false;
+  let generation = 0;
   let activeWorker = null;
+  let stopPromise = null;
   let activeSyncPromise = null;
   let pendingForcedSync = null;
   let journalUpgradeReported = false;
+  let catalogRefreshPending = false;
 
   function start() {
     stopped = false;
+    refreshUnconfirmedCatalog();
     if (initialTimer || timer) return;
     if (!resolvedSourceDbPath || !Number.isFinite(resolvedIntervalMs) || resolvedIntervalMs < 60_000) return;
     const run = () => sync();
@@ -40,6 +47,7 @@ export function createDownloadManagerSyncService({
   }
 
   function stop() {
+    if (!stopped) generation += 1;
     stopped = true;
     if (initialTimer) clearTimeout(initialTimer);
     if (timer) clearInterval(timer);
@@ -47,23 +55,33 @@ export function createDownloadManagerSyncService({
     initialTimer = null;
     timer = null;
     continuationTimer = null;
-    const worker = activeWorker;
-    activeWorker = null;
-    return worker ? worker.terminate().catch(() => undefined) : Promise.resolve();
+    pendingForcedSync = null;
+    if (stopPromise) return stopPromise;
+    if (!activeWorker) return Promise.resolve();
+    const current = activeWorker;
+    retireWorker(current, new Error("短视频后台同步已停止"));
+    let deadline;
+    stopPromise = Promise.race([
+      current.exited,
+      new Promise((_, reject) => { deadline = setTimeout(() => reject(workerCloseError()), closeDeadline); })
+    ]).finally(() => { clearTimeout(deadline); stopPromise = null; });
+    return stopPromise;
   }
 
   function sync(options = {}) {
-    if (stopped) return Promise.resolve(null);
+    if (stopped || activeWorker?.retiring) return Promise.resolve(null);
     if (running) {
       if (!options.force) return Promise.resolve(null);
       if (!pendingForcedSync) {
         const observedSync = activeSyncPromise;
-        pendingForcedSync = Promise.resolve(observedSync)
+        const intent = generation;
+        const queued = Promise.resolve(observedSync)
           .catch(() => null)
-          .then(() => stopped ? null : runSync({ force: true }))
+          .then(() => intent === generation ? runSync({ force: true }) : null)
           .finally(() => {
-            pendingForcedSync = null;
+            if (pendingForcedSync === queued) pendingForcedSync = null;
           });
+        pendingForcedSync = queued;
       }
       return pendingForcedSync;
     }
@@ -71,13 +89,11 @@ export function createDownloadManagerSyncService({
   }
 
   async function runSync(options = {}) {
-    if (running || stopped) return null;
-    const sourceStateKey = sourceDbStateKey(resolvedSourceDbPath);
-    if (!sourceStateKey) return null;
+    if (running || stopped || activeWorker || !resolvedSourceDbPath) return null;
     // File mtimes (especially WAL/SHM) are not business revisions. Every poll
     // checks the tiny journal head; unrelated jobs/settings writes cost no scan.
     running = true;
-    const operation = performSync(options, sourceStateKey);
+    const operation = performSync(options, generation);
     activeSyncPromise = operation;
     try {
       return await operation;
@@ -89,10 +105,10 @@ export function createDownloadManagerSyncService({
     }
   }
 
-  async function performSync(options, sourceStateKey) {
+  async function performSync(options, intent) {
     try {
-      const result = await runWorker();
-      if (!result || stopped) return null;
+      const { result, sourceStateKey } = await runWorker();
+      if (!result || stopped || intent !== generation) return null;
       if (result.requiresJournalUpgrade) {
         if (!journalUpgradeReported) console.warn("[short-video-sync]", result.message);
         journalUpgradeReported = true;
@@ -102,7 +118,7 @@ export function createDownloadManagerSyncService({
       if (result.advanced) onStateKey(sourceStateKey);
       if (result.catalogChanged || Number(result.catalogChanges || 0) > 0) onCatalogChanged(result, options);
       if (result.imported || result.updated) onItemsImported(result);
-      if (result.hasMore && !stopped) {
+      if (result.hasMore && !stopped && intent === generation) {
         // Drain a bounded backlog without waiting a minute per page. Each
         // worker commits at most 500 changes, releasing the SQLite writer lock.
         if (continuationTimer) clearTimeout(continuationTimer);
@@ -114,14 +130,14 @@ export function createDownloadManagerSyncService({
       }
       return result;
     } catch (error) {
-      if (!stopped) console.warn("[short-video-sync]", error.message || error);
+      if (!stopped && intent === generation) console.warn("[short-video-sync]", error.message || error);
       return null;
     }
   }
 
   function runWorker() {
     return new Promise((resolve, reject) => {
-      const worker = new Worker(new URL("./sync-worker.js", import.meta.url), {
+      const worker = new WorkerCtor(new URL("./sync-worker.js", import.meta.url), {
         workerData: {
           dbPath,
           ffmpegPath,
@@ -129,30 +145,45 @@ export function createDownloadManagerSyncService({
           sourceDbPath: resolvedSourceDbPath
         }
       });
-      activeWorker = worker;
-      let settled = false;
-      const finish = (callback, value) => {
-        if (settled) return;
-        settled = true;
-        if (activeWorker === worker) activeWorker = null;
-        callback(value);
-      };
-      worker.once("message", (message) => {
-        if (message?.ok) {
-          finish(resolve, message.result || null);
-          return;
-        }
-        const error = new Error(message?.error || "短视频后台同步失败");
-        if (message?.stack) error.stack = message.stack;
-        finish(reject, error);
-      });
-      worker.once("error", (error) => finish(reject, error));
+      const { promise: exited, resolve: confirmExit } = Promise.withResolvers();
+      const current = { worker, exited, reject, retiring: false };
+      activeWorker = current;
+      let message;
+      current.deadline = setTimeout(() => retireWorker(current, new Error("短视频后台同步超时")), syncDeadline);
+      worker.once("message", (reply) => { message = reply; });
+      worker.once("error", (error) => retireWorker(current, error));
       worker.once("exit", (code) => {
-        if (settled) return;
-        if (code !== 0) finish(reject, new Error(`短视频后台同步线程异常退出 (${code})`));
-        else finish(resolve, null);
+        clearTimeout(current.deadline);
+        if (activeWorker === current) activeWorker = null;
+        confirmExit();
+        if (current.retiring) { refreshUnconfirmedCatalog(); return; }
+        if (code !== 0) { reject(new Error(`短视频后台同步线程异常退出 (${code})`)); return; }
+        if (!message || message.ok) { resolve(message || {}); return; }
+        const error = new Error(message.error || "短视频后台同步失败");
+        if (message.stack) error.stack = message.stack;
+        reject(error);
       });
     });
+  }
+
+  function retireWorker(current, error) {
+    if (activeWorker !== current || current.retiring) return;
+    current.retiring = true;
+    clearTimeout(current.deadline);
+    catalogRefreshPending = true;
+    current.reject(error);
+    // Only the Worker exit releases the SQLite owner.
+    try { Promise.resolve(current.worker.terminate()).catch(() => {}); }
+    catch { /* Keep the owner until exit. */ }
+  }
+
+  function refreshUnconfirmedCatalog() {
+    if (stopped || activeWorker || !catalogRefreshPending) return;
+    catalogRefreshPending = false;
+    // A cursor commit may have preceded a lost result. Re-read the catalog
+    // after the old owner exits instead of trusting its missing change count.
+    try { onCatalogChanged({ uncertain: true }); }
+    catch (error) { console.warn("[short-video-sync]", error.message || error); }
   }
 
   return {
@@ -162,21 +193,6 @@ export function createDownloadManagerSyncService({
   };
 }
 
-function sourceDbStateKey(sourceDbPath) {
-  const files = [sourceDbPath, `${sourceDbPath}-wal`];
-  const parts = [];
-  for (const filePath of files) {
-    const stat = safeStat(filePath);
-    if (!stat?.isFile()) continue;
-    parts.push(`${path.basename(filePath)}:${stat.size}:${Math.floor(stat.mtimeMs || 0)}`);
-  }
-  return parts.length ? parts.join("|") : "";
-}
-
-function safeStat(filePath) {
-  try {
-    return fs.statSync(filePath);
-  } catch {
-    return null;
-  }
+function workerCloseError() {
+  return Object.assign(new Error("短视频后台同步线程尚未退出"), { code: "SHORT_VIDEO_SYNC_CLOSE_UNCONFIRMED" });
 }

@@ -15,6 +15,30 @@ export async function routeUserStateApi(req, res, url, deps) {
     return true;
   }
 
+  if (url.pathname === "/api/favorites/batch-move" && req.method === "PUT") {
+    try {
+      const body = await readJsonBody(req);
+      const result = favoriteStateService.moveFavoritesToFolder(body?.workIds, body?.folderId);
+      sendJson(res, 200, { ok: true, ...result, folders: favoriteStateService.publicFavoriteFolders() });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      sendJson(res, status, { error: status < 500 ? error.message : "批量移动失败，请重试" });
+    }
+    return true;
+  }
+
+  if (url.pathname === "/api/favorites/batch-remove" && req.method === "PUT") {
+    try {
+      const body = await readJsonBody(req);
+      const result = favoriteStateService.removeFavorites(body?.workIds);
+      sendJson(res, 200, { ok: true, ...result, folders: favoriteStateService.publicFavoriteFolders(), user: playbackProgressService.userStateSummary() });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      sendJson(res, status, { error: status < 500 ? error.message : "批量取消收藏失败，请重试" });
+    }
+    return true;
+  }
+
   if (url.pathname === "/api/favorite-folders" && req.method === "GET") {
     sendJson(res, 200, { folders: favoriteStateService.publicFavoriteFolders() });
     return true;
@@ -38,6 +62,21 @@ export async function routeUserStateApi(req, res, url, deps) {
 
   if (url.pathname === "/api/history" && req.method === "GET") {
     sendJson(res, 200, collectionQueryService.historyPayload(url));
+    return true;
+  }
+
+  const mergeFolderMatch = /^\/api\/favorite-folders\/([^/]+)\/merge$/.exec(url.pathname);
+  if (mergeFolderMatch && req.method === "POST") {
+    try {
+      const body = await readJsonBody(req);
+      const result = favoriteStateService.mergeFavoriteFolder(decodeURIComponent(mergeFolderMatch[1]), body?.destinationId, {
+        sourceCreatedAt: body?.sourceCreatedAt, destinationCreatedAt: body?.destinationCreatedAt
+      });
+      sendJson(res, 200, { ok: true, ...result, folders: favoriteStateService.publicFavoriteFolders(), user: playbackProgressService.userStateSummary() });
+    } catch (error) {
+      const status = error instanceof URIError ? 400 : error.statusCode || 500;
+      sendJson(res, status, { error: status < 500 ? error.message : "合并收藏夹失败，请重试" });
+    }
     return true;
   }
 
@@ -82,6 +121,23 @@ export async function routeUserStateApi(req, res, url, deps) {
   }
 
   const favoriteMatch = /^\/api\/favorites\/([^/]+)$/.exec(url.pathname);
+  if (favoriteMatch && req.method === "PUT") {
+    try {
+      const workId = decodeURIComponent(favoriteMatch[1]);
+      if (!library.worksById.has(workId)) {
+        notFound(res);
+        return true;
+      }
+      const body = await readJsonBody(req);
+      const result = favoriteStateService.saveFavoriteToFolder(workId, body?.folderId);
+      sendJson(res, 200, { ok: true, ...result, user: playbackProgressService.userStateSummary() });
+    } catch (error) {
+      const status = error instanceof URIError ? 400 : error.statusCode || 500;
+      sendJson(res, status, { error: status < 500 ? error.message : "收藏保存失败，请重试" });
+    }
+    return true;
+  }
+
   if (favoriteMatch && req.method === "POST") {
     const workId = decodeURIComponent(favoriteMatch[1]);
     if (!library.worksById.has(workId)) {

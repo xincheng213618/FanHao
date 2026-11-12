@@ -26,7 +26,7 @@ async function factory({ withoutWeightBudget = false, smallBudget = null } = {})
     // 96-entry caps and GC behavior; only the shared weight bound is disabled.
     source = source.replace("const DETAIL_WORK_REFERENCE_BUDGET = 4_000_000;", `const DETAIL_WORK_REFERENCE_BUDGET = ${withoutWeightBudget ? "Infinity" : smallBudget};`);
   }
-  source = source.replace(/from\s+"(\.\.\/[^"\r\n]+)"/g, (_match, relative) => `from ${JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href)}`);
+  source = source.replace(/from\s+"(\.{1,2}\/[^"\r\n]+)"/g, (_match, relative) => `from ${JSON.stringify(pathToFileURL(path.resolve(path.dirname(servicePath), relative)).href)}`);
   return (await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`)).createCodePrefixService;
 }
 

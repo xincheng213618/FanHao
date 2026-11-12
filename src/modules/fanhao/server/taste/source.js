@@ -1,7 +1,7 @@
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseInfoMetadata } from "../../../../../lib/info-metadata.js";
-import { buildTasteProfile } from "./profile.js";
+import { buildTasteAnalysis } from "./profile.js";
 import { workCodePrefix } from "../works/work-code-prefix.js";
 
 const TECH_TAG = /^(?:含.*磁[链鏈]|.*磁[链鏈]|.*可播放|有字幕|中文字幕|高清|HD|FHD|[248]K|\d{3,4}p|無碼破解|无码破解|單體作品|单体作品|合集)$/iu;
@@ -98,11 +98,15 @@ export function readTasteWorks(db) {
 }
 
 export function analyzeTasteDatabase(dbPath, options = {}) {
+  return readTasteAnalysis(dbPath, options).profile;
+}
+
+export function readTasteAnalysis(dbPath, options) {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
     db.exec("PRAGMA query_only = ON; PRAGMA busy_timeout = 3000; BEGIN");
     const works = readTasteWorks(db);
-    const result = buildTasteProfile(works, options);
+    const result = buildTasteAnalysis(works, options);
     db.exec("COMMIT");
     return result;
   } finally { db.close(); }

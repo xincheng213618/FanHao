@@ -18,7 +18,7 @@ const WORKER_THREAD_CHILD = path.join(
   "fixtures",
   "short_video_delete_worker_thread.mjs"
 );
-const REBASE_SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), "rebase_short_video_storage.mjs");
+const REBASE_SCRIPT = fileURLToPath(new URL("../tools/rebase_short_video_storage.mjs", import.meta.url));
 const DELETE_SERVICE_SOURCE = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",

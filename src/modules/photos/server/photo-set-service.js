@@ -14,6 +14,7 @@ const unavailableCover = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3
   <text x="150" y="225" fill="#555a91" font-size="15" font-family="sans-serif" text-anchor="middle" dominant-baseline="middle">暂无封面</text>
 </svg>`;
 const missingImageCover = "图包里没有可用图片";
+const PHOTO_PREVIEW_THRESHOLD_BYTES = 512 * 1024;
 // Older negative cache rows kept the helper message without its HTTP status.
 const archiveBackpressureMessages = new Set([
   "Archive reader queue is full",
@@ -511,6 +512,7 @@ export function createPhotoSetService({
       imageOffset,
       imageLimit: imageLimit || images.length,
       imagesTruncated: imageLimit > 0 && imageOffset + visibleImages.length < imageCount,
+      previewThresholdBytes: PHOTO_PREVIEW_THRESHOLD_BYTES,
       ...(videoPayload ? {
         videos: videoPayload.videos.map(video => ({
           id: video.id, title: video.name, ext: video.ext, size: video.size,
@@ -528,7 +530,7 @@ export function createPhotoSetService({
     };
   }
 
-  async function serveImage(res, albumId, imageIndex, expectedImageRevision) {
+  async function serveImage(res, albumId, imageIndex, expectedImageRevision, { preview = false } = {}) {
     if (res.destroyed || res.writableEnded) return;
     const album = byId(decodeURIComponent(albumId));
     if (!album) {
@@ -547,7 +549,8 @@ export function createPhotoSetService({
       if (!image?.path) { notFound(res); return; }
       await serveArchiveMemberImage(res, {
         sourceType: "photo-set", archivePath: targetArchivePath, memberPath: image.path,
-        contentType: mimeTypes[normalizeExt(image.path)] || "", ...revision
+        contentType: mimeTypes[normalizeExt(image.path)] || "", ...revision,
+        ...(preview && Number(image.bytes) > PHOTO_PREVIEW_THRESHOLD_BYTES ? { preview: true } : {})
       });
     } catch(error) {
       if (!controller.signal.aborted && !res.destroyed && !res.writableEnded) throw error;

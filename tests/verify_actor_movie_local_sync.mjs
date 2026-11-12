@@ -173,7 +173,8 @@ try {
   reloadResult = library;
   syncOverride = null;
   verifyPathChanges();
-  console.log("Actor movie/local sync passed: page/full refresh, moved folders/storage roots, duplicate-code file identity, partial ambiguity preservation, idempotency and write failures.");
+  verifyIncompleteSourceScan();
+  console.log("Actor movie/local sync passed: refresh, moved folders/storage roots, duplicate-code identity, ambiguity, incomplete source scans, idempotency and write failures.");
 } finally {
   db.close();
   temporary.cleanup();
@@ -264,4 +265,65 @@ function verifyPathChanges() {
   for (const part of ["A", "B"]) {
     assert.equal(fs.readFileSync(path.join(movedPersonDir, path.basename(renamedWorkDir), `URVRSP-449-${part}.mp4`), "utf8"), `fixture-${part}`);
   }
+}
+
+function verifyIncompleteSourceScan() {
+  const existingSource = library.peopleById.get("1").sourcePaths[0];
+  const otherRoot = path.join(root, "other-storage");
+  const unavailableRoot = path.join(root, "other-storage-offline");
+  const otherSource = path.join(otherRoot, person.name);
+  const nestedDir = path.join(otherSource, "NEW-009", "videos");
+  const videoPath = path.join(nestedDir, "NEW-009.mp4");
+  fs.mkdirSync(nestedDir, { recursive: true });
+  fs.writeFileSync(videoPath, "second-source-fixture");
+  libraryRoots.push(otherRoot);
+  db.exec("INSERT INTO works VALUES (9,'NEW-009','new009','other storage'); INSERT INTO work_people VALUES (9,1,'actor',0);");
+  const sources = [existingSource, otherSource];
+  const sync = (sourcePaths) => personLibrary.refreshPerson("1", { sourcePaths, failOnPersistenceError: true });
+  sync(sources);
+  const previousPerson = library.peopleById.get("1");
+  const previousWork = library.worksById.get("9");
+  const beforeLocalFiles = db.prepare("SELECT * FROM local_files ORDER BY id").all();
+  const beforeLocalWorks = db.prepare("SELECT * FROM local_works ORDER BY id").all();
+  const beforeBindings = boundSources.length;
+  const beforeReconciliations = reconciliations;
+  assert(previousWork, "fixture work from the second storage root must be indexed");
+  assert(pathWithinRoot(otherRoot, root) && pathWithinRoot(unavailableRoot, root));
+
+  function assertPreserved() {
+    assert.equal(library.peopleById.get("1"), previousPerson);
+    assert.equal(library.worksById.get("9"), previousWork);
+    assert.deepEqual(db.prepare("SELECT * FROM local_files ORDER BY id").all(), beforeLocalFiles);
+    assert.deepEqual(db.prepare("SELECT * FROM local_works ORDER BY id").all(), beforeLocalWorks);
+    assert.equal(boundSources.length, beforeBindings);
+    assert.equal(reconciliations, beforeReconciliations);
+  }
+
+  fs.renameSync(otherRoot, unavailableRoot);
+  try {
+    for (const sourcePaths of [undefined, [existingSource], sources]) {
+      assert.throws(() => sync(sourcePaths), (error) => error.statusCode === 409 && error.code === "PERSON_FOLDER_DISCONNECTED");
+      assertPreserved();
+    }
+  } finally {
+    fs.renameSync(unavailableRoot, otherRoot);
+  }
+
+  const readDirectory = fs.readdirSync;
+  fs.readdirSync = (directory, options) => {
+    if (directory === nestedDir) throw Object.assign(new Error("fixture directory access denied"), { code: "EACCES" });
+    return readDirectory(directory, options);
+  };
+  try {
+    assert.throws(() => sync(sources), (error) => error.statusCode === 409 && error.code === "PERSON_FOLDER_SCAN_INCOMPLETE");
+    assertPreserved();
+  } finally {
+    fs.readdirSync = readDirectory;
+  }
+
+  fs.unlinkSync(videoPath);
+  const result = sync(sources);
+  assert.deepEqual(result.removedWorkIds, ["9"], "a complete scan still removes confirmed missing media");
+  assert.equal(library.worksById.has("9"), false);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM local_files WHERE work_id=9").get().count, 0);
 }

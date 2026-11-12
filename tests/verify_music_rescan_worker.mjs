@@ -36,6 +36,7 @@ async function verifyRescanWorker(baseDir) {
   const fixture = createMusicFixture(baseDir);
   verifyFlatDirectoryLyricLookup(fixture.baseDir);
   await verifyLegacyPersistenceEquivalence(fixture);
+  await verifyUnavailableSourceKeepsSnapshot(fixture);
   await verifyAtomicFailures(fixture);
   await verifyCommittedCrashInvalidatesReaders(fixture);
   await verifyCheckpointDoesNotDelaySuccess(fixture);
@@ -342,6 +343,110 @@ async function verifyLegacyPersistenceEquivalence(fixture) {
     assert.deepEqual(dumpCatalog(workerDbPath), dumpCatalog(directDbPath), "limited worker publication must preserve legacy row order and data");
   } finally {
     await store.stop();
+  }
+}
+
+async function verifyUnavailableSourceKeepsSnapshot(fixture) {
+  const dbPath = path.join(fixture.baseDir, "unavailable-source.sqlite");
+  const localRoot = path.join(fixture.baseDir, "available-library");
+  const detachedRoot = path.join(fixture.baseDir, "detached-library");
+  const mountedRoot = path.join(fixture.baseDir, "mounted-library");
+  const albumPath = path.join(detachedRoot, "Artist", "Album");
+  const trackPath = path.join(albumPath, "Song.flac");
+  fs.mkdirSync(localRoot);
+  fs.mkdirSync(albumPath, { recursive: true });
+  writeMedia(trackPath, 50);
+  createManagedCatalog(detachedRoot, trackPath, path.join(albumPath, "Song.lrc"));
+  const mount = () => fs.symlinkSync(detachedRoot, mountedRoot, process.platform === "win32" ? "junction" : "dir");
+  mount();
+
+  const roots = [localRoot, mountedRoot];
+  const store = createMusicStore({ dbPath, roots, ...fixture.probeOptions });
+  try {
+    assert.equal((await store.scan()).totals.tracks, 1);
+    const trackId = dumpCatalog(dbPath).music_tracks[0].id;
+    store.createPlaylist({ name: "Offline", trackIds: [trackId] });
+    const before = dumpCatalog(dbPath);
+    assert.equal(before.music_playlist_items.length, 1);
+    fs.unlinkSync(mountedRoot);
+    const preview = await store.scan({ dryRun: true });
+    assert.deepEqual(preview.roots.map(root => root.exists), [true, false]);
+    assert.deepEqual(dumpCatalog(dbPath), before, "offline preview must leave the catalogue untouched");
+    const response = {};
+    assert(await routeMusicApi({ method: "POST" }, response, new URL("http://fixture/api/music/rescan"), {
+      musicStore: store,
+      readJsonBody: async () => ({}),
+      requireLocalAdmin: () => true,
+      sendJson(res, status, payload) { Object.assign(res, { status, payload }); }
+    }));
+    assert.deepEqual(response, {
+      status: 503,
+      payload: { error: "音乐目录或文件暂时无法读取，已保留原索引", code: "MUSIC_SCAN_SOURCE_UNAVAILABLE", retryable: true }
+    });
+    assert.deepEqual(dumpCatalog(dbPath), before, "a failed scan must preserve both the catalogue and playlist memberships");
+
+    mount();
+    const mountedAlbum = path.join(mountedRoot, "Artist", "Album");
+    const readDirectory = fs.readdirSync;
+    fs.readdirSync = (directory, ...args) => {
+      if (directory === mountedAlbum) throw Object.assign(new Error("synthetic offline album"), { code: "EACCES" });
+      return readDirectory(directory, ...args);
+    };
+    try {
+      assert.throws(() => scanMusicRoots(roots, { requireCompleteRead: true }), { code: "MUSIC_SCAN_SOURCE_UNAVAILABLE" });
+      assert.equal(scanMusicRoots(roots).tracks.length, 0, "a dry run can still preview reachable directories");
+    } finally {
+      fs.readdirSync = readDirectory;
+    }
+
+    const mountedTrack = path.join(mountedAlbum, "Song.flac");
+    const statFile = fs.statSync;
+    fs.statSync = (filePath, ...args) => {
+      if (filePath === mountedTrack) throw Object.assign(new Error("synthetic removed track"), { code: "ENOENT" });
+      return statFile(filePath, ...args);
+    };
+    try {
+      assert.throws(() => scanMusicRoots(roots, { requireCompleteRead: true }), { code: "MUSIC_SCAN_SOURCE_UNAVAILABLE" });
+    } finally {
+      fs.statSync = statFile;
+    }
+
+    assert.equal((await store.scan()).totals.tracks, 1, "the same worker can retry after the source returns");
+    assert.deepEqual(dumpCatalog(dbPath).music_playlist_items, before.music_playlist_items);
+    const beforeSwitch = dumpCatalog(dbPath);
+    const replacementRoot = path.join(fixture.baseDir, "replacement-library");
+    fs.mkdirSync(replacementRoot);
+    writeMedia(path.join(replacementRoot, "Replacement.flac"), 55);
+    fs.unlinkSync(trackPath);
+    const delayed = createMusicStore({ dbPath, roots, ...fixture.probeOptions, scanWorkerData: { publishDelayMs: 800 } });
+    try {
+      const scan = delayed.scan();
+      const rejected = assert.rejects(scan, { code: "MUSIC_SCAN_SOURCE_UNAVAILABLE", statusCode: 503, retryable: true });
+      // The old mount was successfully read and the worker now owns SQLite's write lock.
+      await waitFor(() => delayed.scanDiagnostics().activePhase === "publishing");
+      fs.unlinkSync(mountedRoot);
+      fs.symlinkSync(replacementRoot, mountedRoot, process.platform === "win32" ? "junction" : "dir");
+      await rejected;
+      assert.deepEqual(dumpCatalog(dbPath), beforeSwitch, "a replacement mount must not publish an older source snapshot");
+      fs.unlinkSync(mountedRoot);
+      mount();
+      writeMedia(trackPath, 50);
+      assert.equal((await delayed.scan()).totals.tracks, 1, "the same worker can retry after an interrupted publication");
+      assert.deepEqual(dumpCatalog(dbPath).music_playlist_items, beforeSwitch.music_playlist_items);
+    } finally {
+      await delayed.stop();
+      if (!fs.lstatSync(mountedRoot, { throwIfNoEntry: false })) mount();
+      else if (fs.realpathSync.native(mountedRoot) !== fs.realpathSync.native(detachedRoot)) {
+        fs.unlinkSync(mountedRoot);
+        mount();
+      }
+    }
+    fs.unlinkSync(trackPath);
+    assert.equal((await store.scan()).totals.tracks, 0, "an accessible empty directory still publishes a deletion");
+    assert.deepEqual(dumpCatalog(dbPath).music_playlist_items, []);
+  } finally {
+    try { await store.stop(); }
+    finally { if (fs.existsSync(mountedRoot)) fs.unlinkSync(mountedRoot); }
   }
 }
 

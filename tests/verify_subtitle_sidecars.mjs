@@ -133,7 +133,10 @@ try {
   const nested = path.join(media, "nested"); fs.mkdirSync(nested);
   fs.writeFileSync(path.join(nested, "ABC-001.CD2.und.ass"), content);
   const found = await discoverVideoSubtitles(video, options());
-  assert.deepEqual(found.map(item => item.name), ["ABC-001.CD2.zh-CN.srt", "ABC-001.CD2.zh-TW.ass", "ABC-001.CD2.en.vtt", "ABC-001.CD2.ja.ssa"]);
+  assert.deepEqual(found.map(item => [item.name, item.sidecarLanguage]), [
+    ["ABC-001.CD2.en.vtt", "en"], ["ABC-001.CD2.fr.srt", "fr"], ["ABC-001.CD2.ja.ssa", "ja"],
+    ["ABC-001.CD2.zh-CN.srt", "zh-CN"], ["ABC-001.CD2.zh-TW.ass", "zh-TW"]
+  ]);
   assert(found.every(item => /^sidecar:[a-f0-9]{64}$/.test(item.id) && item.type === "info"));
   assert.deepEqual(await discoverVideoSubtitles(video, options()), found); checks++;
   assert.deepEqual(await discoverVideoSubtitles(file("EMPTY-001.mp4"), options()), []); checks++;
