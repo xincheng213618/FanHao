@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#1f7a62" />
     <title>重复文件比对 · FanHao</title>
-    <link rel="stylesheet" href="/modules/fanhao/duplicates/styles.css?v=20261024-duplicates-06" />
+    <link rel="stylesheet" href="/modules/fanhao/duplicates/styles.css?v=20261113-duplicates-review-export-01" />
   </head>
   <body>
     <main>
@@ -21,8 +21,8 @@
       <section class="scope-note" aria-label="比较范围与校验说明">
         <strong>同番号、同分卷仅作候选，不能据此确认重复。</strong>
         <p>内容校验会读取完整文件；大小不同无需计算完整哈希。只有完整 SHA256 相同，才显示“本次校验内容一致”。潜在额外体积并非确认可回收空间。</p>
-        <p>每条记录上方可以“忽略本组”，收起这一整组并排到列表最后，也可恢复；文件上的“保留”可选多份。选择保存在本浏览器。手动删除后点“检查文件是否还在”更新本组。</p>
-        <p>列表会检查候选路径，确认不存在的文件和目录会自动排除。点“检查文件是否还在”可同步清理本组旧索引；“清理失效索引”处理当前搜索范围内的重复候选。仅移除失效的本地文件和目录记录，保留作品资料、收藏及观看记录；磁盘离线或无权访问时保留为待确认。</p>
+        <p>“忽略本组”会收起整组，文件上的“保留”可选多份。筛选依据本浏览器保存的标记，逐组审阅沿用当前筛选。</p>
+        <p>列表会检查候选路径，确认不存在的文件和目录会自动排除。点“检查文件是否还在”可同步清理本组旧索引；“清理失效索引”检查当前已提交的搜索词匹配的全部候选。仅移除失效的本地文件和目录记录，保留作品资料、收藏及观看记录；磁盘离线或无权访问时保留为待确认。</p>
         <p>每条记录上方的“打开文件夹”会打开本组所在目录；分布在多个目录时可选择。目录在运行 FanHao 的电脑上打开。离开页面后校验继续，可返回查看或取消。</p>
       </section>
       <section id="summary" class="summary" aria-label="索引概况" hidden></section>
@@ -31,13 +31,43 @@
           <label for="query">搜索候选</label>
           <div class="search-row"><input id="query" type="search" placeholder="番号、文件名或路径" autocomplete="off" /><button id="search" type="submit">搜索</button><button id="clear" type="button">清空</button></div>
         </form>
-        <div class="result-toolbar"><p id="resultCount">正在读取候选…</p><span>每页 20 组</span></div>
+        <div class="result-toolbar">
+          <div class="result-filters">
+            <label for="reviewFilter">标记
+              <select id="reviewFilter"><option value="all">全部候选</option><option value="open">未忽略</option><option value="unmarked">未忽略且无保留标记</option><option value="kept">含保留标记</option><option value="ignored">已忽略</option></select>
+            </label>
+            <label for="groupSort">排序
+              <select id="groupSort"><option value="total">本组文件总大小</option><option value="extra">潜在额外体积</option><option value="files">文件份数</option><option value="code">番号</option></select>
+            </label>
+          </div>
+          <p id="resultCount">正在读取候选…</p><button id="reviewToggle" type="button" aria-pressed="false" disabled>逐组审阅</button>
+          <button id="openReviewExport" type="button" aria-haspopup="dialog" disabled>导出审阅清单</button>
+        </div>
       </section>
       <div id="status" class="notice" role="status" aria-live="polite"></div>
       <button id="retry" type="button" hidden>重新读取候选</button>
-      <section id="groups" class="groups" aria-label="疑似重复文件组"></section>
-      <nav class="pagination" aria-label="候选组分页"><button id="previous" type="button" disabled>上一页</button><span id="pageLabel"></span><button id="next" type="button" disabled>下一页</button></nav>
+      <div id="results">
+        <nav id="reviewNavigation" class="review-navigation" aria-label="逐组审阅导航" hidden>
+          <button id="reviewPrevious" type="button" aria-keyshortcuts="K" disabled>上一组</button>
+          <span id="reviewPosition" role="status"></span>
+          <button id="reviewNext" type="button" aria-keyshortcuts="J" disabled>下一组</button>
+          <button id="reviewExit" type="button">返回列表</button>
+          <span class="review-keyboard">K / J 切换</span>
+        </nav>
+        <section id="groups" class="groups" aria-label="疑似重复文件组"></section>
+        <nav id="listPaging" class="pagination" aria-label="候选组分页"><button id="previous" type="button" disabled>上一页</button><span id="pageLabel"></span><button id="next" type="button" disabled>下一页</button></nav>
+      </div>
     </main>
-    <script type="module" src="/modules/fanhao/duplicates/app.js?v=20261024-duplicates-06"></script>
+    <dialog id="reviewExport" class="review-export-dialog" aria-labelledby="reviewExportTitle">
+      <header>
+        <h2 id="reviewExportTitle">导出审阅清单</h2>
+        <form method="dialog"><button type="submit" aria-label="关闭导出清单">关闭</button></form>
+      </header>
+      <p id="reviewExportSummary" role="status"></p>
+      <p>清单会附上当前已读取、仍与索引匹配的内容一致记录。</p>
+      <label><input id="reviewExportPaths" type="checkbox"> 包含完整路径</label>
+      <footer><button id="downloadReviewExport" type="button">下载 CSV</button></footer>
+    </dialog>
+    <script type="module" src="/modules/fanhao/duplicates/app.js?v=20261113-duplicates-review-export-01"></script>
   </body>
 </html>

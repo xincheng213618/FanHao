@@ -5,6 +5,9 @@ import {
   PHOTO_PEOPLE_SORT_OPTIONS,
   photoCatalogCollections
 } from "./photo-catalog.js?v=20261108-photo-issue-sort-01";
+import { createPhotoReadingPositions } from "./photo-reading-positions.js";
+import { createGalleryImageOverview } from "./gallery-image-overview.js?v=20261113-photo-preview-01";
+import { routeUrl } from "../../js/router.js?v=20261113-series-episode-search-01";
 
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const PHOTO_CATEGORY_LABELS = new Map([
@@ -82,6 +85,17 @@ export function createGalleryRenderer(deps) {
   const pendingPhotoCardCounts = new Map();
   const knownPhotoCardCounts = new WeakMap();
   const pendingPhotoMarks = new Set();
+  const photoReadingPositions = createPhotoReadingPositions();
+  const renderContinueWatching = deps.createContinueWatching?.({
+    api,
+    playerUrl: item => galleryMediaPlayerUrl(item, 0, deps.galleryListRoute?.())
+  });
+  const watchlist = deps.createMediaWatchlist?.({
+    root: els.workGrid,
+    isBrowsing: () => state.activeView === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode) && !state.gallery.media,
+    destination: item => item.kind === "movie" ? galleryMediaPlayerUrl(item) : routeUrl({ view: "gallery", galleryMode: "media",
+      galleryMediaKind: item.kind, galleryCategory: item.category, galleryPerson: item.seriesName, gallerySeriesKey: item.seriesKey })
+  });
   let photoCardCountTimer = 0;
   let photoCardCountRequest = null;
   let selectedPhotoCollectionCard = null;
@@ -143,6 +157,7 @@ async function loadImageLibrary(options = {}) {
 }
 
 function resetGalleryReader() {
+  watchlist?.close({ restoreFocus: false });
   getGalleryPage().resetReader();
 }
 
@@ -721,15 +736,16 @@ function mediaItemsForMode(mode = state.gallery.mode) {
   return kind ? source.filter((item) => item.mediaKind === kind) : [];
 }
 
-function galleryMediaPlayerUrl(item) {
+function galleryMediaPlayerUrl(item, episodePosition = 0, returnTo = window.location.pathname + window.location.search) {
   const params = new URLSearchParams({ mediaId: String(item?.id || "") });
-  params.set("returnTo", window.location.pathname + window.location.search);
+  params.set("returnTo", returnTo);
+  if (episodePosition > 0) params.set("episodePosition", String(episodePosition));
   return `/player.html?${params.toString()}`;
 }
 
-function openScreenMediaPlayer(item) {
+function openScreenMediaPlayer(item, episodePosition = 0) {
   if (!item?.id) return;
-  window.location.href = galleryMediaPlayerUrl(item);
+  window.location.href = galleryMediaPlayerUrl(item, episodePosition);
 }
 
 function tvSeriesGroupCountForItems(items = []) {
@@ -1023,6 +1039,7 @@ function renderGalleryControls(options = {}) {
   searchSubmit.addEventListener("click", () => submitGallerySearch(search.value, { restoreFocus: true }));
   searchBox.append(search, searchSubmit);
   searchRow.append(createGalleryFilterField("搜索影视", searchBox, "gallery-media-search-field"));
+  if (watchlist && ["media", "movie", "tv"].includes(state.gallery.mode) && !state.gallery.media) searchRow.append(watchlist.trigger());
   if (searchActive) {
     searchRow.append(createGallerySearchBackButton(), createGalleryBrowseNav());
     controls.append(searchRow);
@@ -1091,6 +1108,7 @@ function submitGallerySearch(value, options = {}) {
   state.gallery.subCategory = "all";
   state.gallery.person = "all";
   state.gallery.seriesKey = "";
+  state.gallery.episodeQuery = "";
   state.gallery.mediaKind = "all";
   const search = els.workGrid?.querySelector(".gallery-search");
   if (search && search.value !== nextQuery) search.value = nextQuery;
@@ -1112,6 +1130,7 @@ function openGalleryMediaGroup({ kind, category, person, seriesKey }) {
   state.gallery.category = category || state.gallery.category;
   state.gallery.person = person || "all";
   state.gallery.seriesKey = seriesKey || "";
+  state.gallery.episodeQuery = "";
   state.gallery.visibleLimit = 80;
   renderGalleryView();
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1179,6 +1198,7 @@ function resetGalleryRenderedState() {
 }
 
 function renderGalleryContent(content) {
+  renderContinueWatching?.(content, state.gallery);
   if (state.gallery.album) {
     renderPhotoReader(content);
   } else if (state.gallery.comic) {
@@ -1878,11 +1898,16 @@ function renderTvSeriesBar(container, total) {
   allButton.addEventListener("click", () => {
     state.gallery.person = "all";
     state.gallery.seriesKey = "";
+    state.gallery.episodeQuery = "";
     state.gallery.visibleLimit = 80;
     renderGalleryView();
     syncGalleryRoute("replace");
   });
   actions.append(allButton);
+  const save = watchlist?.toggleFor({ kind: state.gallery.mediaKind === "anime" ? "anime" : "tv", title: title.textContent,
+    seriesName: state.gallery.person, seriesKey: state.gallery.seriesKey, category: state.gallery.category });
+  if (save) actions.append(save);
+  if (watchlist) actions.append(watchlist.trigger());
   bar.append(text, actions);
   container.append(bar);
 }
@@ -1907,7 +1932,8 @@ function createTvSeriesCard(group) {
     }
   );
   card.classList.add("gallery-tv-series-card");
-  return card;
+  return watchlist?.wrap(card, { kind: "tv", title: tvSeriesDisplayTitle(group.title, group.tvSeries),
+    seriesName: group.title, seriesKey: group.value, category: group.category }) || card;
 }
 
 function renderTvSeriesShelf(container) {
@@ -2296,6 +2322,11 @@ function showMoreGalleryList(label = "") {
 
 function refreshGalleryList(options = {}) {
   if (state.activeView !== "gallery" || state.gallery.album || state.gallery.comic || state.gallery.media) return false;
+  if (!options.readerActive && ["media", "tv"].includes(state.gallery.mode) && hasSelectedTvSeries()
+      && els.workGrid.querySelector(".gallery-series-shell > .gallery-episode-filter")) {
+    renderGalleryResults({ preserveScroll: true });
+    return true;
+  }
   if (!options.readerActive && refreshGallerySummaryContent(options)) return true;
   const registration = galleryListRegistration, list = currentImageLibraryList();
   const registered = registration?.grid.isConnected && list && registration.key === list.key;
@@ -2492,6 +2523,12 @@ function activateGalleryReaderImages(root) {
   if (!figures.length) return;
   galleryReaderStartupFigure = figures[0];
 
+  const rememberPosition = root.dataset.photoAlbumId && root.dataset.photoAlbumId === state.gallery.album?.id
+    ? photoPositionRecorder(state.gallery.album) : null;
+  let previousPage = null;
+  let lastScrollY = window.scrollY;
+  let scrollIntentUntil = 0;
+  let saveScrolledPage = false;
   let progressTicking = false;
   const reportProgress = () => {
     progressTicking = false;
@@ -2508,6 +2545,11 @@ function activateGalleryReaderImages(root) {
     if (progress.dataset.currentIndex !== indexValue) progress.dataset.currentIndex = indexValue;
     if (progress.textContent !== progressText) progress.textContent = progressText;
     if (toolbar.style.getPropertyValue("--reader-progress") !== progressValue) toolbar.style.setProperty("--reader-progress", progressValue);
+    if (saveScrolledPage && currentIndex !== previousPage && !galleryPagerCleanup && !galleryReaderWidthRestore && root.isConnected) {
+      rememberPosition?.(currentIndex);
+    }
+    saveScrolledPage = false;
+    previousPage = currentIndex;
   };
   const requestProgress = () => {
     if (progressTicking) return;
@@ -2527,6 +2569,24 @@ function activateGalleryReaderImages(root) {
   };
   const widthInputTypes = ["wheel", "touchmove", "pointerdown", "keydown", "focusin"];
   for (const type of widthInputTypes) window.addEventListener(type, cancelWidthRestoreForInput, { passive: true });
+  const captureScrollIntent = (event) => {
+    if (!event.isTrusted || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || galleryPagerCleanup) return;
+    if (event.type === "keydown") {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!["ArrowDown", "ArrowUp", "PageDown", "PageUp", "Home", "End", " "].includes(event.key)
+        || target?.closest("input, select, textarea, [contenteditable]") || event.key === " " && target?.closest("button, a, [role='button']")) return;
+    }
+    if (event.type === "pointerdown" && event.clientX < document.documentElement.clientWidth - 16) return;
+    if (event.type === "wheel" && !event.deltaY) return;
+    scrollIntentUntil = performance.now() + GALLERY_MORE_SCROLL_INTENT_MS;
+  };
+  const progressInputTypes = ["wheel", "touchmove", "pointerdown", "keydown"];
+  if (rememberPosition) for (const type of progressInputTypes) window.addEventListener(type, captureScrollIntent, { passive: true });
+  const onScroll = () => {
+    if (rememberPosition && window.scrollY !== lastScrollY && performance.now() <= scrollIntentUntil) saveScrolledPage = true;
+    lastScrollY = window.scrollY;
+    requestProgress();
+  };
   let checkNewFigures = null;
   galleryReaderRegistration = {
     root,
@@ -2538,12 +2598,13 @@ function activateGalleryReaderImages(root) {
       requestProgress();
     }
   };
-  window.addEventListener("scroll", requestProgress, { passive: true });
+  window.addEventListener("scroll", onScroll, { passive: true });
   window.addEventListener("resize", requestProgress);
   galleryReaderScrollCleanup = () => {
-    window.removeEventListener("scroll", requestProgress);
+    window.removeEventListener("scroll", onScroll);
     window.removeEventListener("resize", requestProgress);
     for (const type of widthInputTypes) window.removeEventListener(type, cancelWidthRestoreForInput);
+    if (rememberPosition) for (const type of progressInputTypes) window.removeEventListener(type, captureScrollIntent);
   };
   reportProgress();
 
@@ -2800,14 +2861,59 @@ function renderPagedImageLibrary(container) {
     renderPagedPhotoCollectionPage(container, list);
   } else if (state.gallery.photoView === "collections") {
     renderPagedImageLibrarySearchSummary(container, list);
+    appendPhotoContinueShelf(container);
     renderPagedPhotoCollectionsShelf(container, list);
   } else if (state.gallery.photoView === "people") {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedPhotoPeopleShelf(container, list);
   } else {
     renderPagedImageLibrarySearchSummary(container, list);
+    appendPhotoContinueShelf(container);
     renderPagedPhotoShelf(container, list);
   }
+}
+
+function appendPhotoContinueShelf(container) {
+  const { category, subCategory, query, person, photoSite, photoDate } = state.gallery;
+  if (category !== "all" || subCategory && subCategory !== "all" || query || person && person !== "all"
+    || photoSite || photoDate && photoDate !== "all") return;
+  const positions = photoReadingPositions.recent().slice(0, 6);
+  if (!positions.length) return;
+  const section = document.createElement("section");
+  section.className = "gallery-photo-continue";
+  const title = document.createElement("h2");
+  title.textContent = "继续阅读";
+  const items = document.createElement("ul");
+  for (const position of positions) {
+    const li = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.photoListCard = `resume:${position.id}`;
+    const name = document.createElement("strong");
+    name.textContent = position.title;
+    const page = document.createElement("span");
+    page.textContent = `第 ${formatNumber(position.page)} 张`;
+    button.append(name, page);
+    button.addEventListener("click", async (event) => {
+      if (!button.isConnected || button.disabled) return;
+      capturePhotoListDeparture(event);
+      const listReturn = { albumId: position.id, top: button.getBoundingClientRect().top, restoreFocus: false };
+      button.disabled = true;
+      try {
+        const album = await getGalleryPage().openPhotoSet(position.id, { listReturn });
+        if (!album || state.gallery.album !== album) return;
+        const resume = els.workGrid.querySelector(".gallery-photo-resume-button");
+        if (resume) {
+          if (document.activeElement === document.body) resume.focus({ preventScroll: true });
+          resume.click();
+        }
+      } finally { button.disabled = false; }
+    });
+    li.append(button);
+    items.append(li);
+  }
+  section.append(title, items);
+  container.append(section);
 }
 
 function refreshGallerySummaryContent(options) {
@@ -3814,7 +3920,8 @@ function createMovieExploreItem(item, index) {
   copy.append(title, details);
   if (people.textContent) copy.append(people);
   button.append(poster, copy);
-  return button;
+  return watchlist?.wrap(button, { kind: item.mediaKind, id: item.id, title: title.textContent,
+    seriesName: item.seriesName || (isTvSeriesWork ? item.title : ""), seriesKey: item.seriesKey, category: item.category }) || button;
 }
 
 function createMediaLayoutSwitch() {
@@ -3892,18 +3999,21 @@ function renderMovieShelf(container) {
   });
 }
 
-function tvEpisodeNumber(item = {}) {
-  const title = String(item.title || "").trim();
+function tvEpisodeLabel(title) {
+  const seasonEpisode = /(?:^|[^a-z0-9])S(?:eason)?\s*(\d{1,2})\s*E(?:p(?:isode)?)?\s*(\d{1,3})(?=$|[^a-z0-9])/i.exec(title)
+    || /第\s*(\d{1,2})\s*季[ ._-]*第?\s*(\d{1,3})\s*[集话話]/u.exec(title);
+  const number = value => String(Number(value)).padStart(2, "0");
+  if (seasonEpisode) return `第 ${number(seasonEpisode[1])} 季 · 第 ${number(seasonEpisode[2])} 集`;
   const patterns = [
-    /(?:^|\b)S\d{1,2}E(?:P)?\s*(\d{1,3})(?:\b|$)/i,
-    /第\s*(\d{1,3})\s*集/,
+    /(?:^|[^a-z0-9])E(?:p)?\s*(\d{1,3})(?=$|[^a-z0-9])/i,
+    /第\s*(\d{1,3})\s*[集话話]/u,
     /^\s*0*(\d{1,3})(?:\s|[._-]|$)/
   ];
   for (const pattern of patterns) {
     const match = title.match(pattern);
-    if (match) return Number.parseInt(match[1], 10);
+    if (match) return `第 ${number(match[1])} 集`;
   }
-  return 0;
+  return "";
 }
 
 function movieQualityFromList(item) {
@@ -3919,27 +4029,67 @@ function tvEpisodeQuality(item = {}) {
   return text.match(/\b(?:4K|2160P|1080P|720P|HDR10\+?|HDR|DV)\b/i)?.[0]?.toUpperCase() || "";
 }
 
-function createTvEpisodeCard(item) {
-  const episodeNumber = tvEpisodeNumber(item);
+function createTvEpisodeCard(item, position) {
+  const episode = tvEpisodeLabel(String(item.title || "").normalize("NFKC").trim());
   const quality = tvEpisodeQuality(item);
-  const title = episodeNumber ? `第 ${String(episodeNumber).padStart(2, "0")} 集` : item.title || "未命名单集";
+  const title = episode || item.title || "未命名单集";
+  const fileTitle = episode && item.title !== title ? item.title : "";
   const card = createGalleryCard(
     { ...item, title },
     {
       meta: formatBytes(item.size),
-      extra: item.updatedAt ? `更新于 ${formatDateTime(item.updatedAt)}` : "",
+      extra: [fileTitle, item.updatedAt ? `更新于 ${formatDateTime(item.updatedAt)}` : ""].filter(Boolean).join(" · "),
       badges: quality ? [quality] : [],
-      placeholder: episodeNumber ? `第 ${episodeNumber} 集` : "单集",
-      onOpen: () => openScreenMediaPlayer(item)
+      placeholder: episode || "单集",
+      onOpen: () => openScreenMediaPlayer(item, position)
     }
   );
   card.classList.add("gallery-episode-card");
-  card.setAttribute("aria-label", ["播放", title, quality, formatBytes(item.size)].filter(Boolean).join("，"));
+  card.setAttribute("aria-label", ["播放", title, fileTitle, quality, formatBytes(item.size)].filter(Boolean).join("，"));
+  if (fileTitle) card.title = fileTitle;
   const play = document.createElement("span");
   play.className = "gallery-episode-play";
   play.textContent = "播放";
   card.querySelector(".gallery-card-body")?.append(play);
   return card;
+}
+
+function renderSeriesEpisodeFilter() {
+  const form = document.createElement("form");
+  form.className = "gallery-episode-filter";
+  form.setAttribute("role", "search");
+  form.innerHTML = `<input type="search" aria-label="搜索本剧分集" placeholder="集名、文件名或 S02E03" maxlength="120" autocomplete="off">
+    <button type="submit">搜索分集</button><button type="button" data-clear>清除</button>`;
+  const input = form.querySelector("input"), clear = form.querySelector("[data-clear]");
+  input.value = state.gallery.episodeQuery || "";
+  clear.hidden = !input.value;
+  let composing = false, candidateSubmit = false;
+  const current = () => form.isConnected && state.activeView === "gallery" && !state.gallery.media
+    && ["media", "tv"].includes(state.gallery.mode) && hasSelectedTvSeries();
+  const apply = value => {
+    if (!current()) return;
+    const query = value.trim().slice(0, 120).toWellFormed();
+    input.value = query;
+    clear.hidden = !query;
+    if (query === (state.gallery.episodeQuery || "")) return;
+    state.gallery.episodeQuery = query;
+    state.gallery.visibleLimit = 80;
+    renderGalleryResults();
+    syncGalleryRoute();
+  };
+  input.addEventListener("compositionstart", () => { composing = true; candidateSubmit = false; });
+  input.addEventListener("compositionend", () => { composing = false; });
+  input.addEventListener("input", () => { clear.hidden = !input.value && !state.gallery.episodeQuery; });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Enter") candidateSubmit = composing || event.isComposing || event.keyCode === 229;
+  });
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    if (composing || candidateSubmit) { candidateSubmit = false; return; }
+    apply(input.value);
+  });
+  clear.addEventListener("click", () => { composing = candidateSubmit = false; apply(""); input.focus({ preventScroll: true }); });
+  return form;
 }
 
 function renderMediaShelf(container) {
@@ -3981,15 +4131,15 @@ function renderMediaShelf(container) {
     const title = document.createElement("h2");
     title.textContent = "选集播放";
     const meta = document.createElement("span");
-    meta.textContent = `${formatNumber(total)} 集 · 点击卡片直接播放`;
+    meta.textContent = state.gallery.episodeQuery ? `匹配 ${formatNumber(total)} 集` : `${formatNumber(total)} 集 · 点击卡片直接播放`;
     heading.append(title, meta);
     container.append(heading);
   }
   const grid = document.createElement("div");
   grid.className = `gallery-grid media-grid${selectedSeries ? " gallery-episode-grid" : ""}`;
-  for (const item of visible) {
+  for (const [index, item] of visible.entries()) {
     if (selectedSeries) {
-      grid.append(createTvEpisodeCard(item));
+      grid.append(createTvEpisodeCard(item, !state.gallery.episodeQuery && item.seriesKey === state.gallery.seriesKey ? index + 1 : 0));
       continue;
     }
     const doubanMetadata = item.mediaKind === "movie" ? item.movieMetadata : item.tvSeries;
@@ -4020,7 +4170,8 @@ function renderMediaShelf(container) {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = state.gallery.data ? `没有匹配的${galleryModeLabel(state.gallery.mode)}` : "正在等待图像资料库索引";
+    empty.textContent = selectedSeries && state.gallery.episodeQuery ? "本剧没有匹配的分集。"
+      : state.gallery.data ? `没有匹配的${galleryModeLabel(state.gallery.mode)}` : "正在等待图像资料库索引";
     container.append(empty);
   } else if (visible.length < total) {
     const more = document.createElement("button");
@@ -4165,6 +4316,64 @@ function restorePhotoListReturn(anchor) {
   return true;
 }
 
+function createPhotoReaderNavigation(albumId) {
+  const page = getGalleryPage();
+  const neighbors = page.photoReaderNeighbors?.(albumId);
+  if (!neighbors || !(neighbors.previous || neighbors.next || neighbors.canLoadNext)) return null;
+  const group = document.createElement("div");
+  group.className = "gallery-reader-album-nav";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "切换套图");
+  const status = document.createElement("span");
+  status.className = "gallery-reader-album-status";
+  status.setAttribute("role", "status");
+  const buttons = {};
+  let pending = false;
+  const isCurrent = () => group.isConnected && state.activeView === "gallery" && state.gallery.album?.id === albumId;
+  const sync = (current) => {
+    for (const direction of ["previous", "next"]) {
+      const button = buttons[direction];
+      button.disabled = !(current?.[direction] || direction === "next" && current?.canLoadNext);
+      button.title = current?.[direction]?.title || button.textContent;
+      if (pending) button.setAttribute("aria-disabled", "true");
+      else button.removeAttribute("aria-disabled");
+    }
+  };
+  for (const [direction, label] of [["previous", "上一套"], ["next", "下一套"]]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-button gallery-reader-album-step";
+    button.dataset.photoAlbumStep = direction;
+    button.textContent = label;
+    button.addEventListener("click", async (event) => {
+      if (pending || button.disabled || !isCurrent()) return;
+      const restoreFocus = event.detail === 0 && document.activeElement === button;
+      pending = true;
+      status.textContent = "正在读取套图…";
+      sync(page.photoReaderNeighbors(albumId));
+      try {
+        const nextAlbum = await page.openAdjacentPhotoSet(albumId, direction);
+        if (!nextAlbum && isCurrent()) status.textContent = "当前列表没有更多套图";
+        if (restoreFocus && nextAlbum && state.gallery.album === nextAlbum && document.activeElement === document.body) {
+          const toolbar = els.workGrid.querySelector(".gallery-reader-toolbar");
+          const focus = toolbar?.querySelector(`[data-photo-album-step="${direction}"]:not(:disabled)`)
+            || toolbar?.querySelector(".gallery-reader-album-step:not(:disabled)") || toolbar?.querySelector(".gallery-reader-back");
+          focus?.focus({ preventScroll: true });
+        }
+      } catch (error) {
+        if (isCurrent()) status.textContent = error.message || "套图读取失败，点一下重试";
+      } finally {
+        pending = false;
+        if (isCurrent()) sync(page.photoReaderNeighbors(albumId));
+      }
+    });
+    buttons[direction] = button;
+    group.append(button);
+  }
+  sync(neighbors);
+  return { group, status };
+}
+
 function readerToolbar(title, meta, onBack, options = {}) {
   const bar = document.createElement("div");
   bar.className = "gallery-reader-toolbar";
@@ -4198,6 +4407,8 @@ function readerToolbar(title, meta, onBack, options = {}) {
 
   const actions = document.createElement("div");
   actions.className = "gallery-reader-actions";
+  const navigation = options.albumId ? createPhotoReaderNavigation(options.albumId) : null;
+  if (navigation) actions.append(navigation.group);
   if (options.markAlbum) actions.append(createPhotoAlbumMarkButton(options.markAlbum));
   if (options.albumId && ["local", "lan"].includes(state.accessMode)) actions.append(createPhotoRevealButton(options.albumId));
   const setFitWidth = (fitWidth) => {
@@ -4248,7 +4459,12 @@ function readerToolbar(title, meta, onBack, options = {}) {
     open.addEventListener("click", () => options.onOpen(Math.max(0, Number(progress.dataset.currentIndex || 1) - 1)));
     actions.append(open);
   }
+  if (options.markAlbum) {
+    const resume = createPhotoResumeControl(options.markAlbum);
+    if (resume) actions.append(resume);
+  }
   bar.append(back, copy, progress, actions);
+  if (navigation) bar.append(navigation.status);
   return bar;
 }
 
@@ -4284,6 +4500,8 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   let catalogRequest = null;
   let catalogFailed = false;
   let zoomAnchor = null;
+  let slideshowPlaying = false;
+  let slideshowTimer = null;
   const sourceKey = String(options.sourceKey || "");
   const previousOverflow = document.body.style.overflow;
   const abortController = new AbortController();
@@ -4335,8 +4553,16 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   fullscreen.className = "gallery-image-pager-button compact";
   fullscreen.dataset.galleryFullscreen = "true";
   fullscreen.textContent = "全屏";
+  const slideshow = document.createElement("button");
+  slideshow.type = "button";
+  slideshow.className = "gallery-image-pager-button compact gallery-image-pager-slideshow";
+  slideshow.setAttribute("aria-label", "自动轮播");
+  slideshow.title = "图片加载后停留 5 秒";
+  const titleActions = document.createElement("div");
+  titleActions.className = "gallery-image-pager-title-actions";
+  titleActions.append(heading, slideshow);
   topActions.append(zoomOut, zoomReset, zoomIn, fullscreen);
-  top.append(close, heading, topActions, fullscreenStatus);
+  top.append(close, titleActions, topActions, fullscreenStatus);
   const coverEdit = document.createElement("button");
   coverEdit.type = "button";
   coverEdit.className = "gallery-image-pager-button compact";
@@ -4454,12 +4680,32 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   let jumpComposing = false;
   let editingCover = false;
   let coverSaving = false;
-  overlay.append(top, stage, controls, imageError, jumpPanel);
+  const overview = createGalleryImageOverview({
+    signal: abortController.signal,
+    images: () => list,
+    currentIndex: () => currentIndex,
+    catalogState: () => ({ total: Math.max(Number(options.totalCount || 0), list.length), loading: Boolean(catalogRequest), failed: catalogFailed }),
+    loadCatalog: () => loadCatalog(),
+    chooseImage: (index) => goTo(index),
+    canOpen: () => !coverSaving,
+    visibilityChanged(open) {
+      if (open && !jumpPanel.hidden) closeJump();
+      for (const region of [top, stage, controls, imageError]) region.inert = open;
+      if (open) {
+        stopSlideshow();
+        finishImagePan();
+      }
+      showChrome();
+    },
+    formatNumber
+  });
+  topActions.prepend(overview.button);
+  overlay.append(top, stage, controls, imageError, jumpPanel, overview.panel);
 
   const scheduleHide = () => {
     window.clearTimeout(hideTimer);
     hideTimer = window.setTimeout(() => {
-      if (!jumpPanel.hidden) return;
+      if (!jumpPanel.hidden || overview.isOpen()) return;
       if (imageFailed || imageRetrying || catalogFailed || top.contains(document.activeElement) || controls.contains(document.activeElement)) return;
       overlay.classList.add("chrome-hidden");
     }, 2500);
@@ -4467,6 +4713,46 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   const showChrome = () => {
     overlay.classList.remove("chrome-hidden");
     scheduleHide();
+  };
+  const totalImages = () => Math.max(Number(options.totalCount || 0), list.length);
+  const syncSlideshow = () => {
+    slideshow.hidden = totalImages() < 2;
+    slideshow.disabled = imageFailed;
+    slideshow.textContent = slideshowPlaying ? "暂停" : "轮播";
+    slideshow.setAttribute("aria-pressed", String(slideshowPlaying));
+  };
+  const clearSlideshowTimer = () => {
+    window.clearTimeout(slideshowTimer);
+    slideshowTimer = null;
+  };
+  const stopSlideshow = () => {
+    if (!slideshowPlaying) return;
+    slideshowPlaying = false;
+    clearSlideshowTimer();
+    syncSlideshow();
+  };
+  const scheduleSlideshow = () => {
+    if (!slideshowPlaying) return;
+    if (document.hidden || abortController.signal.aborted || !overlay.isConnected || imageFailed) {
+      stopSlideshow();
+      return;
+    }
+    if (currentIndex >= list.length - 1) {
+      if (!catalogRequest || list.length >= totalImages()) stopSlideshow();
+      return;
+    }
+    if (slideshowTimer !== null || stage.hasAttribute("aria-busy") || !imageNode.complete || !imageNode.naturalWidth) return;
+    const index = currentIndex;
+    const timer = window.setTimeout(() => {
+      if (slideshowTimer !== timer) return;
+      slideshowTimer = null;
+      if (document.hidden || abortController.signal.aborted || !overlay.isConnected) {
+        stopSlideshow();
+        return;
+      }
+      goTo(index + 1, { automatic: true });
+    }, 5000);
+    slideshowTimer = timer;
   };
   const preloadNeighbor = (index) => {
     const item = list[index];
@@ -4501,7 +4787,8 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     showChrome();
   };
   const openJump = (forCover = false) => {
-    if (abortController.signal.aborted || !overlay.isConnected || coverSaving) return;
+    if (abortController.signal.aborted || !overlay.isConnected || coverSaving || overview.isOpen()) return;
+    stopSlideshow();
     editingCover = forCover;
     jumpPrompt.textContent = forCover ? "用第几张图做封面？" : "跳到第几张？";
     jumpPanel.setAttribute("aria-label", forCover ? "编辑封面" : "跳到指定图片");
@@ -4582,7 +4869,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     zoomReset.textContent = `${Math.round(zoomLevel * 100)}%`;
     if (point) keepZoomRegion(point);
     else if (!options.preserveScroll) { stopZoomAnchor(); stage.scrollTo({ left: 0, top: 0, behavior: "auto" }); }
-    showChrome();
+    if (options.revealControls !== false) showChrome();
   };
   const renderThumbnails = () => {
     const selectedChanged = thumbnailSelection !== currentIndex;
@@ -4632,7 +4919,8 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
         thumbnailButtons.set(index, button);
       }
       const thumb = button.firstElementChild;
-      if (thumb.getAttribute("src") !== list[index].url) thumb.src = list[index].url;
+      const previewUrl = list[index].previewUrl || list[index].url;
+      if (thumb.getAttribute("src") !== previewUrl) thumb.src = previewUrl;
       const active = index === currentIndex;
       button.classList.toggle("active", active);
       button.setAttribute("aria-current", active ? "true" : "false");
@@ -4653,7 +4941,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     rangeScrubbing = false;
     goTo(Number(range.value) - 1);
   };
-  const update = ({ preserveView = false } = {}) => {
+  const update = ({ preserveView = false, revealControls = true } = {}) => {
     const item = list[currentIndex] || {};
     if (!preserveView) {
       stopZoomAnchor();
@@ -4661,6 +4949,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       zoomLevel = 1;
     }
     if (imageNode.getAttribute("src") !== item.url) {
+      clearSlideshowTimer();
       finishImagePan();
       imageFailed = false;
       imageRetrying = false;
@@ -4682,15 +4971,18 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     range.value = String(currentIndex + 1);
     prev.disabled = currentIndex <= 0;
     next.disabled = currentIndex >= list.length - 1;
+    overview.button.hidden = totalImages() < 2;
+    syncSlideshow();
     sub.textContent = [meta, item.name].filter(Boolean).join(" · ");
-    applyZoom(zoomLevel, { preserveScroll: preserveView });
+    applyZoom(zoomLevel, { preserveScroll: preserveView, revealControls });
     renderThumbnails();
     preloadNeighbor(currentIndex - 1);
     preloadNeighbor(currentIndex + 1);
-    showChrome();
+    scheduleSlideshow();
   };
-  const goTo = (index) => {
-    if (coverSaving) return;
+  const goTo = (index, { automatic = false } = {}) => {
+    if (!automatic) stopSlideshow();
+    if (coverSaving || overview.isOpen()) return;
     if (!jumpPanel.hidden) closeJump();
     const nextIndex = clampPagerIndex(index);
     if (nextIndex !== currentIndex) recoveryIndex = undefined;
@@ -4699,6 +4991,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       const pending = pendingRangeImages;
       pendingRangeImages = null;
       updateImages(pending.images, { ...pending.options, index: nextIndex });
+      options.rememberPosition?.(Number(list[currentIndex]?.index || currentIndex + 1));
       return;
     }
     if (nextIndex === currentIndex) {
@@ -4706,7 +4999,8 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       return;
     }
     currentIndex = nextIndex;
-    update();
+    update({ revealControls: !automatic });
+    options.rememberPosition?.(Number(list[currentIndex]?.index || currentIndex + 1));
   };
   const submitJump = async () => {
     if (abortController.signal.aborted || !overlay.isConnected || jumpPanel.hidden || jumpComposing || coverSaving) return;
@@ -4758,6 +5052,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     }
 
     const current = list[currentIndex] || {};
+    const previousIndex = currentIndex;
     const requestedIndex = Number(updateOptions.index);
     const matchedIndex = current.url ? nextList.findIndex((item) => item.url === current.url) : -1;
     currentIndex = Number.isFinite(requestedIndex) && requestedIndex >= 0
@@ -4767,7 +5062,9 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
         : Math.min(currentIndex, nextList.length - 1);
     const preserveView = nextList[currentIndex]?.url === current.url;
     list = nextList;
+    if (currentIndex !== previousIndex || !preserveView) clearSlideshowTimer();
     update({ preserveView });
+    overview.refresh();
     return true;
   };
 
@@ -4784,6 +5081,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     catalogRetry.textContent = "正在读取目录…";
     catalog.setAttribute("aria-busy", "true");
     applyZoom(zoomLevel, { preserveScroll: true });
+    overview.refresh();
     request.promise = (async () => {
       try {
         const images = await options.fullImages();
@@ -4804,7 +5102,11 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
         if (request.restoreFocus && document.activeElement === stage) catalogRetry.focus({ preventScroll: true });
       } finally {
         if (catalogRequest === request) catalogRequest = null;
-        if (!abortController.signal.aborted && overlay.isConnected) catalog.removeAttribute("aria-busy");
+        if (!abortController.signal.aborted && overlay.isConnected) {
+          catalog.removeAttribute("aria-busy");
+          overview.refresh();
+          scheduleSlideshow();
+        }
       }
     })();
     return request.promise;
@@ -4812,13 +5114,31 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
 
   prev.addEventListener("click", () => goTo(currentIndex - 1), listenerOptions);
   next.addEventListener("click", () => goTo(currentIndex + 1), listenerOptions);
+  slideshow.addEventListener("click", () => {
+    if (slideshowPlaying) {
+      stopSlideshow();
+      showChrome();
+      return;
+    }
+    if (document.hidden || !overlay.isConnected || abortController.signal.aborted || imageFailed || totalImages() < 2) return;
+    slideshowPlaying = true;
+    recoveryIndex = undefined;
+    syncSlideshow();
+    if (zoomLevel > 1) applyZoom(1);
+    if (list.length < totalImages() && !catalogRequest && !catalogFailed) void loadCatalog();
+    if (currentIndex === list.length - 1 && list.length >= totalImages()) goTo(0, { automatic: true });
+    showChrome();
+    scheduleSlideshow();
+  }, listenerOptions);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopSlideshow(); }, listenerOptions);
+  window.addEventListener("pagehide", stopSlideshow, listenerOptions);
   thumbnailTrack.addEventListener("click", (event) => {
     const button = event.target.closest(".gallery-image-pager-thumbnail");
     if (button) goTo(Number(button.dataset.index));
   }, listenerOptions);
   thumbnails.addEventListener("scroll", () => {
     renderThumbnails();
-    showChrome();
+    if (!slideshowPlaying) showChrome();
   }, { ...listenerOptions, passive: true });
   window.addEventListener("resize", renderThumbnails, listenerOptions);
   counter.addEventListener("click", () => jumpPanel.hidden ? openJump() : closeJump(), listenerOptions);
@@ -4834,9 +5154,13 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "Enter" && !event.defaultPrevented) { event.preventDefault(); submitJump(); }
   }, listenerOptions);
-  zoomOut.addEventListener("click", () => applyZoom(zoomLevel - 0.25), listenerOptions);
-  zoomReset.addEventListener("click", () => applyZoom(1), listenerOptions);
-  zoomIn.addEventListener("click", () => applyZoom(zoomLevel + 0.25), listenerOptions);
+  const changeZoom = (value) => {
+    stopSlideshow();
+    applyZoom(value);
+  };
+  zoomOut.addEventListener("click", () => changeZoom(zoomLevel - 0.25), listenerOptions);
+  zoomReset.addEventListener("click", () => changeZoom(1), listenerOptions);
+  zoomIn.addEventListener("click", () => changeZoom(zoomLevel + 0.25), listenerOptions);
   const fullscreenCurrent = () => !abortController.signal.aborted && overlay.isConnected;
   const fullscreenSupported = () => Boolean(document.fullscreenEnabled && overlay.requestFullscreen && document.exitFullscreen);
   const updateFullscreen = () => {
@@ -4898,9 +5222,11 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     imageRetry.disabled = false;
     imageRetry.textContent = "重试当前图片";
     stage.removeAttribute("aria-busy");
-    applyZoom(zoomLevel, { preserveScroll: preserveImageScroll });
+    applyZoom(zoomLevel, { preserveScroll: preserveImageScroll, revealControls: !slideshowPlaying });
     preserveImageScroll = false;
     restoreRetryFocus = false;
+    syncSlideshow();
+    scheduleSlideshow();
   }, listenerOptions);
   imageNode.addEventListener("error", async () => {
     if (!currentImage() || !imageNode.complete || imageNode.naturalWidth) return;
@@ -4927,7 +5253,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       if (!isCurrent()) return;
     }
     const returnFocus = restoreRetryFocus && document.activeElement === stage;
+    const slideshowFocus = document.activeElement === slideshow;
     imageFailed = true;
+    stopSlideshow();
+    syncSlideshow();
     imageRetrying = false;
     imageRetryRequest = null;
     preserveImageScroll = false;
@@ -4938,7 +5267,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     imageRetry.textContent = "重试当前图片";
     stage.removeAttribute("aria-busy");
     showChrome();
-    if (returnFocus) imageRetry.focus({ preventScroll: true });
+    if (returnFocus || slideshowFocus) imageRetry.focus({ preventScroll: true });
   }, listenerOptions);
   imageRetry.addEventListener("click", () => {
     if (!currentImage() || !imageFailed || imageRetrying) return;
@@ -4956,6 +5285,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   }, listenerOptions);
   range.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
+    stopSlideshow();
     rangeScrubbing = true;
     range.setPointerCapture?.(event.pointerId);
     previewRangeIndex(Number(range.value) - 1);
@@ -4998,16 +5328,18 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   }, listenerOptions);
   stage.addEventListener("dblclick", (event) => {
     event.preventDefault();
-    applyZoom(zoomLevel > 1 ? 1 : 2);
+    changeZoom(zoomLevel > 1 ? 1 : 2);
   }, listenerOptions);
   overlay.addEventListener("pointermove", showChrome, listenerOptions);
   overlay.addEventListener("pointerdown", (event) => {
+    if (overview.isOpen()) return;
     const target = event.target instanceof Element ? event.target : null;
     if (target?.closest(".gallery-image-pager-top, .gallery-image-pager-controls, .gallery-image-pager-error, .gallery-image-pager-jump")) return;
     pointerStart = { x: event.clientX, y: event.clientY };
     showChrome();
   }, listenerOptions);
   overlay.addEventListener("pointerup", (event) => {
+    if (overview.isOpen()) return;
     const target = event.target instanceof Element ? event.target : null;
     if (!pointerStart || target?.closest(".gallery-image-pager-top, .gallery-image-pager-controls, .gallery-image-pager-error, .gallery-image-pager-jump")) return;
     const dy = event.clientY - pointerStart.y;
@@ -5019,6 +5351,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     else goTo(currentIndex + (dy < 0 ? 1 : -1));
   }, listenerOptions);
   overlay.addEventListener("wheel", (event) => {
+    if (overview.isOpen()) return;
     if (event.ctrlKey || event.metaKey) return;
     if (thumbnails.contains(event.target)) {
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? thumbnails.clientWidth : 1;
@@ -5038,14 +5371,15 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
     goTo(currentIndex + (event.deltaY > 0 ? 1 : -1));
   }, { signal: abortController.signal, passive: false });
   document.addEventListener("focusin", (event) => {
-    if (!overlay.contains(event.target)) stage.focus({ preventScroll: true });
+    if (overview.isOpen() && !overview.panel.contains(event.target)) overview.focus();
+    else if (!overlay.contains(event.target)) stage.focus({ preventScroll: true });
     else showChrome();
   }, listenerOptions);
   document.addEventListener("keydown", (event) => {
     if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
     if (event.key === "Tab") {
       showChrome();
-      const focusRoot = jumpPanel.hidden ? overlay : jumpPanel;
+      const focusRoot = overview.isOpen() ? overview.panel : jumpPanel.hidden ? overlay : jumpPanel;
       const targets = [...focusRoot.querySelectorAll("button, input, [href], [tabindex]")]
         .filter(node => !node.disabled && node.tabIndex >= 0 && node.getClientRects().length);
       const first = targets[0] || stage;
@@ -5059,9 +5393,10 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       }
     } else if (event.key === "Escape") {
       event.preventDefault();
-      if (!jumpPanel.hidden) closeJump();
+      if (overview.isOpen()) overview.close();
+      else if (!jumpPanel.hidden) closeJump();
       else closeGalleryImagePager();
-    } else if (jumpPanel.contains(event.target)) {
+    } else if (overview.isOpen() || jumpPanel.contains(event.target)) {
       return;
     } else if (zoomLevel > 1 && imageNode.naturalWidth && event.target === stage
         && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "PageDown", "PageUp"].includes(event.key)) {
@@ -5081,13 +5416,13 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
       goTo(list.length - 1);
     } else if (["+", "="].includes(event.key)) {
       event.preventDefault();
-      applyZoom(zoomLevel + 0.25);
+      changeZoom(zoomLevel + 0.25);
     } else if (event.key === "-") {
       event.preventDefault();
-      applyZoom(zoomLevel - 0.25);
+      changeZoom(zoomLevel - 0.25);
     } else if (event.key === "0") {
       event.preventDefault();
-      applyZoom(1);
+      changeZoom(1);
     } else if (event.key.toLowerCase() === "f") {
       event.preventDefault();
       fullscreen.click();
@@ -5096,6 +5431,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
 
   galleryPagerCleanup = () => {
     window.clearTimeout(hideTimer);
+    stopSlideshow();
     pendingRangeImages = null;
     stopZoomAnchor();
     finishImagePan();
@@ -5113,6 +5449,7 @@ function openGalleryImagePager(images = [], startIndex = 0, title = "", meta = "
   document.body.style.overflow = "hidden";
   document.body.append(overlay);
   update();
+  if (currentIndex > 0) options.rememberPosition?.(Number(list[currentIndex]?.index || currentIndex + 1));
   stage.focus({ preventScroll: true });
   if (options.deferFullImages) {
     catalog.hidden = false;
@@ -5164,7 +5501,8 @@ function createGalleryReaderFigure(image, index, list, options = {}) {
       Math.min(currentList.length - 1, fallbackIndex),
       options.title || "",
       options.meta || "",
-      { sourceKey, fullImages: options.fullImages, refreshArchive: options.refreshArchive, saveCover: options.saveCover }
+      { sourceKey, totalCount, fullImages: options.fullImages, refreshArchive: options.refreshArchive, saveCover: options.saveCover,
+        rememberPosition: options.rememberPosition }
     );
   };
   figure.addEventListener("click", openImage);
@@ -5265,8 +5603,72 @@ function photoReaderOptions(album) {
   const albumId = album.id;
   return { albumId, title: album.title, meta: photoReaderMeta(album), totalCount: Number(album.imageCount || album.images?.length || 0),
     sourceKey: albumId ? `photo:${albumId}` : "", previewUrl: album.coverUrl, fullImages: () => fullPhotoReaderImages({ id: albumId }),
+    rememberPosition: photoPositionRecorder(album),
     refreshArchive: album.imageRevision ? (isCurrent, beforeReplace) => getGalleryPage().refreshPhotoReaderArchive(albumId, album.imageRevision, isCurrent, beforeReplace) : null,
     saveCover: album.coverEditable && ["local", "lan"].includes(state.accessMode) ? (image, signal) => savePhotoReaderCover(albumId, image, signal) : null };
+}
+
+function photoPositionRecorder(album) {
+  const remember = photoReadingPositions.recorder(album);
+  return remember && (page => {
+    if (isCurrentPhotoReadingArchive(album)) remember(page);
+  });
+}
+
+function isCurrentPhotoReadingArchive(album) {
+  const current = state.gallery.album;
+  return state.activeView === "gallery" && current?.id === album.id
+    && (current.imageRevision || current.archiveIdentity) === (album.imageRevision || album.archiveIdentity);
+}
+
+function createPhotoResumeControl(album) {
+  const position = photoReadingPositions.positionFor(album);
+  if (!position) return null;
+  const control = document.createElement("div");
+  control.className = "gallery-photo-resume";
+  const status = document.createElement("span");
+  status.className = "gallery-reader-album-status";
+  status.setAttribute("role", "status");
+  if (position.expired) {
+    status.textContent = "套图已变化，已清除旧阅读位置";
+    control.append(status);
+    return control;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "text-button gallery-photo-resume-button";
+  button.textContent = "继续上次阅读";
+  let pending = false;
+  const isCurrent = () => control.isConnected && isCurrentPhotoReadingArchive(album) && !galleryPagerCleanup;
+  button.addEventListener("click", async () => {
+    if (pending || !isCurrent()) return;
+    const saved = photoReadingPositions.positionFor(album);
+    if (!saved || saved.expired) { status.textContent = "阅读位置已更新"; return; }
+    pending = true;
+    button.setAttribute("aria-disabled", "true");
+    status.textContent = "";
+    const options = photoReaderOptions(album);
+    try {
+      let images = state.gallery.album.images;
+      if (saved.page > images.length) {
+        status.textContent = "正在读取阅读位置…";
+        images = await options.fullImages();
+      }
+      if (!isCurrent()) return;
+      const index = images.findIndex(image => Number(image?.index) === saved.page && image.url);
+      if (index < 0) throw new Error("无法定位到上次阅读的图片");
+      status.textContent = "";
+      openGalleryImagePager(images, index, options.title, options.meta, options);
+    } catch (error) {
+      if (isCurrent()) status.textContent = error.message || "阅读位置读取失败，请重试";
+    } finally {
+      pending = false;
+      button.removeAttribute("aria-disabled");
+      if (status.textContent === "正在读取阅读位置…") status.textContent = "";
+    }
+  });
+  control.append(button, status);
+  return control;
 }
 
 async function savePhotoReaderCover(albumId, image, signal) {
@@ -5961,12 +6363,13 @@ function renderGalleryView(options = {}) {
   if (!scrollAnchor) galleryScrollRestoreGeneration += 1;
   const searchValueToRestore = activeGallerySearchValue();
   resetGalleryRenderedState();
+  watchlist?.close({ restoreFocus: false });
 
   els.workGrid.innerHTML = "";
   const shell = document.createElement("section");
   shell.className = "gallery-shell";
   const imageReaderOpen = Boolean(state.gallery.album || state.gallery.comic);
-  const seriesPageOpen = ["media", "tv"].includes(state.gallery.mode) && state.gallery.person !== "all" && !state.gallery.media;
+  const seriesPageOpen = ["media", "tv"].includes(state.gallery.mode) && hasSelectedTvSeries() && !state.gallery.media;
   if (["photo", "media", "movie"].includes(state.gallery.mode) && !imageReaderOpen && !state.gallery.media && !seriesPageOpen) {
     shell.classList.add("gallery-browse-shell");
     if (state.gallery.mode !== "photo") shell.classList.add("gallery-media-browse-shell");
@@ -5976,7 +6379,10 @@ function renderGalleryView(options = {}) {
     if (state.gallery.photoView === "collections" && !state.gallery.photoCollection) shell.classList.add("gallery-photo-catalog-shell");
   }
   if (imageReaderOpen) shell.classList.add("gallery-reader-shell");
-  else if (seriesPageOpen) shell.classList.add("gallery-series-shell");
+  else if (seriesPageOpen) {
+    shell.classList.add("gallery-series-shell");
+    shell.append(renderSeriesEpisodeFilter());
+  }
   else shell.append(renderGalleryControls({ searchValue: searchValueToRestore }));
 
   const content = document.createElement("div");

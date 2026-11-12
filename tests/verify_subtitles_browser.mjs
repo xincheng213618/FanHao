@@ -287,6 +287,51 @@ try {
   assert.equal(await page.locator("video").evaluate((video) => video.currentTime), 22, "direct drawer seeks retain the original subtitle timebase");
   await page.getByRole("button", { name: "关闭播放器", exact: true }).click();
   assert.deepEqual(await page.evaluate(() => window.fixtureObjectUrls), { created: 0, revoked: 0 }, "subtitle loading uses server URLs and leaves no object URLs to leak");
+  const preview = await browser.newPage();
+  try {
+    const writes = [];
+    preview.on("request", (request) => {
+      if (request.method() === "POST" && new URL(request.url()).pathname.startsWith("/api/progress/")) writes.push(request.url());
+    });
+    await preview.goto(`${address}/player.html?workId=subtitle-work&videoId=subtitle-a&preview=1&t=0`);
+    await preview.waitForFunction(() => document.querySelector("video")?.readyState >= 2);
+    assert.equal(await preview.locator("#toggleSidebarButton").getAttribute("aria-expanded"), "false");
+    await preview.locator("video").evaluate((video) => { video.pause(); video.currentTime = 6; });
+    await preview.waitForFunction(() => document.querySelector(".fanhao-subtitle-cues")?.textContent.includes("中文字幕测试"));
+    await preview.goto(`${address}/player.html?workId=subtitle-work&videoId=missing&preview=1&t=0`);
+    await preview.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading"));
+    assert.equal(await preview.locator("#playerVideo").getAttribute("src"), null, "preview must not substitute another segment for a missing file");
+    assert.deepEqual(writes, [], "preview must not write viewing progress, including on exit");
+  } finally { await preview.close(); }
+
+  const continuous = await browser.newPage();
+  continuous.on("pageerror", error => errors.push(error.message));
+  try {
+    await continuous.goto(`${address}/player.html?workId=subtitle-work`);
+    const video = continuous.locator("#playerVideo");
+    await continuous.waitForFunction(() => {
+      const media = document.querySelector("#playerVideo");
+      return media?.readyState >= 2 && !media.paused;
+    });
+    const autoNext = continuous.getByRole("checkbox", { name: "播完自动播放下一个文件" });
+    await autoNext.check();
+    const nextFileReads = () => requests.filter(({ url }) => url.pathname === "/api/playinfo/subtitle-b").length;
+    const beforeAutoNext = nextFileReads();
+    await video.evaluate(media => { media.currentTime = media.duration; });
+    await continuous.waitForFunction(() => {
+      const media = document.querySelector("#playerVideo");
+      return media.ended && !media.seeking;
+    });
+    assert.equal(nextFileReads(), beforeAutoNext, "a native terminal seek must not advance the file list");
+    const nextFile = continuous.waitForResponse(response => response.url().endsWith("/api/playinfo/subtitle-b"));
+    await video.evaluate(media => { media.currentTime = media.duration - 1; });
+    await autoNext.evaluate(input => input.blur());
+    if (await video.evaluate(media => media.paused)) await continuous.keyboard.press("k");
+    await nextFile;
+    await continuous.waitForFunction(() => document.querySelector("#playerFilePosition")?.textContent === "2 / 2");
+    assert.equal(nextFileReads(), beforeAutoNext + 1, "a decoded natural ending advances exactly one file");
+    console.log("PASS decoded MP4 opt-in autoplay only advances after natural ending");
+  } finally { await continuous.close(); }
   assert.deepEqual(errors, []);
   assert(requests.some(({ url }) => url.pathname.includes("/subtitles/vtt/en") && url.searchParams.get("offsetSeconds") === "-20"));
   console.log("Subtitle browser checks passed: both players render real VTT cues on synthetic media, safe Chinese auto-selection, off/manual tracks, online search/download, original-byte upload, download, retry, cancellation, file switching, 390px panel and segmented seek offsets.");

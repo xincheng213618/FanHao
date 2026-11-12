@@ -1,4 +1,4 @@
-import { createTxtFormatTool } from "./txt-format-tool.js";
+import { createTxtFormatTool } from "./txt-format-tool.js?v=20261113-txt-append-01";
 
 const GAMES = [
   {

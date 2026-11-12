@@ -8,42 +8,20 @@ const VERSION_FILTERS = [
 const QUALITY_FILTERS = [["quality4k", "4K"], ["quality1080p", "1080p"], ["quality720p", "720p"]];
 const FORMAT_FILTERS = [["formatMp4", "MP4"], ["formatMkv", "MKV"], ["formatWmv", "WMV"]];
 export const EDITION_FILTERS = [...VERSION_FILTERS, ...QUALITY_FILTERS, ...FORMAT_FILTERS];
-const CLASSIFICATION_LABELS = new Map([["ltx", "LTX"], ["ltx-local", "LTX 本地"], ...[...QUALITY_FILTERS, ...FORMAT_FILTERS].map(([, label]) => [label.toLowerCase(), label])]);
+const CLASSIFICATION_FILTERS = new Map([["all", ""], ["ltx", "ltx"], ["ltx-local", "ltxLocal"],
+  ...[...QUALITY_FILTERS, ...FORMAT_FILTERS].map(([filter, label]) => [label.toLowerCase(), filter])]);
 
 const editionLabels = new Map(EDITION_FILTERS);
 
 export function classificationQuery(key, query = "") {
   const normalized = String(key || "").toLowerCase();
-  return CLASSIFICATION_LABELS.has(normalized) ? `class:${normalized}${query ? ` ${query}` : ""}` : "";
+  return CLASSIFICATION_FILTERS.has(normalized) ? `class:${normalized}${query ? ` ${query}` : ""}` : "";
 }
 
 export function parseClassificationQuery(value) {
   const match = /^class:(\S+)(?:\s+([\s\S]+))?$/i.exec(String(value || "").trim());
   const key = match?.[1].toLowerCase();
-  const label = CLASSIFICATION_LABELS.get(key);
-  return label ? { key, label, query: match[2] || "" } : null;
-}
-
-function classificationHref(key) {
-  const params = new URLSearchParams(globalThis.location?.search || "");
-  const target = new URLSearchParams({ classification: key });
-  for (const name of ["client", "returnTo"]) if (params.has(name)) target.set(name, params.get(name));
-  return `/fanhao?${target}`;
-}
-
-export function createClassificationNav(active) {
-  const nav = document.createElement("nav");
-  nav.className = "work-classification-nav";
-  nav.setAttribute("aria-label", "媒体分类");
-  for (const [key, label] of CLASSIFICATION_LABELS) {
-    const link = document.createElement("a");
-    link.className = `browse-trait-chip${active === key ? " active" : ""}`;
-    link.href = classificationHref(key);
-    link.textContent = label;
-    if (active === key) link.setAttribute("aria-current", "page");
-    nav.append(link);
-  }
-  return nav;
+  return CLASSIFICATION_FILTERS.has(key) ? { key, filter: CLASSIFICATION_FILTERS.get(key), query: match[2] || "" } : null;
 }
 
 export function tagFilterValue(name) {
@@ -89,7 +67,7 @@ export function loadedTraitFacets(works = []) {
   };
 }
 
-export function createBrowseTraitControls({ facets, filters = [], toggle, loadedOnly = false }) {
+export function createBrowseTraitControls({ facets, filters = [], toggle, loadedOnly = false, showResultTotal = true }) {
   const tags = new Map((facets?.tags || []).map((item) => [String(item.name), item]));
   const editions = new Map((facets?.editions || []).filter((item) => editionLabels.has(item.key)).map((item) => [item.key, item]));
   // Keep selected conditions visible even when their intersection has no results.
@@ -103,13 +81,15 @@ export function createBrowseTraitControls({ facets, filters = [], toggle, loaded
   const root = document.createElement("section");
   root.className = "browse-traits";
   root.setAttribute("aria-label", "标签与版本筛选");
-  const note = document.createElement("div");
-  note.className = "browse-traits-note";
-  const total = Math.max(0, Number(facets?.total) || 0).toLocaleString("zh-CN");
-  note.textContent = loadedOnly
-    ? `仅统计已加载的 ${total} 部 · 多个条件同时满足`
-    : `当前结果 ${total} 部 · 多个条件同时满足`;
-  root.append(note);
+  if (showResultTotal || loadedOnly) {
+    const note = document.createElement("div");
+    note.className = "browse-traits-note";
+    const total = Math.max(0, Number(facets?.total) || 0).toLocaleString("zh-CN");
+    note.textContent = showResultTotal
+      ? `${loadedOnly ? "仅统计已加载的" : "当前结果"} ${total} 部 · 多个条件同时满足`
+      : "筛选项仅统计已加载的作品";
+    root.append(note);
+  }
 
   function addRow(label, values) {
     if (!values.length) return;

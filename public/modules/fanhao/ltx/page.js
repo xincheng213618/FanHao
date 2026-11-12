@@ -1,3 +1,5 @@
+import { installFilterViews, writeFilterViewUrl } from "./filter-views.js?v=20261113-ltx-filter-views-01";
+
 const $ = (id) => document.getElementById(id);
 const scope = { header: "db15c80d", sort: "276abc24", side: "e8550fad", avatar: "190f65b8", main: "ff5b15bf", card: "289703c3" };
 const BATCH_SIZE = 60;
@@ -5,6 +7,13 @@ const collator = new Intl.Collator("zh-CN", { numeric: true });
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai"
 });
+const relativeFormatter = new Intl.RelativeTimeFormat("zh-CN", { numeric: "auto" });
+const displayKey = "fanhao.ltx.display";
+const display = { original: true, added: true, detail: true, subtitle: true };
+try {
+  const saved = JSON.parse(localStorage.getItem(displayKey) || "{}");
+  for (const key of Object.keys(display)) if (typeof saved?.[key] === "boolean") display[key] = saved[key];
+} catch { /* Keep the display defaults. */ }
 const iconPaths = {
   people: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2m20 0v-2a4 4 0 0 0-3-4m-2-12a4 4 0 0 1 0 8M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z",
   score: "m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9Z",
@@ -22,16 +31,28 @@ const sortOptions = [
   { id: "size", label: "文件大小", value: (item) => item.maxSize, direction: -1 },
   { id: "code", label: "番号", value: (item) => item.code, direction: 1 }
 ];
-const selected = new Map();
-const directorySetting = "fanhao.ltx.115.directory";
-let visibleLinks = [];
-let downloadRequest = null;
-let feedbackTimer = null;
+const BATCH_PREVIEW_LIMIT = 50;
+const CLIPBOARD_INTERVAL_MS = 2000;
+const copiedBatchUrls = new Set();
+let batchLoading = false;
+let batchReady = false;
+let batchRun = null;
 const state = {
-  items: [], results: [], actors: [], avatars: {},
+  items: [], localItems: [], results: [], actors: [], actorItemCount: 0, avatars: {},
   actor: "", status: "all", sort: "score", direction: -1, shown: 0,
   libraryChecked: false, downloadsChecked: false
 };
+let localCatalogRequest;
+const visibleMedia = new Map();
+let mediaCache = new Map();
+let mediaRequests = 0;
+const mediaObserver = new IntersectionObserver((entries) => {
+  for (const { target, isIntersecting } of entries) {
+    if (isIntersecting) visibleMedia.set(target, target.dataset.code);
+    else visibleMedia.delete(target);
+  }
+  loadVisibleMedia();
+});
 
 function element(tag, className = "", text = "", component) {
   const node = document.createElement(tag);
@@ -82,47 +103,10 @@ async function copyText(text, status, fallback = null) {
       selectText(fallback);
       status.textContent = "已选中文本，可以按 Ctrl+C 复制。";
     } else {
-      status.textContent = "剪贴板不可用，可在完整链接中选中文本。";
+      status.textContent = "剪贴板不可用。";
     }
     return false;
   }
-}
-
-function resourceAnchor(link, text, className, component) {
-  const anchor = element("a", className, text, component);
-  anchor.setAttribute("href", link.url);
-  anchor.target = "_blank";
-  anchor.rel = "noopener noreferrer";
-  anchor.draggable = true;
-  anchor.addEventListener("dragstart", (event) => {
-    if (!event.dataTransfer) return;
-    event.dataTransfer.setData("text/uri-list", link.url);
-    event.dataTransfer.setData("text/plain", link.url);
-    event.dataTransfer.effectAllowed = "link";
-  });
-  return anchor;
-}
-
-function browserHandoff(link, code, text, className, component, status) {
-  const anchor = resourceAnchor(link, text, className, component);
-  const fragment = new URLSearchParams({ code, link: link.url });
-  anchor.href = `/modules/fanhao/ltx/open.html#${fragment}`;
-  anchor.title = "复制完整链接，在新标签页交给 115 浏览器";
-  anchor.addEventListener("click", (event) => {
-    if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
-    // Copy before the native new tab takes focus.
-    const field = element("textarea", "sr-only");
-    field.value = link.url;
-    field.readOnly = true;
-    (status.closest("dialog") || document.body).append(field);
-    field.select();
-    let copied = false;
-    try { copied = document.execCommand("copy"); } catch { /* Use the clipboard API below. */ }
-    field.remove();
-    if (copied) status.textContent = "已复制";
-    else void copyText(link.url, status);
-  });
-  return anchor;
 }
 
 function isResourceLink(link) {
@@ -134,131 +118,202 @@ function isResourceLink(link) {
 const normalize = (text) => String(text || "").normalize("NFKC").trim().toLowerCase();
 const normalizeCode = (text) => normalize(text).replace(/[-_.\s]+/g, "");
 const hasLocal = ({ local }) => Boolean(local.library || local.downloads);
-const isPending = (item) => Boolean(item.pending || item.waiting || item.missing || !item.links.length);
-const hasMediaUrl = (url) => typeof url === "string" && url.startsWith("/media/remote-image?");
-const has115Bridge = () => document.documentElement.dataset.fanhaoLtx115 === "1";
+const isPending = (item) => !item.libraryOnly && Boolean(item.pending || item.waiting || item.missing || !item.links.length);
+const hasMediaUrl = (url) => typeof url === "string" && /^\/media\/(?:remote-image\?|image\/[^/?#]+$)/.test(url);
 
-function dialogDownloadEntries() {
-  if (visibleLinks.length === 1) return visibleLinks;
-  return visibleLinks.filter(({ link }) => selected.has(link.url));
+function searchableItem(item) {
+  const links = item.links.filter(isResourceLink);
+  return {
+    ...item, links, maxSize: Math.max(0, ...links.map(({ size }) => size || 0), item.libraryOnly ? largestLocalSize(item) : 0),
+    searchCode: normalizeCode(item.code),
+    searchText: normalize([item.code, item.title, item.originalTitle, item.maker, ...item.actors, ...(item.genres || [])].join(" "))
+  };
 }
 
-function updateSelection() {
-  $("selectedCount").textContent = String(selected.size);
-  $("showSelected").disabled = selected.size === 0;
-  $("showSelected").setAttribute("aria-label", `已选链接 ${selected.size}`);
-  $("copySelected").disabled = selected.size === 0;
-  $("clearSelected").disabled = selected.size === 0;
-  for (const checkbox of $("linksList").querySelectorAll("input[data-link]")) {
-    checkbox.checked = selected.has(checkbox.dataset.link);
+async function readLibraryJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error("读取本机 LTX 馆藏失败，请重读本地状态。");
+  return response.json();
+}
+
+async function readLocalCatalog() {
+  const params = new URLSearchParams({ q: "class:ltx-local", filter: "localOnly", limit: "24", offset: "0" });
+  const items = new Map();
+  let offset = 0;
+  for (;;) {
+    params.set("offset", String(offset));
+    const { works, total } = await readLibraryJson(`/api/fanhao/search?${params}`);
+    const localWorks = await Promise.all(works.map(({ id }) => readLibraryJson(`/api/works/${encodeURIComponent(id)}`)));
+    for (const { work } of localWorks) {
+      const info = work.infoSummary || {};
+      const code = info.code;
+      const key = normalizeCode(code);
+      if (!key) continue;
+      const flags = work.traits?.flags;
+      const copies = work.videos.filter(({ name, size }) => /\[LTX 本地\]\.[^.]+$/i.test(name) && size > 0)
+        .map(({ id, size }) => ({ videoId: id, source: "library", size, marked: true, ltxLocal: true,
+          hasSidecar: work.videos.length === 1 && flags?.hasSidecar,
+          hasChineseSidecar: work.videos.length === 1 && flags?.hasChineseSidecar }));
+      if (!copies.length) continue;
+      const actor = work.personDisplayName || work.personName;
+      const existing = items.get(key);
+      if (existing) {
+        if (actor && !existing.actors.includes(actor)) existing.actors.push(actor);
+        for (const copy of copies) if (!existing.local.copies.some(({ videoId }) => videoId === copy.videoId)) existing.local.copies.push(copy);
+      } else {
+        items.set(key, { code, title: work.title, actors: actor ? [actor] : [], maker: info.maker,
+          date: info.releaseDate, score: info.rating, votes: info.ratingCount, addedAt: 0,
+          coverUrl: work.coverId ? `/media/image/${encodeURIComponent(work.coverId)}` : "",
+          links: [], libraryOnly: true, local: { downloads: 0, copies } });
+      }
+    }
+    offset += works.length;
+    if (!works.length || offset >= total) break;
   }
-  const ready = has115Bridge();
-  const add = $("addTo115");
-  add.textContent = !ready ? "设置 115 下载" : visibleLinks.length === 1 ? "添加到 115" : "添加选中到 115";
-  add.disabled = ready && (Boolean(downloadRequest) || !dialogDownloadEntries().length);
+  return [...items.values()].map((item) => {
+    const count = item.local.copies.length;
+    Object.assign(item.local, { library: count, marked: count, ltxLocal: count });
+    return searchableItem(item);
+  });
 }
 
-function syncBridgeStatus() {
-  const ready = has115Bridge();
-  const indicator = $("bridgeStatus");
-  indicator.textContent = ready ? "已检测到 115 下载脚本" : "未检测到 FanHao 的 115 下载脚本";
-  indicator.classList.toggle("fanhao-bridge-ready", ready);
-  $("downloadSettings").classList.toggle("fanhao-bridge-ready", ready);
-  updateSelection();
+function loadLocalCatalog() {
+  if (localCatalogRequest) return;
+  const request = readLocalCatalog();
+  localCatalogRequest = request;
+  request.then((items) => {
+    if (localCatalogRequest !== request) return;
+    state.localItems = items;
+    if ($("filter").value === "ltx-local") renderResults();
+  }).catch((error) => {
+    if (localCatalogRequest !== request) return;
+    localCatalogRequest = null;
+    if ($("filter").value === "ltx-local") $("feedback").textContent = error.message;
+  });
 }
-
-function openDownloadSettings() {
-  $("settingsStatus").textContent = "";
-  syncBridgeStatus();
-  if (!$("downloadSettingsDialog").open) $("downloadSettingsDialog").showModal();
+function formatSize(size) {
+  const gib = size / 1024 ** 3;
+  if (gib >= 1024) return `${(gib / 1024).toFixed(2)} TiB`;
+  return gib >= 1 ? `${gib.toFixed(2)} GiB` : `${(size / 1024 ** 2).toFixed(1)} MiB`;
 }
-
-function showDownloadFeedback(status, message, temporary = false) {
-  status.textContent = message;
-  if (status !== $("downloadFeedback")) return;
-  clearTimeout(feedbackTimer);
-  if (temporary) feedbackTimer = setTimeout(() => { status.textContent = ""; }, 8000);
-}
-
-function submitTo115(entries, status) {
-  if (!has115Bridge()) { openDownloadSettings(); return; }
-  if (downloadRequest) { showDownloadFeedback(status, "上一批链接正在提交，请稍候。"); return; }
-  const urls = [...new Set(entries.map(({ link }) => link.url))];
-  if (!urls.length || urls.length > 50) {
-    showDownloadFeedback(status, "请勾选 1 至 50 条链接。", true);
-    return;
-  }
-  const directory = $("downloadDirectory");
-  if (!directory.checkValidity()) {
-    openDownloadSettings();
-    directory.reportValidity();
-    return;
-  }
-  const id = crypto.randomUUID();
-  const timer = setTimeout(() => {
-    if (downloadRequest?.id !== id) return;
-    downloadRequest = null;
-    updateSelection();
-    showDownloadFeedback(status, "脚本未返回提交结果。请先在 115 云下载核对任务再重试。", true);
-  }, 25000);
-  downloadRequest = { id, timer, status };
-  updateSelection();
-  showDownloadFeedback(status, "正在提交到 115…");
-  document.dispatchEvent(new CustomEvent("fanhao:ltx115:add", {
-    detail: JSON.stringify({ id, urls, dir: directory.value })
-  }));
-}
-
-document.addEventListener("fanhao:ltx115:result", (event) => {
-  let result;
-  try { result = JSON.parse(event.detail); } catch { return; }
-  if (!downloadRequest || result?.id !== downloadRequest.id || typeof result.message !== "string") return;
-  const { timer, status } = downloadRequest;
-  clearTimeout(timer);
-  downloadRequest = null;
-  updateSelection();
-  showDownloadFeedback(status, result.message, true);
-});
 
 function linkLabel(link) {
-  return link.type === "magnet" ? "磁力" : `ed2k · ${(link.size / 1024 ** 3).toFixed(1)}G`;
+  return link.type === "magnet" ? "磁力" : `eD2k · ${formatSize(link.size)}`;
 }
 
-function linkPanel(link, code, index) {
-  const group = element("section", "fanhao-link");
-  const header = element("div", "fanhao-link-header");
-  const label = element("label");
-  const checkbox = element("input");
-  checkbox.type = "checkbox";
-  checkbox.dataset.link = link.url;
-  checkbox.setAttribute("aria-label", `勾选 ${code} 的链接 ${index + 1}`);
-  checkbox.addEventListener("change", () => {
-    if (checkbox.checked) selected.set(link.url, { link, code });
-    else selected.delete(link.url);
-    updateSelection();
-  });
-  label.append(checkbox, ` ${code} · ${linkLabel(link)}`);
-  header.append(label);
-  if (link.sizeMatch) header.append(element("span", "fanhao-same-size", "本地同字节 · 待校验"));
-  const anchor = resourceAnchor(link, link.url, "fanhao-link-address");
-  anchor.title = "在新窗口打开或拖拽完整地址";
-  const actions = element("div", "fanhao-link-actions");
-  actions.append(
-    button("选中文本", () => selectText(anchor), "fanhao-pill"),
-    button("复制", () => copyText(link.url, $("dialogStatus"), anchor), "fanhao-pill"),
-    browserHandoff(link, code, "在 115 浏览器打开", "fanhao-pill", undefined, $("dialogStatus"))
-  );
-  group.append(header, anchor, actions);
-  return group;
+const hasSubtitledLtx = (item) => item.links.some(({ subtitledLtx }) => subtitledLtx);
+
+function linksForSubtitleFilter(item, filter) {
+  return filter === "ltx-c" || (filter === "available" && !item.subtitleUrl)
+    ? item.links.filter(({ subtitledLtx }) => subtitledLtx) : item.links;
 }
 
-function openLinks(entries, title) {
-  visibleLinks = entries;
-  $("linksTitle").textContent = title;
-  $("dialogStatus").textContent = "";
-  $("linksList").replaceChildren(...entries.map(({ link, code }, index) => linkPanel(link, code, index)));
-  updateSelection();
-  if (!$("linksDialog").open) $("linksDialog").showModal();
+function largestLocalSize(item) {
+  return Math.max(0, ...(item.local.copies ?? []).map(({ size }) => size));
+}
+
+function findBatchLink(item, mode, localSize, candidates) {
+  if (mode === "missing" ? hasLocal(item) : !localSize) return null;
+  if (mode === "unmarked" && (item.local.marked || candidates.some(({ sizeMatch }) => sizeMatch))) return null;
+  const links = candidates.filter(({ size, sizeMatch }) => !sizeMatch &&
+    (mode === "missing" || size > (mode === "larger" ? localSize : 0)));
+  return links.reduce((best, next) => !best || (next.size || 0) > (best.size || 0) ? next : best, null);
+}
+
+function batchCandidates(mode) {
+  const seen = new Set();
+  const candidates = [];
+  const checked = state.libraryChecked && state.downloadsChecked;
+  const subtitle = $("subtitleFilter").value;
+  if (mode === "missing" && !checked) return candidates;
+  for (const item of state.results) {
+    const localSize = largestLocalSize(item);
+    const link = findBatchLink(item, mode, localSize, linksForSubtitleFilter(item, subtitle));
+    if (!link || copiedBatchUrls.has(link.url) || seen.has(link.url)) continue;
+    seen.add(link.url);
+    candidates.push({ code: item.code, link, localSize });
+  }
+  return candidates;
+}
+
+function renderBatch() {
+  const mode = $("batchMode").value;
+  const candidates = batchReady ? batchCandidates(mode) : [];
+  const preview = candidates.slice(0, BATCH_PREVIEW_LIMIT);
+  $("batchSummary").textContent = batchLoading ? "正在重读本地状态…" :
+    !batchReady ? "本地状态读取失败，请关闭后重试。" :
+    mode === "missing" && !(state.libraryChecked && state.downloadsChecked) ? "本地检查不完整，暂时无法确认哪些作品没有本地视频。" :
+    `当前筛选 ${state.results.length} 部 · 可添加 ${candidates.length} 条${candidates.length > preview.length ? ` · 预览前 ${preview.length} 条` : ""}${state.libraryChecked && state.downloadsChecked ? "" : " · 部分本地目录不可读"}`;
+  $("batchList").replaceChildren(...preview.map(({ code, link, localSize }) => {
+    const row = element("li");
+    row.append(element("strong", "", code), element("span", "",
+      `${localSize ? `本地最大 ${formatSize(localSize)}` : "本地无视频"} · 远端 ${linkLabel(link)}${link.subtitledLtx ? " · LTX-C" : ""}`));
+    return row;
+  }));
+  $("batchMode").disabled = !batchReady || Boolean(batchRun);
+  const submit = $("submitBatch");
+  submit.disabled = Boolean(batchRun) || !candidates.length;
+  submit.textContent = candidates.length ? `逐条添加 ${candidates.length} 条` : "逐条添加";
+  $("stopBatch").hidden = !batchRun;
+  $("stopBatch").disabled = Boolean(batchRun?.stopped);
+  return candidates;
+}
+
+async function openBatchLinks() {
+  if (!batchRun) $("batchStatus").textContent = "";
+  $("batchDialog").showModal();
+  if (batchLoading || batchRun) { renderBatch(); return; }
+  if ($("filter").value === "remote-larger") $("batchMode").value = "larger";
+  batchReady = false;
+  batchLoading = true;
+  renderBatch();
+  batchReady = await load({ refresh: true });
+  batchLoading = false;
+  renderBatch();
+}
+
+function stopBatch() {
+  if (!batchRun) return;
+  batchRun.stopped = true;
+  batchRun.resume?.();
+  $("stopBatch").disabled = true;
+}
+
+async function submitBatch() {
+  const candidates = renderBatch();
+  if ($("submitBatch").disabled) return;
+  const run = { stopped: false, resume: null };
+  batchRun = run;
+  renderBatch();
+  const status = $("batchStatus");
+  const total = candidates.length;
+  let copied = 0;
+  let reason = "";
+  for (const { code, link } of candidates) {
+    if (run.stopped || !$("batchDialog").open) break;
+    if (!document.hasFocus()) {
+      reason = "页面失去焦点。回到本页可继续剩余链接。";
+      break;
+    }
+    status.textContent = `正在处理 ${code} · ${copied + 1}/${total}`;
+    if (!await copyText(link.url, status)) {
+      reason = "浏览器未能写入剪贴板。可继续剩余链接。";
+      break;
+    }
+    copiedBatchUrls.add(link.url);
+    copied++;
+    status.textContent = `已写入剪贴板 ${copied}/${total} 条`;
+    if (copied < total && !run.stopped) {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, CLIPBOARD_INTERVAL_MS);
+        run.resume = () => { clearTimeout(timer); resolve(); };
+      });
+      run.resume = null;
+    }
+  }
+  batchRun = null;
+  renderBatch();
+  status.textContent = `已写入剪贴板 ${copied}/${total} 条。${reason || (copied < total ? "已停止，可继续剩余链接。" : "请在 115 查看接收结果。")}`;
 }
 
 function appendImage(parent, url, alt, cover = false) {
@@ -283,8 +338,7 @@ function showCover(item) {
 function setActor(actor) {
   state.actor = actor;
   toggleActors(false);
-  renderActors();
-  renderResults(true);
+  updateFilters();
 }
 
 function localStateView(item) {
@@ -312,6 +366,65 @@ function localStateView(item) {
   return row;
 }
 
+function renderLocalMedia(row, copies, pending = false) {
+  row.replaceChildren(...copies.map(({ source, size, width, height, hasSidecar, hasChineseSidecar }) => {
+    const location = source === "library" ? "馆藏" : "下载盘";
+    const resolution = width && height ? `${width}×${height}` : pending ? "读取分辨率…" : "分辨率暂不可读";
+    const copy = element("div", "", `${location} · ${resolution} · ${formatSize(size)}`);
+    if (display.subtitle && (hasSidecar || hasChineseSidecar)) {
+      const badge = element("span", "fanhao-local-subtitle", hasChineseSidecar ? "外挂中字" : "外挂字幕");
+      badge.title = hasChineseSidecar ? "这份馆藏视频有已入库的独立中文字幕文件" : "这份馆藏视频有已入库的独立字幕文件";
+      copy.append(" ", badge);
+    }
+    return copy;
+  }));
+  if (!copies.length) row.textContent = "本地文件已无法读取";
+}
+
+function localMediaView(item) {
+  const row = element("div", "fanhao-local-media");
+  const cached = mediaCache.get(item.code);
+  renderLocalMedia(row, cached ?? item.local.copies, !cached);
+  if (!cached) {
+    row.dataset.code = item.code;
+    mediaObserver.observe(row);
+  }
+  return row;
+}
+
+function loadVisibleMedia() {
+  for (const [row, code] of visibleMedia) {
+    if (mediaRequests >= 3) return;
+    visibleMedia.delete(row);
+    mediaObserver.unobserve(row);
+    if (!row.isConnected) continue;
+    const cached = mediaCache.get(code);
+    if (cached) {
+      renderLocalMedia(row, cached);
+      continue;
+    }
+    const cache = mediaCache;
+    mediaRequests++;
+    const item = state.results.find((item) => item.code === code);
+    const media = item?.libraryOnly
+      ? Promise.all(item.local.copies.map(async (copy) => {
+        const info = await readLibraryJson(`/api/playinfo/${encodeURIComponent(copy.videoId)}`).catch(() => ({}));
+        return { ...copy, width: info.width, height: info.height };
+      }))
+      : readLibraryJson(`/api/fanhao/ltx/local-media?${new URLSearchParams({ code })}`).then(({ copies }) => copies);
+    media
+      .then((copies) => {
+        cache.set(code, copies);
+        if (row.isConnected) renderLocalMedia(row, copies);
+      }).catch(() => {
+        if (row.isConnected && item) renderLocalMedia(row, item.local.copies);
+      }).finally(() => {
+        mediaRequests--;
+        loadVisibleMedia();
+      });
+  }
+}
+
 function createCover(item) {
   const cover = element("div", "cover", "", "card");
   cover.append(element("span", "ph", "", "card"));
@@ -335,39 +448,77 @@ function createCover(item) {
 }
 
 function createActions(item) {
+  if (item.libraryOnly) return document.createDocumentFragment();
   const actions = element("div", "actions expanded fanhao-card-actions", "", "card");
-  const [link] = item.links;
-  if (!link) {
+  if (!item.links.length) {
     const pending = button("待确认", () => {}, "btn", "card");
     pending.disabled = true;
     actions.append(pending);
     return actions;
   }
-  const entries = item.links.map((entry) => ({ link: entry, code: item.code }));
-  const open = () => openLinks(entries, `${item.code} · 完整下载链接`);
-  const primary = resourceAnchor(link, `复制 ${linkLabel(link)}`, "btn copy-btn", "card");
-  primary.removeAttribute("target");
-  primary.removeAttribute("rel");
-  primary.title = "直接打开原始链接";
-  primary.setAttribute("aria-label", `直接打开 ${item.code} 的${link.type === "magnet" ? "磁力" : " eD2k"}链接`);
-  const more = button("添加到下载", () => {
-    if (has115Bridge() && entries.length === 1) submitTo115(entries, $("downloadFeedback"));
-    else {
-      open();
-      $("dialogStatus").textContent = has115Bridge() ? "请勾选需要添加到 115 的链接。" : "尚未连接下载脚本，可点「设置 115 下载」。";
+  for (const link of item.links) {
+    const action = element("a", "btn copy-btn", "", "card");
+    action.href = link.url;
+    action.target = "_blank";
+    action.rel = "noopener noreferrer";
+    action.title = link.sizeMatch ? "在新标签页打开，本地已有同体积文件" : "在新标签页打开，由 115 浏览器接管";
+    action.addEventListener("dragstart", (event) => {
+      if (!event.dataTransfer) return;
+      event.dataTransfer.setData("text/uri-list", link.url);
+      event.dataTransfer.setData("text/plain", link.url);
+      event.dataTransfer.effectAllowed = "link";
+    });
+    action.append(element("span", "", `打开 ${linkLabel(link)}`));
+    if (display.subtitle && link.subtitledLtx) {
+      const badge = element("small", "", "LTX-C", "card");
+      badge.title = "资源文件名标有 LTX 和中字";
+      action.append(badge);
     }
-  }, "btn add-btn", "card");
-  more.title = "提交到 115 云下载或查看完整链接";
-  more.setAttribute("aria-label", `添加 ${item.code} 到下载`);
-  actions.append(primary, more);
+    actions.append(action);
+  }
   return actions;
+}
+
+function cardLink(url, label, title, className = "fanhao-card-link") {
+  const anchor = element("a", className, label);
+  anchor.href = url;
+  anchor.title = title;
+  anchor.setAttribute("aria-label", title);
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  return anchor;
+}
+
+function cardSources(item) {
+  const sources = element("div", "fanhao-card-sources");
+  if (display.added && item.addedAt > 0 && Number.isFinite(new Date(item.addedAt).valueOf())) {
+    const elapsed = Math.max(0, Date.now() - item.addedAt);
+    const [unit, length] = elapsed >= 86_400_000 ? ["day", 86_400_000] : ["hour", 3_600_000];
+    const time = element("time", "fanhao-added", elapsed < 3_600_000 ? "刚入库" : relativeFormatter.format(-Math.floor(elapsed / length), unit));
+    time.dateTime = new Date(item.addedAt).toISOString();
+    time.title = `LTX 入库时间 ${dateFormatter.format(item.addedAt)}`;
+    sources.append(time);
+  }
+  if (display.detail) {
+    const lookup = `https://javdb.com/search?${new URLSearchParams({ q: item.code, f: "all" })}`;
+    sources.append(cardLink(item.detailUrl || lookup, item.detailUrl ? "详情 ↗" : "查详情 ↗", `查看 ${item.code} 的作品资料`));
+  }
+  if (display.subtitle && item.subtitleUrl) {
+    const subtitle = cardLink(item.subtitleUrl, "字", `下载 ${item.code} 的中文字幕（SubtitleCat）`, "fanhao-subtitle-badge");
+    subtitle.download = `${item.code}.srt`;
+    sources.append(subtitle);
+  } else if (display.subtitle) {
+    sources.append(cardLink(`https://www.subtitlecat.com/index.php?${new URLSearchParams({ search: item.code })}`,
+      "找字幕 ↗", `在 SubtitleCat 查找 ${item.code} 的字幕`));
+  }
+  return sources;
 }
 
 function cardView(item) {
   const card = element("article", "card", "", "card");
   card.setAttribute(`data-v-${scope.main}`, "");
   const body = element("div", "body", "", "card");
-  const title = element("h3", "title", item.title || item.code, "card");
+  const title = element("h3", "title", (display.original && item.originalTitle) || item.title || item.code, "card");
   title.title = title.textContent;
   const tags = element("div", "tags", "", "card");
   for (const actor of item.actors) tags.append(button(actor, () => setActor(actor), "tag", "card"));
@@ -377,7 +528,9 @@ function cardView(item) {
   const library = element("a", "feedback", "查馆藏", "card");
   library.href = `/fanhao?${new URLSearchParams({ q: item.code })}`;
   sub.append(meta, library);
-  body.append(title, tags, sub, localStateView(item), createActions(item));
+  body.append(title, tags, sub, cardSources(item), localStateView(item));
+  if (item.local.copies?.length) body.append(localMediaView(item));
+  body.append(createActions(item));
   card.append(createCover(item), body);
   return card;
 }
@@ -402,13 +555,30 @@ function renderActors() {
   const nav = $("actors");
   const top = nav.scrollTop;
   const query = normalize($("actorSearch").value);
+  const matching = state.actors.filter(([actor]) => !query || normalize(actor).includes(query));
+  const rows = matching.map(([actor, count]) => actorRow(actor, actor, count));
+  if (!query && state.actor && !state.actors.some(([actor]) => actor === state.actor)) {
+    rows.unshift(actorRow(state.actor, state.actor, 0));
+  }
+  $("actorCount").textContent = `${matching.length} 人`;
   nav.replaceChildren(
-    actorRow("", "全部", state.items.length),
-    ...state.actors.filter(([actor]) => !query || normalize(actor).includes(query)).map(([actor, count]) => actorRow(actor, actor, count))
+    actorRow("", "全部", state.actorItemCount),
+    ...rows
   );
   nav.scrollTop = top;
   $("actorChip").hidden = !state.actor;
   $("actorChip").textContent = state.actor ? `${state.actor} ×` : "";
+}
+
+function updateActorFacets(items) {
+  const counts = new Map();
+  for (const { actors } of items) {
+    for (const actor of new Set(actors)) counts.set(actor, (counts.get(actor) || 0) + 1);
+  }
+  state.actorItemCount = items.length;
+  state.actors = [...counts].sort(([left, leftCount], [right, rightCount]) =>
+    rightCount - leftCount || collator.compare(left, right));
+  renderActors();
 }
 
 function renderSort() {
@@ -418,7 +588,7 @@ function renderSort() {
       state.direction = selectedSort ? -state.direction : option.direction;
       state.sort = option.id;
       renderSort();
-      renderResults(true);
+      updateFilters();
     }, selectedSort ? "opt on" : "opt", "sort");
     node.dataset.tip = option.label;
     node.setAttribute("aria-label", option.label);
@@ -438,7 +608,7 @@ function renderStatus(items) {
   const pending = items.filter(isPending).length;
   const labels = [["all", "全部", items.length], ["confirmed", "已确认", items.length - pending], ["pending", "待确认", pending]];
   $("status").replaceChildren(...labels.map(([status, label, count]) => {
-    const node = button(label, () => { state.status = status; renderResults(true); }, `seg ${status}`, "main");
+    const node = button(label, () => { state.status = status; updateFilters(); }, `seg ${status}`, "main");
     node.classList.toggle("on", status === state.status);
     node.setAttribute("aria-pressed", String(status === state.status));
     node.append(element("i", "", String(count), "main"));
@@ -453,22 +623,48 @@ function appendResults() {
   $("loadMore").hidden = state.shown >= state.results.length;
 }
 
+function renderLocalVolume(results, filter) {
+  const volume = $("localVolume");
+  volume.hidden = !["marked", "ltx-local", "unmarked"].includes(filter);
+  if (volume.hidden) return;
+  let count = 0, size = 0;
+  for (const { local } of results) {
+    for (const copy of local.copies ?? []) {
+      if (filter === "marked" && !copy.marked || filter === "ltx-local" && !copy.ltxLocal) continue;
+      count++;
+      size += copy.size;
+    }
+  }
+  volume.textContent = `本地体积 ${size ? formatSize(size) : "0 B"} · ${count} 份`;
+}
+
 function renderResults(resetScroll = false) {
   const query = normalize($("search").value);
   const codeQuery = normalizeCode(query);
   const filter = $("filter").value;
-  const eligible = state.items.filter((item) => {
+  const subtitle = $("subtitleFilter").value;
+  let items = state.items;
+  if (filter === "ltx-local") {
+    const keys = new Set(items.filter(({ local }) => local.ltxLocal > 0).map(({ searchCode }) => searchCode));
+    items = [...items, ...state.localItems.filter(({ searchCode }) => !keys.has(searchCode))];
+  }
+  const matching = items.filter((item) => {
     if (query && !item.searchText.includes(query) && (!codeQuery || !item.searchCode.includes(codeQuery))) return false;
-    if (state.actor && !item.actors.includes(state.actor)) return false;
+    if (subtitle === "available" && !item.subtitleUrl && !hasSubtitledLtx(item)) return false;
+    if (subtitle === "ltx-c" && !hasSubtitledLtx(item)) return false;
     if (filter === "present") return hasLocal(item);
     if (filter === "marked") return item.local.marked > 0;
     if (filter === "ltx-local") return item.local.ltxLocal > 0;
     if (filter === "unmarked") return hasLocal(item) && !item.local.marked;
+    if (filter === "remote-larger") return Boolean(findBatchLink(item, "larger", largestLocalSize(item), linksForSubtitleFilter(item, subtitle)));
     if (filter === "missing") return !hasLocal(item);
     return true;
   });
+  const eligible = state.actor ? matching.filter(({ actors }) => actors.includes(state.actor)) : matching;
   renderStatus(eligible);
-  const results = eligible.filter((item) => state.status === "all" || (state.status === "pending") === isPending(item));
+  const matchesStatus = (item) => state.status === "all" || (state.status === "pending") === isPending(item);
+  updateActorFacets(matching.filter(matchesStatus));
+  const results = eligible.filter(matchesStatus);
   const sort = sortOptions.find(({ id }) => id === state.sort);
   results.sort((a, b) => {
     const left = sort.value(a), right = sort.value(b);
@@ -476,8 +672,13 @@ function renderResults(resetScroll = false) {
     return state.direction * primary || collator.compare(a.code, b.code);
   });
   state.results = results;
+  renderLocalVolume(results, filter);
   state.shown = 0;
   $("results").textContent = `${results.length} 部 · 本地 ${results.filter(hasLocal).length} · LTX ${results.filter(({ local }) => local.marked).length}`;
+  $("batchLinks").disabled = !results.some(({ links }) => links.length);
+  $("batchCount").textContent = String(results.length);
+  mediaObserver.disconnect();
+  visibleMedia.clear();
   $("grid").replaceChildren();
   $("empty").hidden = results.length !== 0;
   appendResults();
@@ -498,7 +699,7 @@ async function load({ refresh = false, sync = false } = {}) {
   const reload = $("reload");
   const syncButton = $("syncCatalog");
   const feedback = $("feedback");
-  if (reload.disabled) return;
+  if (reload.disabled) return false;
   reload.disabled = syncButton.disabled = true;
   syncButton.textContent = sync ? "更新中…" : "更新目录";
   feedback.textContent = sync ? "正在从 Jasna-LTX 同步目录…" : "";
@@ -519,79 +720,123 @@ async function load({ refresh = false, sync = false } = {}) {
     state.libraryChecked = payload.libraryChecked;
     state.downloadsChecked = payload.downloadsChecked;
     state.avatars = payload.avatars || {};
-    state.items = payload.items.map((item) => {
-      const links = item.links.filter(isResourceLink);
-      return {
-        ...item, links, maxSize: Math.max(0, ...links.map(({ size }) => size || 0)),
-        searchCode: normalizeCode(item.code),
-        searchText: normalize([item.code, item.title, item.originalTitle, item.maker, ...item.actors, ...(item.genres || [])].join(" "))
-      };
-    });
-    const actors = new Map();
-    for (const item of state.items) for (const actor of new Set(item.actors)) actors.set(actor, (actors.get(actor) || 0) + 1);
-    state.actors = [...actors].sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || collator.compare(left, right));
-    const validLinks = new Set(state.items.flatMap((item) => item.links.map(({ url }) => url)));
-    for (const url of selected.keys()) if (!validLinks.has(url)) selected.delete(url);
+    state.items = payload.items.map(searchableItem);
+    localCatalogRequest = null;
+    if ($("filter").value === "ltx-local") loadLocalCatalog();
     const date = new Date(payload.fetchedAt);
     $("snapshot").textContent = Number.isFinite(date.valueOf()) ? `本地快照 · ${dateFormatter.format(date)}` : "本地快照";
     reload.title = $("snapshot").textContent;
-    renderActors();
+    mediaCache = new Map();
     renderResults();
-    updateSelection();
     const note = !state.libraryChecked || !state.downloadsChecked ? "部分本地目录或索引暂不可读，结果可能不完整。" : "";
     feedback.textContent = synced ? `目录已更新，共 ${state.items.length} 部。${note}` : note;
+    return true;
   } catch (error) {
     feedback.textContent = synced ? "目录已同步，页面读取失败，请重读本地状态。"
       : sync ? `更新失败：${error.message}` : error.message;
     if (!state.items.length) $("snapshot").textContent = "本地快照暂不可用";
+    return false;
   } finally {
     syncButton.textContent = "更新目录";
     reload.disabled = syncButton.disabled = false;
   }
 }
 
-$("search").value = new URLSearchParams(location.search).get("q") || "";
+function getFilterParams() {
+  const params = new URLSearchParams();
+  const values = {
+    q: $("search").value.trim(),
+    actor: state.actor,
+    status: state.status === "all" ? "" : state.status,
+    local: $("filter").value === "all" ? "" : $("filter").value,
+    subtitle: $("subtitleFilter").value === "all" ? "" : $("subtitleFilter").value,
+    sort: state.sort === "score" ? "" : state.sort
+  };
+  for (const [key, value] of Object.entries(values)) if (value) params.set(key, value);
+  const defaultDirection = sortOptions.find(({ id }) => id === state.sort).direction;
+  if (state.direction !== defaultDirection) params.set("order", state.direction > 0 ? "asc" : "desc");
+  return params;
+}
+
+function setSelectValue(id, value) {
+  const select = $(id);
+  select.value = value || "all";
+  if (select.selectedIndex < 0) select.value = "all";
+}
+
+let filterLocationSearch = location.search;
+function navigateFilters(mode) {
+  writeFilterViewUrl(getFilterParams(), mode);
+  filterLocationSearch = location.search;
+}
+
+function applyFilterParams(params, { render = true, navigate = false } = {}) {
+  const sort = sortOptions.find(({ id }) => id === params.get("sort")) || sortOptions[0];
+  const order = params.get("order");
+  const status = params.get("status");
+  $("search").value = params.get("q") || "";
+  state.actor = params.get("actor") || "";
+  state.status = ["confirmed", "pending"].includes(status) ? status : "all";
+  state.sort = sort.id;
+  state.direction = order === "asc" ? 1 : order === "desc" ? -1 : sort.direction;
+  setSelectValue("filter", params.get("local"));
+  setSelectValue("subtitleFilter", params.get("subtitle"));
+  if (!render) return;
+  if (navigate) navigateFilters();
+  if ($("filter").value === "ltx-local") loadLocalCatalog();
+  renderSort();
+  renderResults(true);
+}
+
+function updateFilters(mode = "push") {
+  navigateFilters(mode);
+  renderResults(true);
+}
+
+applyFilterParams(new URLSearchParams(location.search), { render: false });
+installFilterViews({ getParams: getFilterParams, applyParams: (params) => applyFilterParams(params, { navigate: true }) });
+window.addEventListener("popstate", () => {
+  if (filterLocationSearch === location.search) return;
+  filterLocationSearch = location.search;
+  if ($("filterViews").open) $("filterViews").close();
+  applyFilterParams(new URLSearchParams(location.search));
+});
 $("openActors").append(icon("people", 20));
 $("openActors").addEventListener("click", () => toggleActors(true));
 $("closeActors").addEventListener("click", () => { toggleActors(false); $("openActors").focus(); });
 $("actorScrim").addEventListener("click", () => toggleActors(false));
 $("actorChip").addEventListener("click", () => setActor(""));
 $("actorSearch").addEventListener("input", renderActors);
-$("search").addEventListener("input", () => renderResults(true));
-$("filter").addEventListener("change", () => renderResults(true));
+$("search").addEventListener("input", (event) => {
+  if (!event.isComposing) updateFilters("replace");
+});
+$("search").addEventListener("compositionend", () => updateFilters("replace"));
+$("filter").addEventListener("change", () => {
+  if ($("filter").value === "ltx-local") loadLocalCatalog();
+  updateFilters();
+});
+$("subtitleFilter").addEventListener("change", () => updateFilters());
+$("displaySettings").addEventListener("click", () => $("displayDialog").showModal());
+for (const control of $("displayDialog").querySelectorAll("[data-display]")) {
+  const key = control.dataset.display;
+  control.checked = display[key];
+  control.addEventListener("change", () => {
+    display[key] = control.checked;
+    try { localStorage.setItem(displayKey, JSON.stringify(display)); } catch { /* Use this session's settings. */ }
+    renderResults();
+  });
+}
 $("loadMore").addEventListener("click", appendResults);
 $("reload").addEventListener("click", () => load({ refresh: true }));
 $("syncCatalog").addEventListener("click", () => load({ sync: true }));
-$("downloadSettings").addEventListener("click", openDownloadSettings);
-$("addTo115").addEventListener("click", () => submitTo115(dialogDownloadEntries(), $("dialogStatus")));
-const directory = $("downloadDirectory");
-try { directory.value = localStorage.getItem(directorySetting) || ""; } catch { /* Browser storage may be disabled. */ }
-directory.addEventListener("input", () => {
-  if (!directory.checkValidity()) return;
-  try { localStorage.setItem(directorySetting, directory.value); } catch { /* Keep the current value in the form. */ }
+$("batchLinks").addEventListener("click", openBatchLinks);
+$("batchMode").addEventListener("change", () => {
+  $("batchStatus").textContent = "";
+  renderBatch();
 });
-$("copyDownloadScript").addEventListener("click", async () => {
-  const status = $("settingsStatus");
-  try {
-    const response = await fetch($("installDownloadScript").href);
-    if (!response.ok) throw new Error("script unavailable");
-    await navigator.clipboard.writeText(await response.text());
-    status.textContent = "脚本已复制，可粘贴到 Tampermonkey 新建脚本。";
-  } catch {
-    status.textContent = "可打开「安装脚本」查看并手动复制代码。";
-  }
-});
-new MutationObserver(syncBridgeStatus).observe(document.documentElement, {
-  attributes: true, attributeFilter: ["data-fanhao-ltx115"]
-});
-syncBridgeStatus();
-$("showSelected").addEventListener("click", () => openLinks([...selected.values()], "已选完整链接"));
-$("copySelected").addEventListener("click", () => copyText([...selected.keys()].join("\n"), $("dialogStatus")));
-$("clearSelected").addEventListener("click", () => {
-  selected.clear();
-  updateSelection();
-  $("dialogStatus").textContent = "已清空勾选";
-});
+$("submitBatch").addEventListener("click", submitBatch);
+$("stopBatch").addEventListener("click", stopBatch);
+$("batchDialog").addEventListener("close", stopBatch);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && $("actor-panel").classList.contains("open")) toggleActors(false);
   if (event.key !== "/" || event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey

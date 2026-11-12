@@ -4,6 +4,7 @@ import path from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { createMangaService, mangaWholeDownloadReady as serverMangaWholeDownloadReady } from "../src/modules/photos/server/manga-service.js";
+import { routePhotosApi } from "../src/modules/photos/server/routes.js";
 import { streamStoredZip } from "../src/modules/photos/server/stored-zip-stream.js";
 import { mangaJobChapterStats, mangaTaskMonitorDelayMs, mangaWholeDownloadReady, mergeMangaTaskState, photoIndexTaskProgress, selectMangaTaskDisplayJobs } from "../android-client/www/platform/content-index/channel-views.js?verify-manga-tasks=1";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
@@ -259,7 +260,7 @@ assert.deepEqual(photoScanProgress, {
 }, "Android photo maintenance must decode machine-readable background scan progress");
 assert.equal(photoIndexTaskProgress({ status: "done", logs: [] }).percent, 100, "completed photo scans must render a full progress state even for legacy task logs");
 assert.doesNotMatch(androidMangaSource, /createPhotoIndexManager|\/api\/admin\/tasks/, "photo browsing must not expose index maintenance or poll its background tasks");
-assert.match(androidMangaSource, /if \(!loadingMore && renderedCache && channelDataSignature\(mergedData\) === renderedCacheSignature\) \{\s*applyChannelHeader\(normalizedMode, mergedData\);\s*return;\s*\}/s, "unchanged full refresh responses must still refresh the content header; appends must render their new page");
+assert.match(androidMangaSource, /if \(!loadingMore && renderedCache && channelDataSignature\(mergedData\) === renderedCacheSignature\) \{\s*applyChannelHeader\(normalizedMode, mergedData\);\s*syncPhotoResumeShelf\(normalizedMode\);\s*return;\s*\}/s, "unchanged full refresh responses must still refresh the content header and photo resume shelf; appends must render their new page");
 assert.doesNotMatch(androidMangaCssSource, /\.photo-index-manager|\.photo-index-progress-track/);
 
 const { tempDir: temporaryRoot, cleanup: cleanupZipFixture } = createVerifiedTempDir("fanhao-manga-zip-");
@@ -461,13 +462,15 @@ try {
   assert.equal(running.completedChapters, 1);
   child.emit("close", 0);
   const finished = mangaService.updateStatus(comic.id);
-  assert.equal(finished.status, "complete");
+  assert.equal(finished.status, "failed", "a collector that reports a failed chapter must be retryable even if it exits successfully");
   assert.equal(finished.totalChapters, 10);
   assert.equal(finished.cachedChapters, 8);
   assert.equal(finished.pendingChapters, 2);
   assert.equal(finished.processedChapters, 2);
+  assert.equal(finished.completedChapters, 1);
   assert.equal(finished.failedChapters, 1);
-  assert.equal(finished.progressPercent, 100);
+  assert(finished.progressPercent < 100);
+  assert.match(finished.message, /1 章未完整保存/);
 
   const added = mangaService.startAdd("https://jmd9.com/manga/999");
   assert.equal(added.existing, false);
@@ -632,6 +635,95 @@ try {
   });
   assert.deepEqual(afterRepairRestart.listJobs(), []);
   assert.deepEqual(createPersistentService().listJobs(), [], "cleared terminal history must stay cleared after restart");
+
+  const partialStart = afterRepairRestart.startAdd("https://jmd9.com/manga/70003");
+  children.at(-1).stdout.write([
+    'MANGA_PROGRESS {"event":"catalog","totalChapters":3,"cachedChapters":0,"pendingChapters":3}',
+    'MANGA_PROGRESS {"event":"chapter-start","chapterIndex":1}',
+    'MANGA_PROGRESS {"event":"chapter-complete","chapterIndex":1,"status":"done","downloadedImages":1,"failedImages":1}',
+    'MANGA_PROGRESS {"event":"chapter-start","chapterIndex":2}',
+    'MANGA_PROGRESS {"event":"chapter-complete","chapterIndex":2,"status":"done","downloadedImages":1,"failedImages":0}',
+    'MANGA_PROGRESS {"event":"chapter-start","chapterIndex":3}',
+    'MANGA_PROGRESS {"event":"chapter-complete","chapterIndex":3,"status":"done","downloadedImages":1,"skippedImages":1}',
+    'MANGA_PROGRESS {"event":"complete","totalChapters":3,"failedChapters":2}'
+  ].join("\n"));
+  children.at(-1).emit("close", 2);
+  const partial = afterRepairRestart.jobStatus(partialStart.job.id);
+  assert.equal(partial.status, "failed");
+  assert.equal(partial.completedChapters, 1, "partial chapters remain separate from saved chapter counts");
+  assert.equal(partial.failedChapters, 2);
+  assert.equal(partial.failedImages, 0, "latest chapter image counters must not inherit prior failures");
+  assert.match(partial.message, /2 章未完整保存/);
+  assert.deepEqual(createPersistentService().jobStatus(partialStart.job.id), partial);
+
+  const summaryStart = afterRepairRestart.startAdd("https://jmd9.com/manga/70004");
+  children.at(-1).stdout.write('MANGA_PROGRESS {"event":"complete","totalChapters":3,"failedChapters":2}');
+  children.at(-1).emit("close", 0);
+  const summary = afterRepairRestart.jobStatus(summaryStart.job.id);
+  assert.equal(summary.status, "failed", "a partial collector summary is authoritative even with a legacy exit code");
+  assert.equal(summary.failedChapters, 2);
+  assert.deepEqual(createPersistentService().jobStatus(summaryStart.job.id), summary);
+
+  const indexStart = afterRepairRestart.startAdd("https://jmd9.com/manga/70005");
+  children.at(-1).stdout.write([
+    'MANGA_PROGRESS {"event":"catalog","totalChapters":1,"cachedChapters":0,"pendingChapters":1}',
+    'MANGA_PROGRESS {"event":"chapter-complete","chapterIndex":1,"status":"done","downloadedImages":1}',
+    'MANGA_PROGRESS {"event":"index-publication","status":"failed","error":"synthetic SQLite write failure"}',
+    'MANGA_PROGRESS {"event":"complete","totalChapters":1,"failedChapters":0}'
+  ].join("\n"));
+  children.at(-1).emit("close", 0);
+  const indexFailure = afterRepairRestart.jobStatus(indexStart.job.id);
+  assert.equal(indexFailure.status, "failed", "a structured publication failure owns the result even if the collector exits successfully");
+  assert.equal(indexFailure.completedChapters, 1);
+  assert.equal(indexFailure.failedChapters, 0);
+  assert.match(indexFailure.message, /馆藏索引保存失败.*synthetic SQLite write failure/);
+  const restartedIndexService = createPersistentService();
+  assert.deepEqual(restartedIndexService.jobStatus(indexStart.job.id), indexFailure);
+  const retryIndex = restartedIndexService.retryJob(indexStart.job.id);
+  assert.equal(retryIndex.started, true);
+  children.at(-1).stdout.write('MANGA_PROGRESS {"event":"index-publication","status":"complete"}\n');
+  children.at(-1).stderr.write("SQLite index warning: obsolete incremental write warning\n");
+  children.at(-1).emit("close", 0);
+  assert.equal(restartedIndexService.jobStatus(retryIndex.job.id).status, "complete", "the final structured success overrides legacy warnings from the other stream");
+
+  const oldIndexStart = restartedIndexService.startAdd("https://jmd9.com/manga/70006");
+  children.at(-1).stderr.write("SQLite index warning: legacy write failure");
+  children.at(-1).emit("close", 0);
+  assert.match(restartedIndexService.jobStatus(oldIndexStart.job.id).message, /馆藏索引保存失败.*legacy write failure/);
+
+  const persistedHistory = JSON.parse(fs.readFileSync(historyPath, "utf8"));
+  const legacy = persistedHistory.jobs.find((job) => job.id === partialStart.job.id);
+  Object.assign(legacy, { status: "complete", completed: [1, 2], failed: [1], currentChapterIndex: 2,
+    failedImages: 1, progressPercent: 100, exitCode: 0, message: "更新完成" });
+  delete legacy.reportedFailedChapters;
+  fs.writeFileSync(historyPath, JSON.stringify(persistedHistory), "utf8");
+  const upgraded = createPersistentService();
+  const repairedPartial = upgraded.jobStatus(partialStart.job.id);
+  assert.equal(repairedPartial.status, "failed", "historical successes with known missing pages must become retryable");
+  assert.equal(repairedPartial.completedChapters, 0);
+  assert.equal(repairedPartial.failedChapters, 2);
+  assert(repairedPartial.progressPercent < 100);
+  const jobRoute = async (method, suffix = "") => {
+    const response = {};
+    const url = new URL(`/api/manga/jobs/${partialStart.job.id}${suffix}`, "http://fixture.invalid");
+    assert(await routePhotosApi({ method }, response, url, {
+      mangaService: upgraded,
+      requireLocalAdmin: () => true,
+      sendJson(res, status, body) { Object.assign(res, { status, body }); }
+    }));
+    return response;
+  };
+  assert.deepEqual(await jobRoute("GET"), { status: 200, body: { job: repairedPartial } });
+  const { status: retryStatus, body: retriedPartial } = await jobRoute("POST", "/retry");
+  assert.equal(retryStatus, 202);
+  assert.equal(retriedPartial.started, true);
+  const repeated = await jobRoute("POST", "/retry");
+  assert.equal(repeated.status, 200);
+  assert.equal(repeated.body.job.id, retriedPartial.job.id);
+  const retryPartial = children.at(-1);
+  retryPartial.stdout.write('MANGA_PROGRESS {"event":"complete","totalChapters":3,"failedChapters":0}\n');
+  retryPartial.emit("close", 0);
+  assert.equal(upgraded.jobStatus(retriedPartial.job.id).status, "complete");
 } finally {
   cleanupPersistenceFixture();
 }

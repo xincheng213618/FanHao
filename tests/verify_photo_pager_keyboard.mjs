@@ -6,7 +6,7 @@ import { runGalleryReaderFixture } from "./verify_web_gallery_requests.mjs";
 // removes only one guarantee so a passing check cannot come from the fixture.
 const source = fs.readFileSync(new URL("../public/modules/content-index/gallery-renderer.js", import.meta.url), "utf8");
 const current = await runGalleryReaderFixture({ casePattern: "pager keyboard" });
-assert.equal(current.checks, 4);
+assert.equal(current.checks, 8);
 
 const negatives = [
   {
@@ -18,14 +18,14 @@ const negatives = [
   },
   {
     name: "thumbnail focus ownership",
-    marker: "const restoreThumbnailFocus = thumbnails.contains(document.activeElement);",
-    replacement: "const restoreThumbnailFocus = false;",
+    marker: "if (selectedChanged && focused) thumbnailButtons.get(currentIndex)?.focus({ preventScroll: true });",
+    replacement: "if (false) thumbnailButtons.get(currentIndex)?.focus({ preventScroll: true });",
     pattern: "pager keyboard thumbnail focus",
-    failure: /thumbnail activation must retain keyboard focus/
+    failure: /arrow navigation must focus the newly selected thumbnail/
   },
   {
     name: "focused controls stay visible",
-    marker: "if (imageFailed || imageRetrying || top.contains(document.activeElement) || controls.contains(document.activeElement)) return;",
+    marker: "if (imageFailed || imageRetrying || catalogFailed || top.contains(document.activeElement) || controls.contains(document.activeElement)) return;",
     replacement: "if (false) return;",
     pattern: "pager keyboard controls remain visible",
     failure: /idle timeout must not hide a focused control/
@@ -46,4 +46,4 @@ for (const negative of negatives) {
   }), { name: "AssertionError", message: negative.failure });
   console.log(`PASS negative control detects missing ${negative.name}`);
 }
-console.log("Photo pager keyboard fixture passed (4 browser cases and 4 behavior negative controls)");
+console.log(`Photo pager keyboard fixture passed (${current.checks} browser cases and ${negatives.length} behavior negative controls)`);

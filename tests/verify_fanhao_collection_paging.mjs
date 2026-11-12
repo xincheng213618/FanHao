@@ -10,6 +10,7 @@ class Element {
   constructor(tag = "div") {
     this.tag = tag;
     this.children = [];
+    this.parentNode = null;
     this.dataset = {};
     this.listeners = new Map();
     this.classList = { add() {} };
@@ -17,11 +18,24 @@ class Element {
     this.textContent = "更多";
     this.disabled = false;
   }
-  set innerHTML(value) { this.html = value; this.children = []; }
+  set innerHTML(value) {
+    this.html = value;
+    for (const child of this.children) child.parentNode = null;
+    this.children = [];
+  }
   get innerHTML() { return this.html || ""; }
-  append(...children) { this.children.push(...children); }
+  append(...nodes) {
+    for (const node of nodes) {
+      if (typeof node === "string") continue;
+      node.parentNode = this;
+      this.children.push(node);
+    }
+  }
+  replaceChildren(...nodes) { this.innerHTML = ""; this.append(...nodes); }
   setAttribute() {}
+  removeAttribute() {}
   addEventListener(type, listener) { this.listeners.set(type, listener); }
+  querySelector(tag) { return this.children.find(child => child.tag === tag) || null; }
   querySelectorAll() { return []; }
 }
 
@@ -412,7 +426,7 @@ try {
     const f = fixture("rankings");
     await reply(f, f.load(), payload(["a", "a", "b"], 7));
     const descendants = node => node.children.flatMap(child => [child, ...descendants(child)]);
-    const sort = descendants(f.els.statsRow).find(node => node.className === "ranking-sort-select");
+    const sort = descendants(f.els.personProfile).find(node => node.className === "ranking-sort-select");
     assert(sort, "use the actual rendered sorting control");
     sort.value = "title";
     await sort.listeners.get("change")();

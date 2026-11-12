@@ -138,6 +138,91 @@ export async function runMusicPlaybackRecoveryFixture({ casePattern = "", source
         assert.equal(requests.get("/api/music/tracks/A") || 0, firstReads, "an explicit automatic wrap=false must not become loop-all");
       } finally { await page.close(); }
     });
+    for (const mode of ["one", "all"]) await run(`native track sleep stops before ${mode} playback and preserves completion`, async () => {
+      const page = await newPage();
+      try {
+        await page.locator('.music-track-table [data-music-track-id="A"] .music-track-title').click();
+        await page.waitForFunction(() => __audios[0].readyState >= 1 && !__audios[0].paused);
+        await setRepeat(page, mode);
+        if (mode === "one") {
+          await page.setViewportSize({ width: 390, height: 780 });
+          await page.getByRole("button", { name: "打开当前歌曲播放页", exact: true }).click();
+        }
+        const sleep = page.locator(".music-sleep-wrap select");
+        const status = page.locator(".music-sleep-wrap em");
+        await sleep.selectOption({ label: "播完这首" });
+        assert.equal(await status.textContent(), "播完这首后暂停");
+        assert(await sleep.evaluate(node => {
+          const bounds = node.getBoundingClientRect();
+          return bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight;
+        }), "the sleep timer must be reachable on the active player surface");
+        const secondReads = requests.get("/api/music/tracks/B") || 0;
+        await page.locator(".music-progress input").fill("1000");
+        await page.waitForFunction(() => __audios[0].ended && __audios[0].paused && !fixture.state.music.playing && fixture.state.music.sleepMinutes === 0);
+        await page.waitForFunction(() => fixture.writes.some(write => write.positionMs === 0));
+        assert.equal(await page.evaluate(() => fixture.state.music.current.id), "A");
+        assert.equal(requests.get("/api/music/tracks/B") || 0, secondReads);
+        assert.equal(await sleep.inputValue(), "0");
+        const completed = await page.evaluate(() => fixture.writes.length);
+        await page.locator(".music-player-controls").getByRole("button", { name: "下一首", exact: true }).click();
+        await page.waitForFunction(() => fixture.state.music.current?.id === "B" && __audios[0].readyState >= 1 && !__audios[0].paused);
+        assert.equal(await page.evaluate(from => fixture.writes.slice(from).some(write => write.positionMs >= 59000), completed),
+          false, "leaving a completed track must not restore its end position");
+      } finally { await page.close(); }
+    });
+    await run("native track sleep records completion while the document stays hidden", async () => {
+      const page = await newPage();
+      const progressAt = (predicate) => page.waitForResponse(response => {
+        const request = response.request();
+        return response.ok() && request.method() === "POST" && new URL(response.url()).pathname === "/api/music/tracks/A/progress"
+          && predicate(request.postDataJSON()?.positionMs);
+      }, { timeout: 5000 });
+      try {
+        await page.locator('.music-track-table [data-music-track-id="A"] .music-track-title').click();
+        await page.waitForFunction(() => __audios[0].readyState >= 1 && !__audios[0].paused);
+        await page.locator(".music-sleep-wrap select").selectOption("-1");
+        await page.evaluate(() => { __audios[0].currentTime = 20; });
+        await page.waitForFunction(() => !__audios[0].seeking && __audios[0].currentTime >= 20);
+        const hiddenPosition = progressAt(position => position >= 20000 && position < 22000);
+        await page.evaluate(() => {
+          Object.defineProperty(document, "hidden", { value: true, configurable: true });
+          document.dispatchEvent(new Event("visibilitychange"));
+        });
+        await hiddenPosition;
+        const completion = progressAt(position => position === 0);
+        await page.evaluate(() => { __audios[0].currentTime = __audios[0].duration; });
+        await completion;
+        assert.deepEqual(await page.evaluate(() => [document.hidden, __audios[0].paused, fixture.state.music.sleepMinutes]), [true, true, 0]);
+      } finally { await page.close(); }
+    });
+    await run("native track sleep follows its source and can be replaced by timed sleep", async () => {
+      const page = await newPage();
+      try {
+        await page.locator('.music-track-table [data-music-track-id="A"] .music-track-title').click();
+        await page.waitForFunction(() => __audios[0].readyState >= 1 && !__audios[0].paused);
+        await setRepeat(page, "all");
+        const sleep = page.locator(".music-sleep-wrap select");
+        await sleep.selectOption("-1");
+        await sleep.evaluate(node => { window.__oldSleepSelect = node; });
+        await page.locator(".music-player-controls").getByRole("button", { name: "下一首", exact: true }).click();
+        await page.waitForFunction(() => fixture.state.music.current?.id === "B" && __audios[0].readyState >= 1 && !__audios[0].paused);
+        assert.equal(await sleep.inputValue(), "0", "manual switching must cancel a timer for the previous song");
+        await page.evaluate(() => __oldSleepSelect.dispatchEvent(new Event("change")));
+        assert.equal(await sleep.inputValue(), "0", "a retired control must not arm the current song");
+        await sleep.selectOption("-1");
+        const reads = requests.get("/api/music/tracks/A") || 0;
+        await page.evaluate(() => __audios[0].dispatchEvent(new Event("ended")));
+        assert.equal(await sleep.inputValue(), "-1", "a queued old ended event must not consume the current timer");
+        assert.equal(requests.get("/api/music/tracks/A") || 0, reads);
+        assert.equal(await page.evaluate(() => __audios[0].paused), false);
+        await sleep.selectOption("10");
+        await page.locator(".music-player-controls").getByRole("button", { name: "上一首", exact: true }).click();
+        await page.waitForFunction(() => fixture.state.music.current?.id === "A" && __audios[0].readyState >= 1 && !__audios[0].paused);
+        assert.equal(await sleep.inputValue(), "10", "a timed sleep selection still survives manual track changes");
+        await sleep.selectOption("0");
+        assert.equal(await page.evaluate(() => fixture.state.music.sleepUntil), 0);
+      } finally { await page.close(); }
+    });
     await run("native queue shuffle skips the current song without changing order", async () => {
       const page = await newPage();
       try {
@@ -565,7 +650,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       { name: "discarded source callback suppression", casePattern: "native account owner change cancels its old default start", marker: "sourceDiscarded = true;", replacement: "", failure: /discarding old native media must not save progress or played receipts for the new account/ },
       { name: "progress claim account ownership", path: "/modules/music/actions.js", source: actionsSource, casePattern: "account owner change discards pending retry position", marker: "checkProgressAccount(request);", replacement: "", failure: /discarding a pending retry must not write progress or played receipts using the new account/ },
       { name: "manual loop-all queue wrap", path: "/modules/music/actions.js", source: actionsSource, casePattern: "native queue loop-all next and previous wrap the boundaries", marker: 'const wrap = options.wrap ?? (music().repeat === "all");', replacement: "const wrap = options.wrap;", failure: /loop-all next at the last song must request the first queued song/ },
-      { name: "new seek precedence", casePattern: "new seek while retry is pending takes precedence", marker: "if (retryPosition && isRetryPositionCurrent(retryPosition)) retryPosition.position = position;", replacement: "", failure: /retry must not overwrite a newer explicit seek/ }
+      { name: "new seek precedence", casePattern: "new seek while retry is pending takes precedence", marker: "if (retryPosition && ownsPlaybackSource(retryPosition)) retryPosition.position = position;", replacement: "", failure: /retry must not overwrite a newer explicit seek/ }
     ]) {
       const owningSource = negative.source || source;
       assert.equal(owningSource.split(negative.marker).length - 1, 1, `negative must modify its current owning guard: ${negative.name}`);

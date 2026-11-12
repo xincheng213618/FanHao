@@ -6,7 +6,7 @@ import { runWebPlayerFixture } from "./verify_web_player_lifecycle.mjs";
 // Media events and list snapshots are synthetic; no real video is decoded.
 for (const realPlyr of [false, true]) {
   const result = await runWebPlayerFixture({ realPlyr, casePattern: "file list " });
-  assert.equal(result.checks, 4);
+  assert.equal(result.checks, 8);
 }
 const source = fs.readFileSync(new URL("../public/js/player-page.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
 for (const negative of [
@@ -17,11 +17,15 @@ for (const negative of [
   { name: "refreshed file descriptor", marker: "row.video = video;", replacement: "", pattern: "file list snapshot",
     failure: /a retained file button must prepare its refreshed descriptor/ },
   { name: "retired row ownership", marker: "if (renderedFilesWork !== work || currentWork !== work || button.parentElement !== els.files\n            || !(work.videos || []).includes(row.video)) return;", replacement: "", pattern: "file list snapshot",
-    failure: /a retired file-list row must not prepare playback under a newer work snapshot/ }
+    failure: /a retired file-list row must not prepare playback under a newer work snapshot/ },
+  { name: "synchronized timestamp", marker: "resumePosition: mediaPosition(),", replacement: "resumePosition: undefined,", pattern: "file list synchronized switching preserves",
+    failure: /adjacent synchronized switching keeps the playing timestamp/ },
+  { name: "unwatched comparison progress", marker: "if (subtitlePreview || waitingForComparisonPlayback) return;", replacement: "if (subtitlePreview) return;", pattern: "file list synchronized switching preserves",
+    failure: /opening or leaving an unwatched comparison must not record target progress/ }
 ]) {
   assert.equal(source.split(negative.marker).length - 1, 1, `negative must alter only ${negative.name}`);
   await assert.rejects(() => runWebPlayerFixture({ casePattern: negative.pattern, realPlyr: negative.realPlyr || false,
     sourceOverride: source.replace(negative.marker, negative.replacement) }), { name: "AssertionError", message: negative.failure });
   console.log(`PASS negative control detects missing ${negative.name}`);
 }
-console.log("Player file list passed (8 browser cases + 4 independent negative controls)");
+console.log("Player file list passed (16 browser cases + 6 independent negative controls)");

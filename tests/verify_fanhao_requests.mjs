@@ -9,6 +9,7 @@ import { createCodePrefixPage } from "../public/modules/fanhao/code-prefix-page.
 import { createStudioPage } from "../public/modules/fanhao/features/studios/studio-page.js";
 import { workServerMoreState } from "../public/modules/fanhao/features/works/work-page-appender.js";
 import { resolveWorkPage } from "../public/modules/fanhao/features/works/work-page-state.js";
+import { normalizeFanhaoSearchSort } from "../public/js/router.js";
 
 // Execute production request/page services and the current shell functions.
 // DOM and HTTP completion order are doubled; no browser, service or DB is used.
@@ -123,6 +124,8 @@ function verifyWorkSearchComposition() {
       els: { workSearch: input }, state: {}, navigator,
       window: { clearTimeout, setTimeout(callback) { const id = ++sequence; timers.set(id, callback); return id; } },
       searchRequests: { prefetch(query) { prefetched.push(query); } },
+      workSearchSuggestions: { close() {}, show() {}, handleKey: () => false },
+      normalizeFanhaoSearchSort,
       scopedWorkSearch(query) { return query; }, // Ordinary search without a classification scope.
       submitWorkSearch(query) { submitted.push(query); }
     });
@@ -226,7 +229,7 @@ async function verifyPersonPaging() {
     assert.deepEqual(f.state.works.map((work) => work.id), ["fresh-first", "fresh-second"]);
     assert.equal(f.state.personWorksLoadingMore, false);
   }
-  for (const change of ["sortMode", "filterMode", "showCompilationWorks", "showMissingLocalWorks", "workPageSize", "peopleScope"]) {
+  for (const change of ["sortMode", "filterMode", "showCompilationWorks", "showMissingLocalWorks", "workPageSize", "peopleScope", "personWorkQuery"]) {
     const f = peopleFixture();
     const first = f.page.selectPerson("person", { resetFilter: false });
     f.state[change] = change === "sortMode" ? "ratingDesc" : change === "filterMode" ? "favorite" : change === "workPageSize" ? 40 : change === "peopleScope" ? "western" : true;
@@ -245,6 +248,25 @@ async function verifyPersonPaging() {
   assert.deepEqual(f.state.works.map((work) => work.id), ["search-result"]);
   assert.deepEqual(f.errors, [], "obsolete failures must not paint errors in a new view");
   assert.equal(f.state.personWorksLoadingMore, false);
+
+  const search = peopleFixture();
+  const person = search.state.selectedPerson;
+  const oldPage = search.page.loadMoreWorks(null);
+  const firstMatch = search.page.selectPerson("person", { resetFilter: false, personWorkQuery: "ZZZ-095" });
+  assert(search.calls[0].signal.aborted);
+  assert.equal(new URL(search.calls[1].path, "http://fixture").searchParams.get("q"), "ZZZ-095");
+  search.calls[1].resolve({ person, query: "ZZZ-095", works: [{ id: "matching-first" }], total: 3 });
+  await firstMatch;
+  search.calls[0].resolve({ person, works: [{ id: "obsolete-unfiltered" }], total: 100 });
+  await oldPage;
+  const nextMatch = search.page.loadMoreWorks(null);
+  const nextParams = new URL(search.calls[2].path, "http://fixture").searchParams;
+  assert.equal(nextParams.get("q"), "ZZZ-095");
+  assert.equal(nextParams.get("offset"), "1");
+  search.calls[2].resolve({ person, works: [{ id: "unfiltered-legacy" }], total: 100 });
+  await nextMatch;
+  assert.deepEqual(search.state.works.map(work => work.id), ["matching-first"]);
+  assert.deepEqual(search.errors, ["人物作品查找结果与当前条件不一致"]);
 }
 
 async function verifySearchPaginationOwnership() {
@@ -257,6 +279,7 @@ async function verifySearchPaginationOwnership() {
     const state = { activeView: "search", searchQuery: "A", works: [{ id: "A-first" }], searchPeople: [], workPageSize: 48, workVisibleLimit: 48 };
     const context = vm.createContext({
       state, window: { clearTimeout }, els: { workSearch: { value: "A" }, statsRow: {}, workGrid: {} },
+      workSearchSuggestions: { close() {} },
       searchRequests: {
         fetchPage(query, offset) {
           controller?.abort(); controller = new AbortController();
@@ -268,7 +291,7 @@ async function verifySearchPaginationOwnership() {
       rankingPage: { cancelPendingRequests() {} }, studioPage: { cancelPendingRequests() {} }, collectionPage: { cancelPendingRequests() {} },
       navigationSequence: 0,
       beginNavigation(options = {}) { return options.navigationIntent !== undefined ? options.navigationIntent : ++context.navigationSequence; },
-      parseClassificationQuery: () => null,
+      parseClassificationQuery: () => null, normalizeFanhaoSearchSort,
       syncNavigationState() {}, hidePersonProfile() {}, setMainHeader() {}, selectedWorkFilters: () => [],
       renderSearchStats() {}, renderWorks() {}, syncRouteAfterNavigation() {}, appendLoadedWorkPage() {}, resolveWorkPage,
       resetWorkPaging() { state.workVisibleLimit = 48; },
@@ -353,6 +376,7 @@ function shellFixture() {
   let account = { owner: "guest", revision: "" };
   const context = vm.createContext({
     state, api: transport.api, URLSearchParams, libraryRequests: createLatestRequestGate(), console,
+    window: { clearTimeout }, workSearchSuggestions: { close() {} }, favoriteFolderPicker: { close() {} },
     captureWebAccount: () => account,
     els: {}, normalizeUiConfig: (value) => value, WORK_PAGE_SIZE_BY_ACCESS: { local: 64, remote: 48 },
     preferredWorkPageSize: (value) => value, peoplePage: { personIndexPageSize: () => 64, cancelPendingSelection() {} },

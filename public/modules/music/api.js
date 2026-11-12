@@ -80,6 +80,9 @@ export function createMusicApi(api) {
     addTrackToPlaylist(id, body, signal) {
       return send(`/api/music/playlists/${encodeURIComponent(id)}/tracks?return=receipt`, "POST", body, signal);
     },
+    addTracksToPlaylist(id, trackIds, signal) {
+      return send(`/api/music/playlists/${encodeURIComponent(id)}/tracks?return=receipt`, "POST", { trackIds }, signal);
+    },
     reorderPlaylist(id, body, signal) {
       return send(`/api/music/playlists/${encodeURIComponent(id)}/tracks/order`, "PUT", body, signal);
     },
@@ -91,6 +94,9 @@ export function createMusicApi(api) {
     },
     removeTrackFromPlaylist(id, trackId, signal) {
       return send(`/api/music/playlists/${encodeURIComponent(id)}/tracks/${encodeURIComponent(trackId)}?return=receipt`, "DELETE", undefined, signal);
+    },
+    removeTracksFromPlaylist(id, trackIds, signal) {
+      return send(`/api/music/playlists/${encodeURIComponent(id)}/tracks/remove`, "POST", { trackIds }, signal);
     },
     importM3u(body, signal) {
       return send("/api/music/playlists/import-m3u", "POST", body, signal);

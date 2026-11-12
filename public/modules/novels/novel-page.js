@@ -2,8 +2,13 @@ import { createNovelCollectionAdmin } from "./collection-admin.js?v=20261004-nov
 import { createNovelProgressWriter } from "./progress-writer.js?v=20261004-novel-progress-01";
 import { createNovelListReturnRestore } from "./list-return.js";
 import { createNovelReaderFullscreen } from "./reader-fullscreen.js";
-import { createNovelBookmarksPanel } from "./bookmarks.js";
+import { createNovelBookmarksPanel } from "./bookmarks.js?v=20261113-novel-bookmark-shelf-01";
+import { createNovelBookmarkShelf } from "./bookmark-shelf.js";
 import { createNovelAuthorBrowser } from "./author-browser.js";
+import { createNovelChapterSearch } from "./chapter-search.js?v=20261113-book-text-search-01";
+import { createNovelBookTextSearch } from "./book-text-search.js";
+import { createNovelReadLater, readingLaterBookKey } from "./read-later.js";
+import { createNovelAutoScroll, NOVEL_AUTO_SCROLL_SPEEDS } from "./reader-auto-scroll.js";
 import { captureWebAccount } from "../../platform/accounts/session-context.js";
 
 const NOVEL_BOOK_PAGE_SIZE = 48;
@@ -11,6 +16,9 @@ const NOVEL_RANKING_PAGE_SIZE = 48;
 const NOVEL_PREFIX_PAGE_SIZE = 5000;
 const NOVEL_CHAPTER_CACHE_LIMIT = 8;
 const NOVEL_CATALOG_PAGE_SIZE = 120;
+const READING_STATUS_OPTIONS = [
+  ["", "全部阅读状态"], ["unread", "未开始"], ["reading", "在读"], ["finished", "已读完"], ["review", "进度待确认"]
+];
 const NOVEL_DATE_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric",
   month: "2-digit",
@@ -75,11 +83,26 @@ export function createNovelPage(deps) {
   let libraryReturnRestore = null;
   const invalidLibraryReturnData = new WeakSet();
   let libraryMutationRevision = 0;
+  let filteredProgressRevision = 0;
+  let filteredReadRevision = 0;
   let authorBrowser = null;
+  let chapterSearch = null;
   let uploadJob = null;
   const chapterCache = new Map();
   const chapterRequests = new Map();
   const catalogSearchIndexes = new WeakMap();
+  const readLater = createNovelReadLater({ formatNumber, openBook: (book) => openBook(book.id, { readingLaterBook: book }) });
+  const bookmarkShelf = createNovelBookmarkShelf({ api, formatNumber,
+    isReadingHome: () => state.activeView === "novels" && state.novel?.mode === "mine" && !state.novel.book && !state.novel.chapter,
+    async openBookmark(bookId, sourceRealm, mark, bookmarkShelfKey) {
+      const opened = await openChapter(bookId, mark.chapterIndex, { restoreProgress: false,
+        bookmark: { ...mark, id: bookId, sourceRealm }, bookmarkShelfKey,
+        retryFocus: true, retryFocusRevision: readerFocusRevision });
+      return opened ? "" : state.novel.status || "书签打开失败，请重试。";
+    }
+  });
+  const bookTextSearch = createNovelBookTextSearch({ api, formatNumber });
+  const readerAutoScroll = createNovelAutoScroll(syncReaderAutoScroll);
   const readerFullscreen = createNovelReaderFullscreen({
     isReader: () => state.activeView === "novels" && Boolean(state.novel?.chapter),
     captureReader: () => {
@@ -147,6 +170,7 @@ export function createNovelPage(deps) {
     if (!state.novel) state.novel = {};
     state.novel.query = state.novel.query || "";
     state.novel.category = state.novel.category || "all";
+    state.novel.readingStatus = state.novel.readingStatus || "";
     state.novel.author = state.novel.author || "";
     state.novel.mode = ["mine", "authors", "author", "search", "rankings", "manage"].includes(state.novel.mode) ? state.novel.mode : "books";
     state.novel.page = Math.max(0, Number(state.novel.page || 0));
@@ -220,6 +244,7 @@ export function createNovelPage(deps) {
     appliedRouteNavigation = resetReader({ keepFullscreen: Boolean(route.novelBookId && route.novelChapterIndex) });
     state.novel.query = route.novelQuery || "";
     state.novel.category = route.novelCategory || "all";
+    state.novel.readingStatus = route.novelReadingStatus || "";
     state.novel.sort = route.novelSort || "updated";
     state.novel.author = route.novelAuthor || "";
     state.novel.mode = ["mine", "author", "rankings", "manage"].includes(route.novelMode) ? route.novelMode : "books";
@@ -260,6 +285,7 @@ export function createNovelPage(deps) {
       mode: String(state.novel.mode || "books"),
       page: Math.max(0, Number(state.novel.page || 0)),
       query: String(state.novel.query || ""),
+      readingStatus: ["books", "author"].includes(state.novel.mode) ? state.novel.readingStatus : "",
       sort: String(state.novel.sort || "updated")
     });
     const paged = query.mode === "rankings";
@@ -279,6 +305,7 @@ export function createNovelPage(deps) {
     const params = new URLSearchParams();
     if (query.query) params.set("q", query.query);
     if (query.mode === "mine") params.set("reading", "1");
+    if (query.readingStatus) params.set("readingStatus", query.readingStatus);
     if (["books", "author"].includes(query.mode) && query.category !== "all") params.set("category", query.category);
     if (query.mode === "books" && query.author) params.set("author", query.author);
     if (query.sort !== "updated") params.set("sort", query.sort);
@@ -301,6 +328,7 @@ export function createNovelPage(deps) {
         novelChapterIndex: "",
         novelQuery: query.query,
         novelCategory: query.category,
+        novelReadingStatus: query.readingStatus,
         novelSort: query.sort,
         novelMode: query.mode,
         novelAuthor: query.author,
@@ -309,6 +337,7 @@ export function createNovelPage(deps) {
     }
     let response;
     let rebased = false;
+    const progressAtRead = filteredProgressRevision;
     try {
       response = !paged && !append && options.restoreCount
         ? await reloadNovelPrefix(endpoint, params, request, options.restoreCount)
@@ -316,6 +345,7 @@ export function createNovelPage(deps) {
           signal: request.controller.signal
         });
       if (!isCurrentLibraryRequest(request)) return false;
+      checkReadingStatusResponse(query.readingStatus, response);
       if (append && novelListChanged(existingData, response)) {
         response = await reloadNovelPrefix(endpoint, params, request, requestOffset + pageSize);
         if (!response) return false;
@@ -326,6 +356,10 @@ export function createNovelPage(deps) {
       finishLibraryRequest(request);
       state.novel.loading = false;
       state.novel.loadingMore = false;
+      if (!append && (existingData?.readingStatus || "") !== query.readingStatus) {
+        state.novel.data = null;
+        state.novel.hasMore = false;
+      }
       state.novel.status = error.message || (append ? "继续加载失败" : "小说书库读取失败");
       state.novel.libraryError = state.novel.status;
       state.novel.libraryErrorAppend = append;
@@ -367,7 +401,7 @@ export function createNovelPage(deps) {
     state.novel.loadingMore = false;
     state.novel.hasMore = !paged && query.mode !== "manage" && state.novel.data.nextOffset < Number(data.total || 0) && (data.hasMore ?? Boolean(data.books?.length));
     if (!paged) state.novel.page = 0;
-    state.novel.status = query.mode === "manage"
+    state.novel.status = query.mode === "manage" || query.readingStatus
       ? ""
       : data.total
         ? ""
@@ -383,6 +417,16 @@ export function createNovelPage(deps) {
     renderStats();
     if (append && !rebased && libraryList) updateLibraryTail(merged.added, merged.updated);
     else renderView();
+    if (query.readingStatus) {
+      filteredReadRevision = progressAtRead;
+      refreshFilteredReading();
+    }
+  }
+
+  function checkReadingStatusResponse(readingStatus, response) {
+    if (readingStatus && response?.readingStatus !== readingStatus) {
+      throw new Error("当前服务未返回阅读状态筛选结果。");
+    }
   }
 
   function novelBookKey(book, realm = "") {
@@ -440,6 +484,7 @@ export function createNovelPage(deps) {
         params.set("limit", String(Math.min(NOVEL_PREFIX_PAGE_SIZE, targetOffset - offset)));
         const page = await api(`${endpoint}?${params}`, { signal: request.controller.signal });
         if (!isCurrentLibraryRequest(request)) return null;
+        checkReadingStatusResponse(params.get("readingStatus"), page);
         if (first && novelListChanged(first, page)) break;
         first ||= page;
         last = page;
@@ -459,7 +504,7 @@ export function createNovelPage(deps) {
     ensureState();
     if (!bookId) return;
     const sourceList = capturePendingBookList(bookId);
-    if (!options.skipListCapture) captureLibraryReturn(bookId);
+    if (!options.skipListCapture) captureLibraryReturn(bookId, options.readingLaterBook);
     if (!options.skipProgressFlush) flushProgress();
     const navigation = beginNavigation();
     if (sourceList) pendingBookList = { ...sourceList, owner: navigation.id, controller: navigation.controller };
@@ -477,13 +522,18 @@ export function createNovelPage(deps) {
       data = await api(`/api/novels/${encodeURIComponent(bookId)}?catalog=0`, {
         signal: navigation.controller.signal
       });
+      const saved = options.readingLaterBook;
+      if (saved && (String(data.book?.id || "") !== saved.id || data.book?.sourceRealm !== saved.sourceRealm)) {
+        throw new Error("待读记录与当前书库中的书籍不一致。");
+      }
     } catch (error) {
       if (!isCurrentNavigation(navigation)) return false;
       finishNavigation(navigation);
       state.novel.loading = false;
       state.novel.status = error.message || "书籍详情读取失败";
       bookRecovery = { owner: navigation.id, bookId: String(bookId), message: state.novel.status,
-        skipRoute: options.skipRoute, title: state.novel.book?.title || state.novel.data?.books?.find(book => String(book.id) === String(bookId))?.title || "" };
+        readingLaterBook: options.readingLaterBook, skipRoute: options.skipRoute,
+        title: options.readingLaterBook?.title || state.novel.book?.title || state.novel.data?.books?.find(book => String(book.id) === String(bookId))?.title || "" };
       renderView();
       restoreBookRetryFocus(options);
       return false;
@@ -521,23 +571,25 @@ export function createNovelPage(deps) {
     ensureState();
     if (!bookId || !chapterIndex) return;
     const sourceList = capturePendingBookList(bookId, { kind: "chapter", chapterIndex, restoreProgress: options.restoreProgress });
-    if (!options.skipListCapture) captureLibraryReturn(bookId);
+    if (!options.skipListCapture) captureLibraryReturn(bookId, undefined, options.bookmarkShelfKey);
     const previousBookId = String(state.novel.book?.id || "");
     const previousBook = state.novel.book;
     const previousChapterIndex = Number(state.novel.chapter?.index || 0);
     const previousChapters = Array.isArray(state.novel.chapters) ? state.novel.chapters : [];
     if (!options.skipProgressFlush && previousBookId && previousChapterIndex) flushProgress();
-    const navigation = beginNavigation({ bookId, chapterIndex, allowCache: options.restoreProgress === false });
+    const allowCache = options.restoreProgress === false && !options.textMatch && !options.bookmarkShelfKey;
+    const navigation = beginNavigation({ bookId, chapterIndex, allowCache });
     if (sourceList) pendingBookList = { ...sourceList, owner: navigation.id, controller: navigation.controller };
     const readerVisible = Boolean(state.novel.chapter && document.querySelector(".novel-reader-page"));
     state.novel.loading = true;
     state.novel.status = "正在翻开章节";
-    if (!setReaderNavigationStatus("正在翻开章节…")) renderView();
+    if (!options.bookmarkShelfKey && !setReaderNavigationStatus("正在翻开章节…")) renderView();
     let data;
     try {
       data = await fetchChapterData(bookId, chapterIndex, {
-        allowCache: options.restoreProgress === false,
-        expectedChapterId: options.bookmark?.chapterId,
+        allowCache,
+        expectedBook: options.bookmark,
+        expectedChapterId: options.bookmark?.chapterId || options.textMatch?.chapterId,
         signal: navigation.controller.signal
       });
       if (options.bookmark && (!sameBookSnapshot(options.bookmark, data.book) || options.bookmark.chapterId !== data.chapter?.id)) {
@@ -551,9 +603,10 @@ export function createNovelPage(deps) {
       failedChapterNavigation = readerVisible ? {
         owner: navigationId, book: state.novel.book, chapterId: state.novel.chapter?.id,
         bookId, chapterIndex, message: state.novel.status,
-        options: { restoreProgress: options.restoreProgress, skipRoute: options.skipRoute, skipProgressFlush: options.skipProgressFlush, bookmark: options.bookmark }
+        options: { restoreProgress: options.restoreProgress, skipRoute: options.skipRoute, skipProgressFlush: options.skipProgressFlush,
+          bookmark: options.bookmark, textMatch: options.textMatch }
       } : null;
-      if (!readerVisible || !setReaderNavigationStatus(state.novel.status, "error", failedChapterNavigation)) renderView();
+      if (!options.bookmarkShelfKey && (!readerVisible || !setReaderNavigationStatus(state.novel.status, "error", failedChapterNavigation))) renderView();
       if (options.retryFocus && options.retryFocusRevision === readerFocusRevision) focusReaderControl("chapter-retry");
       return false;
     }
@@ -596,7 +649,8 @@ export function createNovelPage(deps) {
     renderStats();
     renderView();
     restoreReaderScroll({ saveProgress: true });
-    if (restoreRetryFocus) {
+    if (options.textMatch && chapterSearch?.jumpTo(options.textMatch.query)) scheduleProgressSave(120);
+    else if (restoreRetryFocus) {
       const heading = document.querySelector(".novel-reader-paper h1");
       if (heading) { heading.tabIndex = -1; heading.focus({ preventScroll: true }); }
     }
@@ -606,9 +660,12 @@ export function createNovelPage(deps) {
   }
 
   function beginNavigation(chapterTarget) {
+    readerAutoScroll.stop();
     clearProgressSaveFailure();
     clearPendingBookList();
+    bookmarkShelf.cancelRead();
     authorBrowser?.close();
+    bookTextSearch.close();
     uploadJob?.summaryController?.abort();
     failedChapterNavigation = null;
     bookRecovery = null;
@@ -643,9 +700,11 @@ export function createNovelPage(deps) {
   }
 
   function invalidateNavigation() {
+    readerAutoScroll.stop();
     clearProgressSaveFailure();
     clearPendingBookList();
     authorBrowser?.close();
+    bookTextSearch.close();
     uploadJob?.summaryController?.abort();
     failedChapterNavigation = null;
     bookRecovery = null;
@@ -663,7 +722,9 @@ export function createNovelPage(deps) {
 
   function resetReader(options = {}) {
     if (!options.keepFullscreen) void readerFullscreen.leave();
-    flushProgress();
+    chapterSearch?.close();
+    bookmarkShelf.cancelRead();
+    if (!options.skipProgressFlush) flushProgress();
     invalidateNavigation();
     invalidateLibraryRequest();
     collectionAdmin.stopPolling();
@@ -882,8 +943,9 @@ export function createNovelPage(deps) {
   }
 
   function fetchChapterData(bookId, chapterIndex, options = {}) {
-    const book = state.novel.book?.id === bookId ? state.novel.book : null;
-    const target = book ? [state.novel.chapter, state.novel.prev, state.novel.next, ...(state.novel.chapters || [])]
+    const currentBook = state.novel.book?.id === bookId ? state.novel.book : null;
+    const book = options.expectedBook || currentBook;
+    const target = sameBookSnapshot(book, currentBook) ? [state.novel.chapter, state.novel.prev, state.novel.next, ...(state.novel.chapters || [])]
       .find(chapter => chapter && Number(chapter.index) === Number(chapterIndex)) : null;
     if (options.allowCache) {
       const cached = cachedChapter(bookId, chapterIndex, book);
@@ -1006,11 +1068,15 @@ export function createNovelPage(deps) {
   function renderView() {
     ensureState();
     if (!els.workGrid) return;
+    readerAutoScroll.stop();
     document.title = state.novel.chapter
       ? `${state.novel.chapter.title} · ${state.novel.book?.title || "小说阅读"}`
       : state.novel.book ? `${state.novel.book.title} · 小说书库`
         : `${({ mine: "我的阅读", rankings: "小说排行", manage: "小说管理", author: state.novel.author })[state.novel.mode] || "小说书库"} · 本地阅读`;
     const readerFocus = document.activeElement?.dataset?.readerFocus;
+    bookTextSearch.close();
+    chapterSearch?.close();
+    chapterSearch = null;
     setReaderBodyClass();
     if (updatePendingBookListView()) return;
     if (updatePendingLibraryView()) return;
@@ -1072,7 +1138,7 @@ export function createNovelPage(deps) {
     retry.disabled = state.novel.loading;
     retry.addEventListener("click", () => {
       if (!retry.isConnected || currentBookRecovery() !== failure || !failure.message || state.novel.loading || navigationController) return;
-      void openBook(failure.bookId, { skipRoute: failure.skipRoute, skipListCapture: true, bookRecovery: failure,
+      void openBook(failure.bookId, { skipRoute: failure.skipRoute, skipListCapture: true, bookRecovery: failure, readingLaterBook: failure.readingLaterBook,
         retryFocus: document.activeElement === retry, retryFocusRevision: readerFocusRevision, retryScrollRevision: scrollInputRevision });
     });
     error.append(heading, message, retry);
@@ -1126,7 +1192,7 @@ export function createNovelPage(deps) {
     const book = data?.books?.find(book => String(book.id) === String(bookId));
     if (!home || !book || menu?.dataset.novelMenuContext !== novelSearchContext() || !libraryPresentation?.results.isConnected
         || !home.contains(libraryPresentation.results)
-        || ["mode", "author", "query", "category"].some(key => libraryPresentation[key] !== state.novel[key])
+        || ["mode", "author", "query", "category", "readingStatus"].some(key => libraryPresentation[key] !== state.novel[key])
         || libraryPresentation.sort?.value !== state.novel.sort) return null;
     const key = novelBookKey(book, data.sourceRealm);
     const row = [...home.querySelectorAll("[data-novel-book-key]")].find(row => row.dataset.novelBookKey === key);
@@ -1217,6 +1283,7 @@ export function createNovelPage(deps) {
         || ["mode", "author", "query", "category"].some(key => previous[key] !== next[key])) return null;
     const workspace = home.querySelector(".novel-library-workspace"), nextWorkspace = replacement.querySelector(".novel-library-workspace");
     const results = previous.results, nextResults = next.results, sort = previous.sort, nextSort = next.sort;
+    const reading = previous.reading, nextReading = next.reading;
     const controls = sort?.parentElement, nextControls = nextSort?.parentElement;
     if (!workspace || !nextWorkspace || !results?.isConnected || !controls?.isConnected || !sort?.options || !nextSort?.options
         || sort.options.length !== nextSort.options.length || [...sort.options].some((option, index) => option.value !== nextSort.options[index].value)) return null;
@@ -1224,8 +1291,9 @@ export function createNovelPage(deps) {
     // keyboard selection. Only move newly rendered siblings into the live tree.
     if (sort.value !== nextSort.value) sort.value = nextSort.value;
     sort.disabled = nextSort.disabled;
-    for (const child of [...controls.children]) if (child !== sort) child.remove();
-    for (const child of [...nextControls.children]) if (child !== nextSort) controls.insertBefore(child, sort);
+    if (reading && nextReading && reading.value !== nextReading.value) reading.value = nextReading.value;
+    for (const child of [...controls.children]) if (child !== sort && child !== reading) child.remove();
+    for (const child of [...nextControls.children]) if (child !== nextSort && child !== nextReading) controls.insertBefore(child, reading || sort);
     for (const child of [...results.children]) if (child !== controls) child.remove();
     for (const child of [...nextResults.children]) if (child !== nextControls) results.append(child);
     results.setAttribute("aria-busy", nextResults.getAttribute("aria-busy"));
@@ -1234,6 +1302,7 @@ export function createNovelPage(deps) {
     workspace.className = nextWorkspace.className;
     next.results = results;
     next.sort = sort;
+    next.reading = reading;
     return { workspace, replacement: nextWorkspace };
   }
 
@@ -1244,11 +1313,12 @@ export function createNovelPage(deps) {
         || libraryPresentation.mode !== state.novel.mode
         || libraryPresentation.author !== state.novel.author
         || libraryPresentation.query !== state.novel.query) return false;
-    const { results, title, count, sort, categories, status } = libraryPresentation;
+    const { results, title, count, sort, reading, categories, status } = libraryPresentation;
     results.setAttribute("aria-busy", "true");
     title.textContent = libraryResultTitle();
     count.textContent = "正在读取…";
     sort.value = state.novel.sort;
+    if (reading) reading.value = state.novel.readingStatus;
     for (const button of categories.children) {
       const active = button.dataset.novelCategory === state.novel.category;
       button.classList.toggle("active", active);
@@ -1380,6 +1450,18 @@ export function createNovelPage(deps) {
       clearSearch.addEventListener("click", () => openNovelSearch(""));
       controls.append(clearSearch);
     }
+    const sortContext = novelSearchContext();
+    const reading = ["books", "author"].includes(state.novel.mode) ? document.createElement("select") : null;
+    if (reading) {
+      reading.className = "novel-reading-status";
+      reading.setAttribute("aria-label", "阅读状态");
+      for (const [value, label] of READING_STATUS_OPTIONS) reading.add(new Option(label, value));
+      reading.value = state.novel.readingStatus;
+      reading.addEventListener("change", () => {
+        if (!reading.isConnected || state.activeView !== "novels" || state.novel.book || state.novel.chapter || sortContext !== novelSearchContext()) return;
+        changeReadingStatus(reading.value);
+      });
+    }
     const sort = document.createElement("select");
     sort.className = "novel-sort";
     sort.setAttribute("aria-label", "小说排序");
@@ -1391,7 +1473,6 @@ export function createNovelPage(deps) {
       sort.append(item);
     }
     sort.value = state.novel.sort || "updated";
-    const sortContext = novelSearchContext();
     sort.addEventListener("change", () => {
       if (!sort.isConnected || state.activeView !== "novels" || state.novel.book || state.novel.chapter || sortContext !== novelSearchContext()) return;
       state.novel.sort = sort.value;
@@ -1399,6 +1480,7 @@ export function createNovelPage(deps) {
       loadNovels({ replaceRoute: true }).catch(() => {});
     });
     if (state.novel.mode !== "mine") controls.append(sort);
+    if (reading) controls.insertBefore(reading, sort);
 
     const categories = document.createElement("div");
     categories.className = "novel-category-row";
@@ -1453,22 +1535,30 @@ export function createNovelPage(deps) {
       empty.className = "novel-empty-card";
       empty.setAttribute("role", "status");
       const emptyTitle = document.createElement("h3");
-      emptyTitle.textContent = state.novel.loading ? "正在读取书库" : state.novel.libraryError ? "书库暂时无法读取" : state.novel.query ? "没有找到这本书" : state.novel.mode === "mine" ? "还没有阅读记录" : "这里还没有小说";
+      const filtered = Boolean(reading && state.novel.readingStatus);
+      emptyTitle.textContent = state.novel.loading ? "正在读取书库" : state.novel.libraryError ? "书库暂时无法读取" : filtered ? "没有符合筛选的小说" : state.novel.query ? "没有找到这本书" : state.novel.mode === "mine" ? "还没有阅读记录" : "这里还没有小说";
       const emptyCopy = document.createElement("p");
-      emptyCopy.textContent = state.novel.libraryError || (state.novel.query ? "试试其他书名或作者，也可以清除搜索后浏览。" : state.novel.mode === "mine" ? "在书库打开一本书，阅读位置会自动保存在这里。" : "可以在管理页面导入本地 TXT 文件。");
+      emptyCopy.textContent = state.novel.libraryError || (filtered ? "" : state.novel.query ? "试试其他书名或作者，也可以清除搜索后浏览。" : state.novel.mode === "mine" ? "在书库打开一本书，阅读位置会自动保存在这里。" : "可以在管理页面导入本地 TXT 文件。");
+      emptyCopy.hidden = !emptyCopy.textContent;
       empty.append(emptyTitle, emptyCopy);
       if (!state.novel.loading) {
         const action = document.createElement("button");
         action.type = "button";
         action.className = "novel-secondary-button";
-        action.textContent = state.novel.libraryError ? "重试" : state.novel.query ? "清除搜索" : state.novel.mode === "mine" ? "浏览书库" : "导入小说";
-        action.addEventListener("click", () => state.novel.libraryError ? retryLibraryRead({ skipRoute: true }).catch(() => {}) : state.novel.query ? openNovelSearch("") : openNovelSection(state.novel.mode === "mine" ? "books" : "manage"));
+        action.textContent = state.novel.libraryError ? "重试" : filtered ? "清除阅读状态筛选" : state.novel.query ? "清除搜索" : state.novel.mode === "mine" ? "浏览书库" : "导入小说";
+        action.addEventListener("click", () => state.novel.libraryError ? retryLibraryRead({ skipRoute: true }).catch(() => {}) : filtered ? changeReadingStatus("") : state.novel.query ? openNovelSearch("") : openNovelSection(state.novel.mode === "mine" ? "books" : "manage"));
         empty.append(action);
       }
       list.append(empty);
     }
 
     shell.append(head);
+    if (state.novel.mode === "mine") {
+      const shelf = readLater.renderShelf(data.sourceRealm || summary.sourceRealm);
+      if (shelf) shell.append(shelf);
+      const marks = bookmarkShelf.renderShelf(data.sourceRealm || summary.sourceRealm);
+      if (marks) shell.append(marks);
+    }
     results.append(controls);
     const status = document.createElement("div");
     status.className = "novel-status-line";
@@ -1482,7 +1572,7 @@ export function createNovelPage(deps) {
     results.append(libraryFooter);
     libraryPresentation = {
       mode: state.novel.mode, author: state.novel.author, query: state.novel.query, category: state.novel.category,
-      results, title: resultTitle, count: resultCount, sort, categories, status
+      readingStatus: state.novel.readingStatus, results, title: resultTitle, count: resultCount, sort, reading, categories, status
     };
     if (sidebar.childElementCount) workspace.append(sidebar);
     else workspace.classList.add("without-sidebar");
@@ -1608,6 +1698,7 @@ export function createNovelPage(deps) {
     state.novel.mode = mode;
     state.novel.query = "";
     state.novel.category = "all";
+    state.novel.readingStatus = "";
     state.novel.author = "";
     state.novel.page = 0;
     state.novel.sort = mode === "mine" ? "progress" : mode === "rankings" ? "chars" : "updated";
@@ -1620,6 +1711,7 @@ export function createNovelPage(deps) {
   }
 
   function openNovelSearch(value, options = {}) {
+    const keepFilters = ["books", "author"].includes(state.novel.mode) && state.novel.readingStatus && !state.novel.book && !state.novel.chapter;
     clearLibraryReturn();
     novelMenuRevision += 1;
     collectionAdmin.stopPolling();
@@ -1627,12 +1719,15 @@ export function createNovelPage(deps) {
     invalidateNavigation();
     state.novel.book = null;
     state.novel.chapter = null;
-    state.novel.mode = "books";
     state.novel.query = String(value || "").trim();
-    state.novel.category = "all";
-    state.novel.author = "";
+    if (!keepFilters) {
+      state.novel.mode = "books";
+      state.novel.category = "all";
+      state.novel.author = "";
+      state.novel.sort = "updated";
+      state.novel.readingStatus = "";
+    }
     state.novel.page = 0;
-    state.novel.sort = "updated";
     state.novel.data = null;
     loadNovels().catch((error) => {
       state.novel.loading = false;
@@ -2099,6 +2194,7 @@ export function createNovelPage(deps) {
     state.novel.author = name;
     state.novel.query = "";
     state.novel.category = "all";
+    state.novel.readingStatus = "";
     state.novel.page = 0;
     state.novel.sort = "title";
     state.novel.data = null;
@@ -2176,6 +2272,13 @@ export function createNovelPage(deps) {
       loadNovels({ replaceRoute: true }).catch(() => {});
     });
     return button;
+  }
+
+  function changeReadingStatus(value) {
+    if (state.novel.readingStatus === value) return;
+    state.novel.readingStatus = value;
+    state.novel.page = 0;
+    loadNovels().catch(() => {});
   }
 
   function renderRecent(items) {
@@ -2260,7 +2363,10 @@ export function createNovelPage(deps) {
           && pending.chapterIndex === Number(book.progress?.chapterIndex || 1) && pending.restoreProgress === Boolean(book.progress)) return;
       openReading(book);
     });
-    actions.append(detail, read);
+    actions.append(detail);
+    const saveForLater = readLater.toggleControl(book, state.novel.data?.sourceRealm);
+    if (saveForLater) actions.append(saveForLater);
+    actions.append(read);
     row.append(body, actions);
     return row;
   }
@@ -2339,6 +2445,16 @@ export function createNovelPage(deps) {
     catalogButton.textContent = "查看目录";
     catalogButton.addEventListener("click", () => document.querySelector(".novel-catalog")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     actions.append(start, catalogButton);
+    if (book.sourceRealm && book.catalogRevision) {
+      const search = document.createElement("button");
+      search.type = "button";
+      search.className = "novel-secondary-button";
+      search.textContent = "搜索全书正文";
+      search.addEventListener("click", () => openBookTextSearch(book, search));
+      actions.append(search);
+    }
+    const saveForLater = readLater.toggleControl(book);
+    if (saveForLater) actions.append(saveForLater);
     const tools = document.createElement("details");
     tools.className = "novel-detail-tools";
     const toolsSummary = document.createElement("summary");
@@ -2368,7 +2484,15 @@ export function createNovelPage(deps) {
       toolsContent.append(fileSize);
     }
     tools.append(toolsSummary, toolsContent);
-    info.append(eyebrow, title, meta, metrics, actions, tools);
+    info.append(eyebrow, title, meta, metrics, actions);
+    if (state.novel.status) {
+      const status = document.createElement("p");
+      status.className = "novel-detail-search-status";
+      status.setAttribute("role", "status");
+      status.textContent = state.novel.status;
+      info.append(status);
+    }
+    info.append(tools);
     const side = document.createElement("aside");
     side.className = "novel-detail-reading";
     const sideTitle = document.createElement("strong");
@@ -2756,6 +2880,7 @@ export function createNovelPage(deps) {
         state.novel.author = "";
         state.novel.query = "";
         state.novel.category = "all";
+        state.novel.readingStatus = "";
         state.novel.sort = "updated";
         state.novel.page = 0;
         state.novel.data = null;
@@ -2915,7 +3040,7 @@ export function createNovelPage(deps) {
     bottom.append(navButton("目录", () => toggleCatalog(true), false));
     bottom.append(navButton("下一章", () => openAdjacent(1), !state.novel.next));
     paper.append(title, meta, content, bottom);
-    page.append(paper, renderReaderToolbar());
+    page.append(paper, renderReaderToolbar(page, content));
     if (state.novel.catalogOpen) page.append(renderCatalogDrawer());
     if (state.novel.settingsOpen) page.append(renderSettingsPanel());
     els.workGrid.append(page);
@@ -2982,17 +3107,78 @@ export function createNovelPage(deps) {
     if (focused?.disabled && focused.dataset.readerFocus) focusReaderControl(focused.dataset.readerFocus);
   }
 
-  function renderReaderToolbar() {
+  function openBookTextSearch(book, trigger, initialQuery = "") {
+    const owner = navigationId;
+    const chapterId = state.novel.chapter?.id;
+    const isCurrent = () => state.activeView === "novels" && owner === navigationId && trigger.isConnected
+      && !navigationController && !state.novel.loading && sameBookSnapshot(book, state.novel.book)
+      && chapterId === state.novel.chapter?.id;
+    bookTextSearch.open({ book, trigger, initialQuery, isCurrent, openMatch: (match, query, focused) => {
+      if (!isCurrent()) return;
+      if (match.id === chapterId) {
+        if (chapterSearch?.jumpTo(query)) scheduleProgressSave(120);
+        return;
+      }
+      void openChapter(book.id, match.index, { restoreProgress: false, textMatch: { chapterId: match.id, query },
+        retryFocus: focused, retryFocusRevision: readerFocusRevision });
+    } });
+  }
+
+  function renderReaderToolbar(page, content) {
     const toolbar = document.createElement("aside");
     toolbar.className = "novel-reader-toolbar";
     toolbar.inert = state.novel.catalogOpen;
     toolbar.setAttribute("aria-label", "阅读工具");
+    const find = toolbarButton("查找", "⌕", () => {
+      if (!find.isConnected || state.novel.catalogOpen) return;
+      readerAutoScroll.stop("pause");
+      if (state.novel.settingsOpen) toggleSettings(false);
+      chapterSearch?.toggle();
+    });
+    find.setAttribute("aria-expanded", "false");
+    const book = state.novel.book;
+    chapterSearch = createNovelChapterSearch({ page, content, trigger: find, formatNumber, onLocate: cancelReaderScroll,
+      onBookSearch: book.sourceRealm && book.catalogRevision ? query => {
+        chapterSearch?.close();
+        openBookTextSearch(book, find, query);
+      } : undefined });
     toolbar.append(toolbarButton("目录", "☰", () => toggleCatalog()));
+    toolbar.append(find);
     toolbar.append(toolbarButton("书页", "□", () => openBook(state.novel.book.id)));
     toolbar.append(toolbarButton("夜间", "☾", () => updateSettings({ night: !state.novel.settings.night })));
     toolbar.append(toolbarButton("下载", "↓", () => downloadBook(state.novel.book)));
+    const scroll = toolbarButton("自动滚动", "↧", () => toggleReaderAutoScroll(page));
+    scroll.classList.add("novel-auto-scroll");
+    scroll.setAttribute("aria-pressed", "false");
+    toolbar.append(scroll);
     toolbar.append(toolbarButton("设置", "Aa", () => toggleSettings()));
     return toolbar;
+  }
+
+  function toggleReaderAutoScroll(page) {
+    if (!page.isConnected || state.activeView !== "novels" || state.novel.catalogOpen || state.novel.loading || navigationController) return;
+    if (readerAutoScroll.stop("pause")) return;
+    chapterSearch?.close();
+    if (state.novel.settingsOpen) toggleSettings(false);
+    const owner = navigationId;
+    readerAutoScroll.start({
+      isCurrent: () => page.isConnected && state.activeView === "novels" && owner === navigationId,
+      end: () => Math.min(
+        document.documentElement.scrollHeight - window.innerHeight,
+        Math.ceil(page.getBoundingClientRect().bottom + window.scrollY - window.innerHeight)
+      ),
+      speed: NOVEL_AUTO_SCROLL_SPEEDS[state.novel.settings.autoScrollSpeed]
+    });
+  }
+
+  function syncReaderAutoScroll(running, reason) {
+    const button = els.workGrid?.querySelector(".novel-auto-scroll");
+    if (button) {
+      button.setAttribute("aria-pressed", String(running));
+      button.querySelector("strong").textContent = running ? "Ⅱ" : "↧";
+      button.querySelector("span").textContent = running ? "暂停" : "自动滚动";
+    }
+    if (reason === "end" || reason === "pause") scheduleProgressSave(120);
   }
 
   function toolbarButton(label, icon, action) {
@@ -3249,6 +3435,20 @@ export function createNovelPage(deps) {
     title.textContent = "阅读设置";
     panel.append(title);
     panel.append(settingRow("章节位置", readerPositionControl()));
+    const scrollSpeed = document.createElement("select");
+    scrollSpeed.className = "novel-auto-scroll-speed";
+    scrollSpeed.setAttribute("aria-label", "自动滚动速度");
+    for (const [value, label] of [["slow", "慢速"], ["normal", "正常"], ["fast", "快速"]]) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      scrollSpeed.append(option);
+    }
+    scrollSpeed.value = state.novel.settings.autoScrollSpeed;
+    scrollSpeed.addEventListener("change", () => {
+      if (scrollSpeed.isConnected) updateSettings({ autoScrollSpeed: scrollSpeed.value });
+    });
+    panel.append(settingRow("滚动速度", scrollSpeed));
     panel.append(novelBookmarksControl(state.novel.book, state.novel.chapter));
     if (readerFullscreen.state().supported) panel.append(readerFullscreenControl());
     panel.append(settingRow("主题", themeButtons()));
@@ -3502,18 +3702,18 @@ export function createNovelPage(deps) {
     }
   }
 
-  function captureLibraryReturn(bookId) {
+  function captureLibraryReturn(bookId, readingLaterBook, bookmarkShelfKey) {
     libraryReturnRestore?.abort();
     const home = els.workGrid?.querySelector(".novel-home");
     const data = state.novel.data;
-    if (state.novel.book || state.novel.chapter || !home || !data?.books?.length
+    if (state.novel.book || state.novel.chapter || !home || !data || (!readingLaterBook && !bookmarkShelfKey && !data.books?.length)
         || !["books", "author", "mine", "rankings"].includes(state.novel.mode)) {
       if (libraryReturnContext?.bookId !== String(bookId)) libraryReturnContext = null;
       return;
     }
-    const index = data.books.findIndex(book => String(book.id) === String(bookId));
-    const book = data.books[index] || state.novel.summary?.recent?.find(book => String(book.id) === String(bookId));
-    const key = book ? novelBookKey(book, data.sourceRealm) : "";
+    const index = data.books?.findIndex(book => String(book.id) === String(bookId)) ?? -1;
+    const book = data.books?.[index] || state.novel.summary?.recent?.find(book => String(book.id) === String(bookId));
+    const key = bookmarkShelfKey || (readingLaterBook ? readingLaterBookKey(readingLaterBook) : book ? novelBookKey(book, data.sourceRealm) : "");
     const entries = [...home.querySelectorAll("[data-novel-book-key]")];
     const entry = entries.find(entry => entry.dataset.novelBookKey === key);
     const active = document.activeElement;
@@ -3522,7 +3722,7 @@ export function createNovelPage(deps) {
     const opening = currentPendingBookList();
     libraryReturnContext = {
       bookId: String(bookId), data, summary: state.novel.summary, hasMore: state.novel.hasMore,
-      query: state.novel.query, category: state.novel.category, sort: state.novel.sort,
+      query: state.novel.query, category: state.novel.category, readingStatus: state.novel.readingStatus, sort: state.novel.sort,
       mode: state.novel.mode, author: state.novel.author, page: state.novel.page,
       status: opening?.sourceStatus ?? state.novel.status, libraryError: state.novel.libraryError, libraryErrorAppend: state.novel.libraryErrorAppend,
       invalid: Boolean(state.novel.loading && !opening) || invalidLibraryReturnData.has(data),
@@ -3549,16 +3749,16 @@ export function createNovelPage(deps) {
     flushProgress();
     const currentBook = state.novel.book;
     const unopenedSource = !currentBook && currentBookRecovery()?.bookId === context.bookId;
-    const cached = !options.removedBookId && !context.invalid && !invalidLibraryReturnData.has(context.data) && !["mine", "rankings"].includes(context.mode)
+    const cached = !options.removedBookId && !context.readingStatus && !context.invalid && !invalidLibraryReturnData.has(context.data) && !["mine", "rankings"].includes(context.mode)
       && state.novel.data === context.data && (unopenedSource || !context.bookSnapshot || sameBookSnapshot(context.bookSnapshot, currentBook));
     if (cached) {
       const entry = context.data.books.find(book => String(book.id) === context.bookId);
       if (entry && currentBook) Object.assign(entry, { progress: currentBook.progress || null, progressRecovery: currentBook.progressRecovery || null });
     }
     clearLibraryReturn();
-    resetReader();
+    resetReader({ skipProgressFlush: Boolean(context.readingStatus) });
     const revision = retry ? novelMenuRevision : ++novelMenuRevision;
-    for (const key of ["mode", "query", "category", "sort", "author", "page"]) state.novel[key] = context[key];
+    for (const key of ["mode", "query", "category", "readingStatus", "sort", "author", "page"]) state.novel[key] = context[key];
     state.novel.book = null;
     state.novel.chapter = null;
     state.novel.chapters = [];
@@ -3571,7 +3771,7 @@ export function createNovelPage(deps) {
     let expectedPage = context.page;
     const matchesConditions = () => state.activeView === "novels" && revision === novelMenuRevision
       && !state.novel.book && !state.novel.chapter && !state.novel.loading
-      && ["mode", "query", "category", "sort", "author"].every(key => state.novel[key] === context[key]);
+      && ["mode", "query", "category", "readingStatus", "sort", "author"].every(key => state.novel[key] === context[key]);
     const isCurrent = () => matchesConditions() && state.novel.page === expectedPage;
     const restore = createNovelListReturnRestore({
       grid: els.workGrid, anchor: context.anchor, isCurrent,
@@ -3580,7 +3780,7 @@ export function createNovelPage(deps) {
     libraryReturnRestore = restore;
     if (!retry) pushRoute({ view: "novels", novelBookId: "", novelChapterIndex: "", novelMode: context.mode,
       novelQuery: context.query, novelCategory: context.category, novelSort: context.sort,
-      novelAuthor: context.author, novelPage: context.page });
+      novelReadingStatus: context.readingStatus, novelAuthor: context.author, novelPage: context.page });
     try {
       if (cached) { renderStats(); renderView(); }
       else {
@@ -3784,6 +3984,7 @@ export function createNovelPage(deps) {
     state.novel.author = "";
     state.novel.query = "";
     state.novel.category = "all";
+    state.novel.readingStatus = "";
     state.novel.sort = "updated";
     state.novel.page = 0;
     state.novel.data = null;
@@ -3797,6 +3998,7 @@ export function createNovelPage(deps) {
   }
 
   function toggleCatalog(force) {
+    readerAutoScroll.stop("pause");
     const ratio = state.novel.chapter ? currentReaderRatio() : 0;
     const opening = force === undefined ? !state.novel.catalogOpen : Boolean(force);
     state.novel.catalogOpen = opening;
@@ -3806,6 +4008,7 @@ export function createNovelPage(deps) {
       state.novel.catalogError = "";
     }
     if (state.novel.catalogOpen) {
+      chapterSearch?.close();
       state.novel.settingsOpen = false;
     }
     if (needsCatalog) {
@@ -3898,9 +4101,11 @@ export function createNovelPage(deps) {
   }
 
   function toggleSettings(force) {
+    readerAutoScroll.stop("pause");
     const ratio = state.novel.chapter ? currentReaderRatio() : 0;
     state.novel.settingsOpen = force === undefined ? !state.novel.settingsOpen : Boolean(force);
     if (state.novel.settingsOpen) {
+      chapterSearch?.close();
       state.novel.catalogOpen = false;
     }
     state.novel.pendingScrollRatio = ratio;
@@ -3916,6 +4121,7 @@ export function createNovelPage(deps) {
   }
 
   function updateSettings(patch) {
+    readerAutoScroll.stop("pause");
     const ratio = state.novel.chapter ? currentReaderRatio() : 0;
     state.novel.settings = normalizeSettings({ ...state.novel.settings, ...patch });
     writeSettings(state.novel.settings);
@@ -3996,7 +4202,8 @@ export function createNovelPage(deps) {
       () => {
         if (state.activeView !== "novels" || state.novel?.loading || navigationController
             || !state.novel?.book || !state.novel?.chapter) return;
-        scheduleProgressSave(500);
+        if (!readerAutoScroll.isRunning()) scheduleProgressSave(500);
+        else if (progressTimer === null) scheduleProgressSave(5000);
       },
       { passive: true }
     );
@@ -4004,6 +4211,7 @@ export function createNovelPage(deps) {
       if (event.type === "keydown" && !["PageUp", "PageDown", "Home", "End", " ", "ArrowUp", "ArrowDown"].includes(event.key)) return;
       if (event.target instanceof Element && event.target.closest("input, select, textarea, button, a")) return;
       if (state.activeView !== "novels") return;
+      readerAutoScroll.stop("pause");
       scrollInputRevision += 1;
       if (!pendingScrollRestore) return;
       cancelReaderScroll();
@@ -4018,9 +4226,13 @@ export function createNovelPage(deps) {
     if (progressLifecycleInstalled) return;
     progressLifecycleInstalled = true;
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden) flushProgress();
+      if (document.hidden) {
+        readerAutoScroll.stop();
+        flushProgress();
+      }
     });
     window.addEventListener("pagehide", () => {
+      readerAutoScroll.stop();
       window.clearTimeout(progressTimer);
       progressTimer = null;
       // Also flush books left earlier, even when the current view has no reader.
@@ -4132,12 +4344,32 @@ export function createNovelPage(deps) {
   }
 
   function applyProgressReceipt(record, data) {
-    if (isCurrentProgress(record) && validProgressReceipt(record, data)) {
+    if (!validProgressReceipt(record, data)) return;
+    if (isCurrentProgress(record)) {
       confirmedProgressRevision = Math.max(confirmedProgressRevision, record.revision);
       state.novel.book = { ...state.novel.book, progress: data.progress, progressRecovery: null };
       const failure = currentProgressSaveFailure();
       if (failure && record.revision >= failure.record.revision) clearProgressSaveFailure({ restoreFocus: true });
     }
+    if (state.activeView === "novels" && state.novel.readingStatus && !state.novel.book && !state.novel.chapter
+        && (!state.novel.data?.sourceRealm || record.sourceRealm === state.novel.data.sourceRealm) && progressAccountCurrent(record)) {
+      filteredProgressRevision += 1;
+      refreshFilteredReading();
+    }
+  }
+
+  function refreshFilteredReading() {
+    const { data, readingStatus } = state.novel;
+    if (!readingStatus || data?.readingStatus !== readingStatus || filteredReadRevision === filteredProgressRevision
+        || state.novel.loading || state.novel.loadingMore || state.novel.libraryError) return;
+    // A progress write can settle after a return read took its snapshot.
+    // Re-read the loaded prefix without replacing the user's route.
+    window.setTimeout(() => {
+      if (state.activeView !== "novels" || state.novel.book || state.novel.chapter || navigationController
+          || state.novel.loading || state.novel.loadingMore || state.novel.libraryError || state.novel.data !== data
+          || state.novel.readingStatus !== readingStatus || filteredReadRevision === filteredProgressRevision) return;
+      loadNovels({ skipRoute: true, restoreCount: Math.max(NOVEL_BOOK_PAGE_SIZE, novelNextOffset(data, 0)) }).catch(() => {});
+    }, 0);
   }
 
   function finishProgressWrite(record) {
@@ -4192,6 +4424,11 @@ export function createNovelPage(deps) {
     window.addEventListener("focusin", () => { readerFocusRevision += 1; });
     window.addEventListener("keydown", (event) => {
       if (state.activeView !== "novels" || !state.novel?.chapter) return;
+      if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && event.keyCode !== 229
+          && chapterSearch?.close({ restoreFocus: true })) {
+        event.preventDefault();
+        return;
+      }
       if (event.key === "Escape" && (state.novel.catalogOpen || state.novel.settingsOpen)) {
         event.preventDefault();
         const returnFocus = state.novel.catalogOpen ? "toolbar-目录" : "toolbar-设置";
@@ -4202,6 +4439,11 @@ export function createNovelPage(deps) {
         if (!updateReaderPanels()) renderView();
         restoreReaderScroll();
         focusReaderControl(returnFocus);
+        return;
+      }
+      if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && event.keyCode !== 229
+          && readerAutoScroll.stop("pause")) {
+        event.preventDefault();
         return;
       }
       if (event.key === "Tab" && state.novel.catalogOpen) {
@@ -4358,6 +4600,7 @@ function normalizeSettings(input = {}) {
     font: ["yahei", "simsun", "kaiti"].includes(input.font) ? input.font : "yahei",
     fontSize: clampNumber(input.fontSize, 16, 30, 20),
     lineHeight: clampNumber(input.lineHeight, 1.5, 2.4, 1.9),
+    autoScrollSpeed: Object.hasOwn(NOVEL_AUTO_SCROLL_SPEEDS, input.autoScrollSpeed) ? input.autoScrollSpeed : "normal",
     width,
     widthVersion: 2
   };

@@ -2,12 +2,14 @@
 // 这些常量原先分散在 music-page.js 顶部，集中到此处以便 state / api / player /
 // actions / views 各模块复用，避免重复定义。
 
-export const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+export const MUSIC_SLEEP_AFTER_CURRENT = -1;
+export const MUSIC_SLEEP_TIMER_OPTIONS = [0, MUSIC_SLEEP_AFTER_CURRENT, 10, 15, 30, 45, 60, 90];
 export const MUSIC_PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 
 export const MUSIC_PAGE_LIMIT = 120;
 export const MUSIC_ARTIST_PAGE_LIMIT = 80;
 export const MUSIC_ALBUM_PAGE_LIMIT = 80;
+export const MUSIC_PLAYLIST_TRACK_LIMIT = 2000;
 
 export const DESKTOP_QUEUE_PREVIEW_LIMIT = 24;
 export const DESKTOP_QUEUE_PAGE_SIZE = 120;

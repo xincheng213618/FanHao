@@ -11,7 +11,8 @@ import { createShortVideoInteractionState } from "./interaction-state.js?v=20261
 import { createShortVideoFilterControls } from "./filter-controls.js?v=20260810-author-account-status-01";
 import { createIcon, railButton, setIconButton } from "./icons.js?v=20260824-local-file-actions-01";
 import { createShortVideoLocalActions } from "./local-actions.js?v=20260824-local-file-actions-01";
-import { createShortVideoListWindow } from "./list-window.js?v=20260716-short-video-list-window-01";
+import { createShortVideoListWindow } from "./list-window.js?v=20261112-feed-position-01";
+import { captureWebAccount } from "../../platform/accounts/session-context.js";
 import { createShortVideoMediaCache } from "./media-cache.js?v=20261027-detail-lifecycle-01";
 import { allowShortVideoSpeculativePrewarm } from "./prewarm-policy.js?v=20261027-prewarm-budget-01";
 import { runShortVideoRead } from "./read-request.js?v=20261027-detail-lifecycle-01";
@@ -100,6 +101,7 @@ export function createShortVideoPage(deps) {
   let shortVideoListCardsPromise = null;
   let shortVideoListCards = null;
   let shortVideoHomePresentation = null;
+  let shortVideoFeedPosition = null;
   const playbackRenditionPolicy = createShortVideoPlaybackRenditionPolicy({ api });
   const shortVideoInteractionState = createShortVideoInteractionState();
   const deleteRecoveryController = createShortVideoDeleteRecoveryController({ api });
@@ -391,6 +393,7 @@ export function createShortVideoPage(deps) {
     attach: attachShortVideoWindow,
     render: renderShortVideoWindow,
     reset: resetShortVideoWindow,
+    restorePosition: restoreShortVideoListPosition,
     resize: resizeShortVideoWindow,
     scheduleAppendContinuation: scheduleShortVideoAppendContinuation,
     scheduleUpdate: scheduleShortVideoWindowUpdate
@@ -1138,7 +1141,7 @@ export function createShortVideoPage(deps) {
       });
       resumeActiveSound();
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-      if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: openingVideo.id });
+      if (!options.skipRoute) (options.replaceRoute ? replaceRoute : pushRoute)({ view: "shortVideos", shortVideoId: openingVideo.id });
       loadShortVideoSummary().catch(handleSummaryLoadError);
       hydratePromotedShortVideo(openingVideo).catch((error) => console.warn(error));
       return true;
@@ -1212,7 +1215,7 @@ export function createShortVideoPage(deps) {
       });
       resumeActiveSound();
       window.scrollTo({ top: 0, left: 0, behavior: "auto" });
-      if (!options.skipRoute) pushRoute({ view: "shortVideos", shortVideoId: data.video.id });
+      if (!options.skipRoute) (options.replaceRoute ? replaceRoute : pushRoute)({ view: "shortVideos", shortVideoId: data.video.id });
       loadShortVideoSummary().catch(handleSummaryLoadError);
       loadAdjacentVideos(data.video.id, owner).then((loaded) => {
         if (!loaded) return;
@@ -1344,6 +1347,60 @@ export function createShortVideoPage(deps) {
       && scope === shortVideoHomePresentation.scope && scope === shortVideoHomeScope();
   }
 
+  async function openShortVideoFeedCard(videoId, options) {
+    const trigger = options.trigger;
+    if (!isCurrentShortVideoHomeControl(trigger, shortVideoHomeScope())
+      || state.shortVideo.loading || !state.shortVideo.data) return openVideo(videoId, options);
+    const grid = trigger.closest(".short-video-virtual-grid");
+    if (!grid) return openVideo(videoId, options);
+    const position = {
+      key: `${Date.now()}:${Math.random()}`,
+      scope: shortVideoListScope(),
+      account: captureWebAccount(),
+      videoId: String(videoId),
+      scrollY: window.scrollY,
+      gridWidth: grid.clientWidth,
+      cardTop: trigger.closest(".short-video-card").getBoundingClientRect().top,
+      restoreFocus: document.activeElement === trigger
+    };
+    const history = window.history;
+    history.replaceState({ ...history.state, shortVideoFeedPosition: position.key }, "");
+    shortVideoFeedPosition = position;
+    const opened = await openVideo(videoId, options);
+    if (opened && shortVideoFeedPosition === position && ownsShortVideoFeedPosition(position)
+      && String(history.state?.fanhaoRoute?.shortVideoId) === position.videoId) {
+      history.replaceState({ ...history.state, shortVideoFeedOrigin: position.key }, "");
+    }
+    return opened;
+  }
+
+  function ownsShortVideoFeedPosition(position) {
+    if (!position || state.activeView !== "shortVideos" || shortVideoListScope() !== position.scope) return false;
+    const account = captureWebAccount();
+    return account.owner === position.account.owner && account.revision === position.account.revision;
+  }
+
+  function restoreShortVideoFeedRoute(previousScope) {
+    const position = shortVideoFeedPosition;
+    const ownsRoute = () => window.history.state?.shortVideoFeedPosition === position?.key
+      && ownsShortVideoFeedPosition(position);
+    // The viewer retains the current feed envelope, including pages appended
+    // while opening and mutations acknowledged during playback.
+    if (!ownsRoute() || previousScope !== position.scope || !state.shortVideo.data) return false;
+    resetShortVideoViewerForHome();
+    if (state.shortVideo.data.usersLoading && state.shortVideo.query && !state.shortVideo.authorPage) {
+      publishSearchUsers(startSearchUsers(state.shortVideo.query)).catch(showError);
+    }
+    enter({ skipRoute: true, deferInitialLoad: true });
+    const home = shortVideoHomePresentation;
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      if (ownsRoute() && home === shortVideoHomePresentation && isMountedShortVideoHomeControl(home?.content)) {
+        restoreShortVideoListPosition(position);
+      }
+    }));
+    return true;
+  }
+
   function preserveShortVideoHomeDuringLoad(append) {
     if (append) return false;
     const home = els.workGrid?.querySelector?.(".short-video-home");
@@ -1455,7 +1512,7 @@ export function createShortVideoPage(deps) {
     if (shortVideoListCards) return Promise.resolve(shortVideoListCards);
     if (shortVideoListCardsPromise) return shortVideoListCardsPromise;
     markShortVideoPerformance("list-cards-module-start");
-    const moduleUrl = "/modules/short-videos/list-cards.js?v=20260810-author-account-status-01";
+    const moduleUrl = "/modules/short-videos/list-cards.js?v=20261112-feed-position-01";
     shortVideoListCardsPromise = import(moduleUrl).then((module) => {
       if (typeof module.createShortVideoListCards !== "function") {
         throw new Error("短视频列表模块加载失败");
@@ -1478,7 +1535,7 @@ export function createShortVideoPage(deps) {
         isGalleryPost,
         isShortVideoAuthorDetailPage,
         openShortVideoAuthorPage,
-        openVideo,
+        openVideo: openShortVideoFeedCard,
         prewarmShortVideoPlayback: prewarmShortVideoListCard,
         rememberShortVideo,
         shortVideoAuthorHandle,
@@ -4698,7 +4755,8 @@ export function createShortVideoPage(deps) {
       } else if (hasCachedAdjacent) {
         await promoteAdjacentMedia(cachedVideo, direction, { renderCurrent: true });
       } else {
-        await openVideo(id, { renderLoading: false, preserveWheelGesture: true });
+        await openVideo(id, { renderLoading: false, preserveWheelGesture: true,
+          replaceRoute: Boolean(window.history?.state?.shortVideoFeedOrigin) });
       }
       markShortVideoPerformance("adjacent-switch-ready", {
         videoId: String(state.shortVideo.current?.id || id),
@@ -5875,18 +5933,16 @@ export function createShortVideoPage(deps) {
     shortVideoOpenError = "";
     flushActiveShortVideoWatch();
     if (collectionsController.returnFromCollectionVideo()) return;
+    const origin = window.history?.state?.shortVideoFeedOrigin;
+    if (origin && state.shortVideo.current && origin === shortVideoFeedPosition?.key && ownsShortVideoFeedPosition(shortVideoFeedPosition)) {
+      window.history.back();
+      return;
+    }
     if (authorPanelReturnFeed) {
       applyShortVideoFeedSnapshot(authorPanelReturnFeed);
       authorPanelReturnFeed = null;
     }
-    state.shortVideo.current = null;
-    state.shortVideo.prevVideo = null;
-    state.shortVideo.nextVideo = null;
-    state.shortVideo.prevId = "";
-    state.shortVideo.nextId = "";
-    state.shortVideo.slideDirection = 0;
-    state.shortVideo.loading = false;
-    state.shortVideo.status = "";
+    resetShortVideoViewerForHome();
     setBodyClass();
     renderStats();
     renderView();
@@ -5895,6 +5951,17 @@ export function createShortVideoPage(deps) {
       return;
     }
     pushRoute({ view: "shortVideos", shortVideoId: "" });
+  }
+
+  function resetShortVideoViewerForHome() {
+    state.shortVideo.current = null;
+    state.shortVideo.prevVideo = null;
+    state.shortVideo.nextVideo = null;
+    state.shortVideo.prevId = "";
+    state.shortVideo.nextId = "";
+    state.shortVideo.slideDirection = 0;
+    state.shortVideo.loading = false;
+    state.shortVideo.status = "";
   }
   function showShortVideoSearchOverlay(trigger = null) {
     cancelShortVideoPanelLoading();
@@ -7530,7 +7597,7 @@ export function createShortVideoPage(deps) {
         return;
       }
       const fallbackId = nextId || prevId;
-      if (fallbackId) await openVideo(fallbackId);
+      if (fallbackId) await openVideo(fallbackId, { replaceRoute: Boolean(window.history?.state?.shortVideoFeedOrigin) });
       else showHome();
       return;
     }
@@ -7946,6 +8013,8 @@ export function createShortVideoPage(deps) {
     loadVideos,
     openRouteTarget,
     openVideo,
+    restoreFeedRoute: restoreShortVideoFeedRoute,
+    listScope: shortVideoListScope,
     renderStats,
     renderView
   };

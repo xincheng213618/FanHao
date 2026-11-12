@@ -78,6 +78,28 @@ export async function runSortControls({ casePattern = "", sourceOverrides = {} }
         } finally { runtime.pending?.release(); await page.close(); }
       });
     }
+    await run("person sort icons change direction and preserve keyboard focus", async () => {
+      const page = await open("/fanhao?personId=sort-person");
+      try {
+        const options = page.locator(".person-sort-option");
+        const rating = options.first();
+        assert.equal(await options.count(), 5);
+        assert.equal(await options.nth(1).getAttribute("aria-label"), "发行日期，降序");
+        await rating.focus();
+        for (const [mode, direction] of [["ratingDesc", "降序"], ["ratingAsc", "升序"]]) {
+          const response = page.waitForResponse(value => {
+            const url = new URL(value.url());
+            return url.pathname === "/api/people/sort-person" && url.searchParams.get("sort") === mode;
+          });
+          await page.keyboard.press("Enter");
+          await (await response).finished();
+          await page.locator(".work-card").first().waitFor();
+          assert.equal(await rating.getAttribute("aria-label"), `评分，${direction}`);
+          assert.equal(await rating.getAttribute("aria-pressed"), "true");
+          assert.equal(await rating.evaluate(button => button === document.activeElement), true);
+        }
+      } finally { await page.close(); }
+    });
     await run("detached sort control cannot overwrite a new people index", async () => {
       const page = await open("/fanhao/favorites");
       try {
@@ -114,7 +136,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (!option) {
     const source = fs.readFileSync(path.join(publicRoot, "app.js"), "utf8").replaceAll("\r\n", "\n");
     for (const negative of [
-      { name: "connected statistics ancestor", marker: "if (child !== controls && !content.includes(child)) child.remove();", replacement: "if (!content.includes(child)) child.remove();", pattern: "favorites sort control stays", failure: /same-list statistics updates must preserve the original sort control, ancestors and native options/ },
+      { name: "connected statistics ancestor", marker: "if (child !== controls && child !== search && !content.includes(child)) child.remove();", replacement: "if (child !== search && !content.includes(child)) child.remove();", pattern: "favorites sort control stays", failure: /same-list statistics updates must preserve the original sort control, ancestors and native options/ },
       { name: "no transient wrapper move", marker: "if (wrap.parentElement !== els.statsRow) els.statsRow.append(wrap);", replacement: "els.statsRow.append(wrap);", pattern: "favorites sort control stays", failure: /same-list statistics updates must preserve native sort focus without transient detach or blur/ },
       { name: "pending search sort owner", marker: 'if (enteringSearch || state.searchQuery !== normalizedQuery) els.statsRow.innerHTML = "";', replacement: 'els.statsRow.innerHTML = "";', pattern: "search sort control stays", failure: /a pending same-list read must keep the native sort control connected/ },
       { name: "detached sort ownership", marker: "if (event.target?.isConnected === false) return;", replacement: "", pattern: "detached sort control", failure: /a detached sort control must not replace a newly selected people index/ }

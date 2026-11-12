@@ -33,6 +33,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://fixture"), key = `${url.pathname}${url.search}`;
     requests.set(key, (requests.get(key) || 0) + 1);
+    if (req.headers["x-fixture-owner"] && url.pathname.startsWith("/api/")) res.setHeader("X-FanHao-Account-Owner", req.headers["x-fixture-owner"]);
     if (url.pathname.startsWith('/api/')) apiMethods.push({ method: req.method, url: key });
     if (fullscreenDenied) res.setHeader('Permissions-Policy', 'fullscreen=()');
     try {
@@ -58,6 +59,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
       const comicMatch = /^\/api\/manga\/([^/]+)$/.exec(url.pathname);
       if (comicMatch) { sendJson(res, { comic: manga(comicMatch[1]) }); return; }
       if (url.pathname === "/api/manga") { sendJson(res, { comics: [manga("C")] }); return; }
+      if (url.pathname === "/api/gallery-media/continue-watching") { sendJson(res, { items: [] }); return; }
       const mediaMatch = /^\/api\/gallery-media\/([^/]+)$/.exec(url.pathname);
       if (mediaMatch) { sendJson(res, { item: { id: mediaMatch[1], title: `Media ${mediaMatch[1]}`, mediaKind: mediaMatch[1] === "Movie" ? "movie" : "western", streamUrl: "" } }); return; }
       if (url.pathname === "/api/image-library/items") {
@@ -75,7 +77,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         sendText(res, `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><rect width="800" height="1000" fill="${fill}"/></svg>`, "image/svg+xml", "public, max-age=86400"); return;
       }
       const target = url.pathname === "/photo/maintenance" ? path.join(publicRoot, "modules/photos/maintenance/index.html")
-        : /^\/(?:photo|manga|media|western)(?:\/|$)/.test(url.pathname) ? path.join(publicRoot, "index.html")
+        : /^\/(?:photo|manga|media|movies|western|tv)(?:\/|$)/.test(url.pathname) ? path.join(publicRoot, "index.html")
           : path.resolve(publicRoot, url.pathname.replace(/^\/+/, ""));
       assert(target.startsWith(`${publicRoot}${path.sep}`));
       sendText(res, overrides.get(url.pathname) ?? await fs.promises.readFile(target), target.endsWith(".html") ? "text/html; charset=utf-8" : target.endsWith(".js") ? "text/javascript" : "text/css");
@@ -741,6 +743,351 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.locator('.gallery-search').inputValue(), title);
       } finally { releaseSummaryGates(search, episodes); await page.close(); }
     });
+    await run('media watchlist saves movies and whole series from the catalog at 320px', async () => {
+      const movie = { ...listItem('Movie'), type: 'movie', mediaKind: 'movie', title: 'Synthetic Film' };
+      const seriesKey = 'fixture-series', title = 'Synthetic Series';
+      const series = { ...listItem('Series'), type: 'tvSeriesWork', mediaKind: 'tv', title, seriesName: title, seriesKey };
+      const episode = { ...listItem('Episode'), type: 'movie', mediaKind: 'tv', title: 'S01E01', seriesKey };
+      collectionShelf = url => {
+        const items = url.searchParams.get('seriesKey') === seriesKey ? [episode] : [movie, series];
+        return { mode: 'media', items, total: items.length, facets: {} };
+      };
+      const page = await newPage({ real: true, route: '/media?sort=title', accountOwner: 'account:watch-fixture', waitReady: false });
+      try {
+        await page.setViewportSize({ width: 320, height: 760 });
+        const trigger = page.getByRole('button', { name: '待看清单', exact: true });
+        const panel = page.getByRole('dialog', { name: '本机待看清单' });
+        const movies = page.locator('.gallery-watch-card').filter({ hasText: movie.title });
+        const seriesCard = page.locator('.gallery-watch-card').filter({ hasText: title });
+        const before = page.url(), writes = apiMethods.filter(item => item.method !== 'GET').length;
+        await page.evaluate(() => {
+          window.__watchWrite = Storage.prototype.setItem;
+          Storage.prototype.setItem = function (key, value) {
+            if (key.startsWith('fanhao.media.watchlist.v1:')) throw new DOMException('Fixture quota', 'QuotaExceededError');
+            return __watchWrite.call(this, key, value);
+          };
+        });
+        await movies.getByRole('button', { name: `加入待看 · ${movie.title}` }).click();
+        await page.getByText('待看清单保存失败，请检查浏览器存储。', { exact: true }).waitFor();
+        assert.equal(await movies.getByRole('button', { name: `加入待看 · ${movie.title}` }).getAttribute('aria-pressed'), 'false');
+        await page.evaluate(() => { Storage.prototype.setItem = __watchWrite; });
+        await movies.getByRole('button', { name: `加入待看 · ${movie.title}` }).click();
+        await seriesCard.getByRole('button', { name: `加入待看 · ${title}` }).click();
+        assert.equal(page.url(), before);
+        assert.equal(await movies.getByRole('button', { name: `已加入待看 · ${movie.title}` }).getAttribute('aria-pressed'), 'true');
+        await page.reload();
+        await movies.getByRole('button', { name: `已加入待看 · ${movie.title}` }).waitFor();
+        await trigger.press('Enter');
+        assert.equal(await panel.evaluate(node => node.scrollWidth <= node.clientWidth && document.documentElement.scrollWidth <= innerWidth), true);
+        const filmLink = panel.getByRole('link', { name: movie.title });
+        const player = new URL(await filmLink.getAttribute('href'), base);
+        assert.equal(player.pathname, '/player.html');
+        assert.equal(player.searchParams.get('mediaId'), 'Movie');
+        assert.equal(player.searchParams.get('returnTo'), '/media?sort=title');
+        await panel.getByRole('button', { name: `移出待看 · ${movie.title}` }).press('Enter');
+        assert.equal(await filmLink.count(), 0);
+        await page.keyboard.press('Escape');
+        await panel.waitFor({ state: 'hidden' });
+        assert.equal(await trigger.evaluate(node => document.activeElement === node), true);
+        assert.equal(await movies.getByRole('button', { name: `加入待看 · ${movie.title}` }).getAttribute('aria-pressed'), 'false');
+        await trigger.click();
+        const savedSeries = panel.getByRole('link', { name: title });
+        const target = new URL(await savedSeries.getAttribute('href'), base);
+        assert.equal(target.searchParams.get('kind'), 'tv');
+        assert.equal(target.searchParams.get('seriesKey'), seriesKey);
+        await savedSeries.click();
+        await page.getByText('选集播放', { exact: true }).waitFor();
+        assert.equal(await page.getByRole('button', { name: `已加入待看 · ${title}` }).count(), 1);
+        assert.equal(apiMethods.filter(item => item.method !== 'GET').length, writes, 'watchlist membership belongs to this browser');
+      } finally { collectionShelf = null; await page.close(); }
+    });
+    await run('media watchlist searches the full saved list and keeps accounts isolated', async () => {
+      const owner = 'account:watch-list-a', key = `fanhao.media.watchlist.v1:${owner}`;
+      const page = await newPage({ real: true, route: '/media', accountOwner: owner, waitReady: false });
+      const trigger = page.getByRole('button', { name: '待看清单', exact: true });
+      const panel = page.getByRole('dialog', { name: '本机待看清单' });
+      try {
+        await page.locator('.gallery-movie-list-item').first().waitFor();
+        await page.evaluate(key => localStorage.setItem(key, JSON.stringify([
+          { kind: 'anime', title: '目标动漫', seriesName: '目标动漫', seriesKey: 'anime-key', category: '合成' },
+          ...Array.from({ length: 44 }, (_, index) => ({ kind: 'movie', id: `film-${index}`, title: `Ｆｉｌｍ ${index}` }))
+        ])), key);
+        await trigger.click();
+        assert.equal(await panel.locator('li').count(), 20);
+        await panel.getByRole('button', { name: '下一页' }).click();
+        assert.equal(await panel.locator('li').count(), 20);
+        const search = panel.getByRole('searchbox');
+        await search.evaluate(input => {
+          input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+          input.value = 'film 0';
+          input.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+        });
+        assert.equal(await panel.locator('li').count(), 20);
+        await search.evaluate(input => input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+        assert.deepEqual(await panel.getByRole('link').allTextContents(), ['Ｆｉｌｍ 0']);
+        await search.fill('');
+        await panel.getByRole('combobox').selectOption('anime');
+        assert.deepEqual(await panel.getByRole('link').allTextContents(), ['目标动漫']);
+        await page.setExtraHTTPHeaders({ 'X-Fixture-Owner': 'account:watch-list-b' });
+        await page.reload();
+        await page.locator('.gallery-movie-list-item').first().waitFor();
+        await trigger.click();
+        await panel.getByText('在影视卡片上选择「加入待看」。', { exact: true }).waitFor();
+        assert.equal(await panel.getByRole('link').count(), 0);
+        assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).length, key), 45);
+      } finally { await page.close(); }
+    });
+    await run('media continue watching refreshes on browser restore and links directly to the correct player', async () => {
+      const matches = url => url.pathname === '/api/gallery-media/continue-watching' && url.searchParams.get('kind') === 'all';
+      const first = hold(matches, '', { items: [{ id: 'old-film', title: 'Synthetic old film', percent: 53 }] });
+      const resumed = { id: 'current-episode', title: 'Synthetic series', episodeTitle: 'Synthetic episode 3', percent: 71.2 };
+      const fresh = hold(matches, '', { items: [resumed, ...[1, 2, 3, 4, 5].map(id => ({ id: `film-${id}`, title: `Film ${id}`, percent: 30 }))] });
+      const page = await newPage({ real: true, route: '/media?sort=title', waitReady: false });
+      try {
+        await requested(first);
+        await page.locator('.gallery-movie-list-item').first().waitFor({ state: 'visible' });
+        assert.equal(await page.locator('.media-continue:visible').count(), 0, 'slow progress does not block the catalog');
+        await settle(page, first);
+        await page.getByRole('link', { name: /Synthetic old film/ }).waitFor();
+        await page.evaluate(() => {
+          window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+          window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+        });
+        await requested(fresh);
+        assert.equal(await page.getByRole('link', { name: /Synthetic old film/ }).count(), 0);
+        await settle(page, fresh);
+        await page.setViewportSize({ width: 320, height: 780 });
+        const list = page.locator('.media-continue-list');
+        assert(await list.evaluate(node => getComputedStyle(node).display === 'grid' && node.clientWidth < node.scrollWidth
+          && node.getBoundingClientRect().right <= innerWidth), 'shelf scrolls inside the narrow viewport');
+        const link = page.getByRole('link', { name: /Synthetic series Synthetic episode 3 已看 71%/ });
+        await page.route(/\/player\.html\?/, route => route.fulfill({ contentType: 'text/html', body: '<title>Synthetic player</title>' }));
+        await link.press('Enter');
+        await page.waitForURL(url => url.pathname === '/player.html' && url.searchParams.get('mediaId') === resumed.id);
+        assert.equal(new URL(page.url()).searchParams.get('returnTo'), '/media?sort=title');
+      } finally { releaseSummaryGates(first, fresh); await page.close(); }
+    });
+
+    await run('media continue watching retries the current kind and ignores a late previous shelf', async () => {
+      const matches = kind => url => url.pathname === '/api/gallery-media/continue-watching' && url.searchParams.get('kind') === kind;
+      const old = hold(matches('all'), '', { items: [{ id: 'outdated', title: 'Outdated film', percent: 25 }] });
+      const failed = hold(matches('anime'), 'Synthetic progress read unavailable');
+      const retry = hold(matches('anime'), '', { items: [{ id: 'anime-1', title: 'Synthetic anime', percent: 43 }] });
+      const page = await newPage({ real: true, route: '/media', waitReady: false });
+      try {
+        await requested(old);
+        await page.getByRole('button', { name: /^动漫/ }).click();
+        await requested(failed);
+        await settle(page, old);
+        assert.equal(await page.getByText('Outdated film', { exact: true }).count(), 0);
+        await settle(page, failed);
+        await page.locator('.media-continue').getByRole('button', { name: '重试' }).press('Enter');
+        await requested(retry);
+        await settle(page, retry);
+        assert(await page.getByRole('link', { name: /Synthetic anime/ }).evaluate(node => node === document.activeElement));
+        await page.locator('.gallery-search').fill('Synthetic query');
+        await page.locator('.gallery-search').press('Enter');
+        assert.equal(await page.locator('.media-continue').count(), 0);
+      } finally { releaseSummaryGates(old, failed, retry); await page.close(); }
+    });
+
+    await run('media continue watching hides and restores local entries, fills gaps and reveals newer progress', async () => {
+      const matches = url => url.pathname === '/api/gallery-media/continue-watching' && url.searchParams.get('kind') === 'all';
+      const items = Array.from({ length: 8 }, (_, i) => ({ id: `resume-${i + 1}`, title: `Resume film ${i + 1}`,
+        percent: 31, progressRevision: `old-${i + 1}` }));
+      const initial = hold(matches, '', { items });
+      const page = await newPage({ real: true, route: '/media', waitReady: false, accountOwner: 'account:resume-first' });
+      const gates = [initial];
+      const shelf = page.getByRole('region', { name: '继续观看', exact: true });
+      const first = shelf.getByRole('link', { name: /^Resume film 1 已看/ });
+      const hide = shelf.getByRole('button', { name: '隐藏「Resume film 1」', exact: true });
+      const manage = shelf.getByRole('button', { name: '已隐藏 1 项', exact: true });
+      const ids = () => shelf.locator('.media-continue-card').evaluateAll(links => links.map(link => link.dataset.mediaId));
+      async function reload(owner, latest = items) {
+        const read = hold(matches, '', { items: latest }); gates.push(read);
+        await page.setExtraHTTPHeaders({ 'X-Fixture-Owner': owner });
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await requested(read); await settle(page, read);
+      }
+      try {
+        await requested(initial);
+        const url = new URL(initial.url, base);
+        assert.equal(url.searchParams.get('limit'), '24');
+        assert.equal(url.searchParams.get('includeProgressRevision'), '1');
+        await settle(page, initial);
+        await first.waitFor();
+        await page.setViewportSize({ width: 320, height: 780 });
+        assert.deepEqual(await ids(), ['resume-1', 'resume-2', 'resume-3', 'resume-4', 'resume-5', 'resume-6']);
+        assert(await hide.evaluate(node => {
+          const rect = node.getBoundingClientRect();
+          return rect.width >= 44 && rect.height >= 44 && node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+        }), 'the hide button is a separate touch target on mobile');
+        const reads = countRequests(matches);
+        await hide.press('Enter');
+        assert.equal(await first.count(), 0);
+        assert.deepEqual(await ids(), ['resume-2', 'resume-3', 'resume-4', 'resume-5', 'resume-6', 'resume-7']);
+        assert.equal(await shelf.getByRole('link', { name: /^Resume film 2 已看/ }).evaluate(link => link === document.activeElement), true);
+        await manage.press('Enter');
+        assert.deepEqual(await ids(), ['resume-1']);
+        await shelf.getByRole('button', { name: '恢复「Resume film 1」', exact: true }).press('Enter');
+        await first.waitFor();
+        assert.equal(await manage.count(), 0);
+        await hide.press('Enter');
+        assert.equal(countRequests(matches), reads, 'hiding, filling and restoring do not fetch or change progress');
+        await reload('account:resume-first');
+        await manage.waitFor();
+        assert.equal(await first.count(), 0);
+        await reload('account:resume-other');
+        await first.waitFor();
+        assert.equal(await manage.count(), 0, 'the other account does not inherit this browser account’s hidden list');
+        await reload('account:resume-first', [{ ...items[0], progressRevision: 'new-1' }]);
+        await first.waitFor();
+        assert.equal(await manage.count(), 0, 'new recorded progress must show again even when its percentage is the same');
+        await hide.press('Enter');
+        assert.deepEqual(await ids(), []);
+        await manage.press('Enter');
+        await shelf.getByRole('button', { name: '恢复「Resume film 1」', exact: true }).press('Enter');
+        await first.waitFor();
+      } finally { releaseSummaryGates(...gates); await page.close(); }
+    });
+
+    await run('media continue watching scopes movie and TV roots and skips individual detail links', async () => {
+      const matches = url => url.pathname === '/api/gallery-media/continue-watching';
+      for (const [route, kind] of [['/movies', 'movie'], ['/tv', 'tv']]) {
+        const shelf = hold(matches, '', { items: [{ id: `${kind}-1`, title: 'Synthetic saved video', percent: 25 }] });
+        const page = await newPage({ real: true, route, waitReady: false });
+        try {
+          await requested(shelf);
+          assert.equal(new URL(shelf.url, base).searchParams.get('kind'), kind);
+          await settle(page, shelf);
+          await page.getByRole('link', { name: /Synthetic saved video/ }).waitFor();
+        } finally { releaseSummaryGates(shelf); await page.close(); }
+      }
+      const before = countRequests(matches);
+      const detail = hold(url => url.pathname === '/api/gallery-media/W');
+      const page = await newPage({ real: true, route: '/media/W', waitReady: false });
+      try {
+        await requested(detail);
+        await settle(page, detail);
+        assert.equal(countRequests(matches), before);
+      } finally { releaseSummaryGates(detail); await page.close(); }
+    });
+
+    await run('media episode card opens the player with the series and its directory position', async () => {
+      const seriesKey = 'fixture-series';
+      const episodes = hold(url => url.pathname === '/api/image-library/items' && url.searchParams.get('seriesKey') === seriesKey, '', {
+        mode: 'tv', seriesKey, total: 2, offset: 0, facets: {}, items: [1, 2].map(number => ({
+          ...listItem(`episode-${number}`), title: `S01E0${number}`, type: 'movie', mediaKind: 'tv', seriesKey
+        }))
+      });
+      const page = await newPage({ real: true, route: `/tv?seriesKey=${seriesKey}`, waitReady: false });
+      try {
+        await page.route(/\/player\.html\?/, route => route.fulfill({ contentType: 'text/html', body: '<title>Synthetic player</title>' }));
+        await requested(episodes); await settle(page, episodes);
+        const card = page.locator('.gallery-episode-card').nth(1);
+        await card.waitFor();
+        const source = new URL(page.url());
+        await card.click();
+        await page.waitForURL(url => url.pathname === '/player.html' && url.searchParams.get('mediaId') === 'episode-2');
+        const params = new URL(page.url()).searchParams;
+        assert.equal(params.get('episodePosition'), '2');
+        assert.equal(params.get('returnTo'), source.pathname + source.search);
+      } finally { releaseSummaryGates(episodes); await page.close(); }
+    });
+    await run('media episode search reads the whole series and returns from the exact matching file', async () => {
+      const seriesKey = 'two-season-fixture', query = 'S02E79', title = '合成多季剧集', category = '合成剧区';
+      const episodes = Array.from({ length: 180 }, (_, index) => {
+        const season = index < 90 ? '01' : '02', number = String(index % 90 + 1).padStart(2, '0');
+        return { ...listItem(`episode-${index + 1}`), type: 'movie', mediaKind: 'tv', seriesKey, title: `S${season}E${number}`, category, seriesName: title };
+      });
+      const source = `/media?${new URLSearchParams({ kind: 'tv', category, series: title, seriesKey })}`;
+      const matches = url => url.pathname === '/api/image-library/items' && url.searchParams.get('seriesKey') === seriesKey;
+      const result = (offset, limit, q) => {
+        const found = episodes.filter(item => !q || item.title.includes(q));
+        return { mode: 'media', seriesKey, total: found.length, offset, facets: {}, query: q || '', items: found.slice(offset, offset + limit) };
+      };
+      collectionShelf = url => result(Number(url.searchParams.get('offset')), Number(url.searchParams.get('limit')), url.searchParams.get('q'));
+      const pending = hold(url => matches(url) && url.searchParams.get('q') === query, '', result(0, 80, query));
+      const page = await newPage({ real: true, route: source, waitReady: false });
+      try {
+        await page.setViewportSize({ width: 320, height: 760 });
+        await page.route(/\/player\.html\?/, route => route.fulfill({ contentType: 'text/html', body: '<title>Synthetic player</title>' }));
+        const filter = page.getByRole('searchbox', { name: '搜索本剧分集' });
+        const cards = page.locator('.gallery-episode-card');
+        await cards.first().waitFor();
+        assert.equal(await cards.count(), 80);
+        assert.match(await cards.first().getAttribute('aria-label'), /第 01 季 · 第 01 集/);
+        assert.equal(await page.getByText('第 02 季 · 第 79 集', { exact: true }).count(), 0);
+        await filter.evaluate((input, query) => {
+          input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+          input.value = query;
+          input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true }));
+          input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true }));
+          input.form.requestSubmit();
+        }, query);
+        assert.equal(pending.used, false, 'IME confirmation must not submit the episode filter');
+        await filter.press('Enter'); await requested(pending);
+        const request = new URL(pending.url, base).searchParams;
+        assert.equal(request.get('offset'), '0');
+        assert.equal(request.get('category'), category);
+        assert.equal(request.get('kind'), 'tv');
+        assert.equal(request.get('sort'), 'title');
+        await page.waitForURL(url => url.pathname === '/media' && url.searchParams.get('episode') === query);
+        await filter.evaluate(input => { window.__episodeFilter = input; });
+        await filter.fill('未提交的新输入');
+        await settle(page, pending);
+        assert.equal(await filter.inputValue(), '未提交的新输入');
+        assert.equal(await filter.evaluate(input => input === __episodeFilter && document.activeElement === input), true);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        await page.getByText('匹配 1 集', { exact: true }).waitFor();
+        await page.getByRole('button', { name: /播放.*第 02 季 · 第 79 集/ }).click();
+        await page.waitForURL(url => url.pathname === '/player.html' && url.searchParams.get('mediaId') === 'episode-169');
+        const playback = new URL(page.url());
+        assert.equal(playback.searchParams.has('episodePosition'), false, 'a filtered rank is not a catalogue position');
+        assert.equal(new URL(playback.searchParams.get('returnTo'), base).searchParams.get('episode'), query);
+        await page.goBack();
+        await page.getByText('匹配 1 集', { exact: true }).waitFor();
+        assert.equal(await filter.inputValue(), query);
+        await page.reload();
+        await page.getByText('匹配 1 集', { exact: true }).waitFor();
+        assert.equal(await filter.inputValue(), query);
+        await filter.fill('S02'); await filter.press('Enter');
+        await page.getByText('匹配 90 集', { exact: true }).waitFor();
+        assert.equal(await cards.count(), 80);
+        const append = page.waitForRequest(request => {
+          const url = new URL(request.url());
+          return matches(url) && url.searchParams.get('q') === 'S02' && url.searchParams.get('offset') === '80';
+        });
+        await page.getByRole('button', { name: /^显示更多/ }).click();
+        await append;
+        await page.getByRole('button', { name: /播放.*第 02 季 · 第 90 集/ }).waitFor();
+        assert.equal(await cards.count(), 90);
+      } finally { collectionShelf = null; releaseSummaryGates(pending); await page.close(); }
+    });
+    await run('media episode search retains the series while retrying and clearing a failed filter', async () => {
+      const seriesKey = 'retry-fixture', query = '未收录';
+      const isList = url => url.pathname === '/api/image-library/items' && url.searchParams.get('seriesKey') === seriesKey;
+      const failure = hold(url => isList(url) && url.searchParams.get('q') === query, '合成分集读取失败');
+      collectionShelf = url => {
+        const q = url.searchParams.get('q'), items = q ? [] : [{ ...listItem('episode-one'), type: 'movie', mediaKind: 'tv', title: 'S01E01', seriesKey }];
+        return { mode: 'tv', seriesKey, total: items.length, facets: {}, items };
+      };
+      const page = await newPage({ real: true, route: `/tv?seriesKey=${seriesKey}`, waitReady: false });
+      const filter = page.getByRole('searchbox', { name: '搜索本剧分集' });
+      try {
+        await page.locator('.gallery-episode-card').waitFor();
+        await filter.fill(query); await filter.press('Enter'); await requested(failure); await settle(page, failure);
+        await page.getByText('合成分集读取失败', { exact: true }).waitFor();
+        assert.equal(await filter.inputValue(), query);
+        await page.getByRole('button', { name: '重试', exact: true }).click();
+        await page.getByText('本剧没有匹配的分集。', { exact: true }).waitFor();
+        await page.getByRole('button', { name: '清除', exact: true }).click();
+        await page.locator('.gallery-episode-card').waitFor();
+        await page.waitForURL(url => url.searchParams.get('seriesKey') === seriesKey && !url.searchParams.has('episode'));
+        assert.equal(await filter.inputValue(), '');
+        assert.equal(await filter.evaluate(input => document.activeElement === input), true);
+      } finally { collectionShelf = null; releaseSummaryGates(failure); await page.close(); }
+    });
     await run('photo collection people replace the person dropdown and filter within the collection', async () => {
       const collection = 'root|test-person-collection';
       const isCollection = url => url.pathname === '/api/image-library/items' && url.searchParams.get('collection') === collection;
@@ -1321,6 +1668,116 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await page.screenshot({ path: path.join(directory, 'catalog-recovery-320.png') });
       } finally { full.release(); await page.close(); }
     });
+    await run("pager slideshow waits for the directory and every displayed image", async () => {
+      const page = await newPage({ real: true });
+      const directory = { ...album("A", 0, 3), imageCount: 3 };
+      const initial = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") !== "all",
+        "", { album: { ...directory, images: directory.images.slice(0, 1) } });
+      const full = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") === "all",
+        "", { album: directory });
+      let releaseImage;
+      const imageReady = new Promise(resolve => { releaseImage = resolve; });
+      try {
+        await page.setViewportSize({ width: 320, height: 640 });
+        await page.route("**/synthetic/A/2.svg", async route => {
+          await imageReady;
+          await route.continue().catch(() => {});
+        });
+        await clickAlbum(page, "A"); await requested(initial); await settle(page, initial); await readerTitle(page, "Album A");
+        await holdSlideshowTimers(page);
+        await page.locator(".gallery-reader-open").click(); await requested(full);
+        const play = page.getByRole("button", { name: "自动轮播", exact: true });
+        const counter = page.locator(".gallery-image-pager-counter");
+        const stage = page.locator(".gallery-image-pager-stage");
+        assert(await play.evaluate(node => {
+          const rect = node.getBoundingClientRect();
+          return rect.left >= 0 && rect.right <= innerWidth
+            && node.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+        }), "the slideshow must be reachable in a 320px viewer");
+        await play.click();
+        assert.equal(await play.getAttribute("aria-pressed"), "true");
+        assert.equal(await page.evaluate(() => __slideTimers.size), 0);
+        await settle(page, full);
+        await page.waitForFunction(() => __slideTimers.size === 1);
+        await fireSlideshowTimer(page);
+        assert.equal(await counter.textContent(), "第 2 / 3 张");
+        assert.equal(await stage.getAttribute("aria-busy"), "true");
+        assert.equal(await page.evaluate(() => __slideTimers.size), 0, "a slow image cannot consume its display interval before loading");
+        releaseImage();
+        await page.waitForFunction(() => __slideTimers.size === 1);
+        await fireSlideshowTimer(page);
+        assert.equal(await counter.textContent(), "第 3 / 3 张");
+        assert.equal(await play.getAttribute("aria-pressed"), "false", "the slideshow stops on the final image");
+        assert.equal(await page.evaluate(() => __slideTimers.size), 0);
+
+        await play.click();
+        assert.equal(await counter.textContent(), "第 1 / 3 张", "replaying from the end starts at the first image");
+        await page.waitForFunction(() => __slideTimers.size === 1);
+        await page.evaluate(() => { window.__oldSlide = [...__slideTimers.values()][0]; });
+        await page.getByRole("button", { name: "下一张", exact: true }).click();
+        await page.evaluate(() => __oldSlide());
+        assert.equal(await counter.textContent(), "第 2 / 3 张");
+        assert.equal(await play.getAttribute("aria-pressed"), "false", "manual paging pauses the slideshow");
+        await play.click(); await page.waitForFunction(() => __slideTimers.size === 1);
+        await page.evaluate(() => { window.__oldSlide = [...__slideTimers.values()][0]; });
+        await page.locator(".gallery-image-pager-top > button").click();
+        await page.locator(".gallery-reader-open").click();
+        const reopened = await counter.textContent();
+        await page.evaluate(() => __oldSlide());
+        assert.equal(await counter.textContent(), reopened, "a retired timer must never advance a newer viewer");
+        assert.equal(await play.getAttribute("aria-pressed"), "false");
+      } finally {
+        releaseImage();
+        initial.release(); full.release();
+        await page.close();
+      }
+    });
+
+    for (const failedIndex of [2, 3]) await run(`pager slideshow pauses on image ${failedIndex} failure, overview and hidden documents`, async () => {
+      const page = await newPage({ real: true });
+      const directory = { ...album("A", 0, 3), imageCount: 3 };
+      const initial = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") !== "all", "", { album: directory });
+      let failImage = true;
+      try {
+        await page.route(`**/synthetic/A/${failedIndex}.svg`, route => failImage
+          ? route.fulfill({ status: 503, contentType: "text/plain", body: "Synthetic image failure" })
+          : route.continue());
+        await clickAlbum(page, "A"); await requested(initial); await settle(page, initial); await readerTitle(page, "Album A");
+        await holdSlideshowTimers(page);
+        await page.locator(".gallery-reader-open").click();
+        const play = page.getByRole("button", { name: "自动轮播", exact: true });
+        const retry = page.getByRole("button", { name: "重试当前图片", exact: true });
+        await play.press("Enter");
+        for (let index = 1; index < failedIndex; index++) {
+          await page.waitForFunction(() => __slideTimers.size === 1);
+          await fireSlideshowTimer(page);
+        }
+        await retry.waitFor();
+        assert.equal(await play.getAttribute("aria-pressed"), "false");
+        assert.equal(await retry.evaluate(node => node === document.activeElement), true);
+        assert.equal(await page.evaluate(() => __slideTimers.size), 0);
+        failImage = false;
+        await retry.click();
+        await page.waitForFunction(() => !document.querySelector(".gallery-image-pager-stage")?.hasAttribute("aria-busy"));
+        assert.equal(await play.isEnabled(), true);
+        await play.click(); await page.waitForFunction(() => __slideTimers.size === 1);
+        await page.locator(".gallery-image-overview-trigger").click();
+        assert.equal(await page.locator(".gallery-image-pager-slideshow").getAttribute("aria-pressed"), "false");
+        await page.keyboard.press("Escape");
+        await play.click(); await page.waitForFunction(() => __slideTimers.size === 1);
+        await page.evaluate(() => {
+          Object.defineProperty(document, "hidden", { value: true, configurable: true });
+          document.dispatchEvent(new Event("visibilitychange"));
+          delete document.hidden;
+        });
+        assert.equal(await play.getAttribute("aria-pressed"), "false");
+        assert.equal(await page.evaluate(() => __slideTimers.size), 0);
+      } finally {
+        initial.release();
+        await page.close();
+      }
+    });
+
     await run('pager fullscreen policy: denied native capability does not offer a broken action', async () => {
       fullscreenDenied = true;
       const page = await newPage({ real: true });
@@ -1453,6 +1910,107 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await page.keyboard.press('f'); await page.locator('.gallery-image-pager-top > button').click(); await tick(page);
         assert.equal(await page.evaluate(() => document.fullscreenElement === document.documentElement), true, 'closing an image reader must not exit fullscreen acquired outside that reader');
       } finally { full.release(); await page.close(); }
+    });
+    await run("photo reading resume follows scroll and single-page reading across reload", async () => {
+      const page = await newPage({ real: true });
+      const archive = { revision: "1".repeat(24), total: 210 };
+      const shelfEntry = page.locator('.gallery-photo-continue [data-photo-list-card="resume:A"]');
+      const resume = page.locator('.gallery-photo-resume-button');
+      try {
+        await mockReadingArchive(page, archive);
+        await clickAlbum(page, "A");
+        await readerTitle(page, "Album A");
+        assert.equal(await resume.count(), 0);
+        await page.mouse.move(450, 420);
+        await page.mouse.wheel(0, 2200);
+        await page.waitForFunction(() => {
+          const [saved] = JSON.parse(localStorage.getItem("fanhao.photo.readingPositions.v1:guest") || "[]");
+          const current = Number(document.querySelector(".gallery-reader-progress")?.dataset.currentIndex);
+          return current > 1 && saved?.id === "A" && saved.page === current;
+        });
+        const figures = page.locator(".gallery-reader-figure");
+        const initial = await figures.count();
+        await more(page);
+        const later = page.locator(`.gallery-reader-figure[data-image-index="${initial + 3}"]`);
+        await later.evaluate(figure => figure.scrollIntoView({ block: "start", behavior: "instant" }));
+        await tick(page);
+        await page.mouse.wheel(0, 1600);
+        await page.waitForFunction(firstCount => {
+          const [saved] = JSON.parse(localStorage.getItem("fanhao.photo.readingPositions.v1:guest") || "[]");
+          return saved?.id === "A" && saved.page > firstCount;
+        }, initial);
+
+        await page.locator(".gallery-reader-open").click();
+        await page.waitForFunction(total => document.querySelector(".gallery-image-pager-counter")?.textContent.includes(`/ ${total} 张`), archive.total);
+        await page.keyboard.press("End");
+        await page.waitForFunction(total => document.querySelector(".gallery-image-pager-counter")?.textContent === `第 ${total} / ${total} 张`, archive.total);
+        await page.keyboard.press("Escape");
+        await page.locator(".gallery-reader-back").click();
+        await shelfEntry.waitFor();
+        assert.equal(await shelfEntry.locator("span").textContent(), `第 ${archive.total} 张`);
+
+        await page.setViewportSize({ width: 360, height: 760 });
+        await page.goto(`${base}/photo`);
+        await shelfEntry.waitFor();
+        await page.reload();
+        await shelfEntry.waitFor();
+        const bounds = await shelfEntry.boundingBox();
+        assert(bounds.x >= 0 && bounds.x + bounds.width <= 360);
+        archive.error = "Synthetic reading catalog unavailable";
+        await shelfEntry.press("Enter");
+        await page.getByText(archive.error, { exact: true }).waitFor();
+        assert.equal(await page.locator(".gallery-image-pager").count(), 0);
+        assert.equal(await resume.isEnabled(), true);
+        archive.error = "";
+        await resume.click();
+        await page.waitForFunction(total => document.querySelector(".gallery-image-pager-counter")?.textContent === `第 ${total} / ${total} 张`, archive.total);
+        assert.equal(await page.locator(".gallery-image-pager-stage img").evaluate(img => new URL(img.src).pathname), `/synthetic/A/${archive.total}.svg`);
+        await page.keyboard.press("Escape");
+        await page.locator(".gallery-reader-back").click();
+        await shelfEntry.waitFor();
+        await page.waitForFunction(() => document.activeElement?.dataset.photoListCard === "resume:A");
+
+        await page.route(/\/api\/image-library\/summary(?:\?|$)/, route => route.fulfill({
+          headers: { "X-FanHao-Account-Owner": "account:reading-fixture" },
+          json: { totals: { photoSets: 2 }, facets: {} }
+        }));
+        await page.reload();
+        await page.locator(".gallery-collections-grid").waitFor({ state: "attached" });
+        assert.equal(await shelfEntry.count(), 0, "another owner must not see guest reading positions");
+      } finally { await page.close(); }
+    });
+    await run("photo reading resume yields to Back and invalidates a replaced archive", async () => {
+      const page = await newPage({ real: true });
+      const archive = { revision: "1".repeat(24), total: 210 };
+      const shelfEntry = page.locator('.gallery-photo-continue [data-photo-list-card="resume:A"]');
+      const requestedFull = Promise.withResolvers();
+      const releaseFull = Promise.withResolvers();
+      try {
+        await mockReadingArchive(page, archive);
+        await page.evaluate(({ revision, total }) => localStorage.setItem("fanhao.photo.readingPositions.v1:guest",
+          JSON.stringify([{ id: "A", title: "Album A", archive: revision, page: total }])), archive);
+        await page.reload();
+        archive.hold = async () => { requestedFull.resolve(); await releaseFull.promise; };
+        await shelfEntry.click();
+        await requestedFull.promise;
+        await page.locator(".gallery-reader-back").click();
+        await shelfEntry.waitFor();
+        releaseFull.resolve();
+        await page.waitForFunction(() => __transport.settled.some(entry => entry.url === "/api/photo-sets/A?imageLimit=all"));
+        assert.equal(await page.locator(".gallery-image-pager").count(), 0);
+        assert.equal(await page.locator(".gallery-reader-toolbar").count(), 0);
+
+        archive.hold = null;
+        archive.revision = "2".repeat(24);
+        await shelfEntry.click();
+        await readerTitle(page, "Album A");
+        await page.getByText("套图已变化，已清除旧阅读位置", { exact: true }).waitFor();
+        assert.equal(await page.locator(".gallery-photo-resume-button").count(), 0);
+        assert.equal(await page.locator(".gallery-image-pager").count(), 0);
+        await page.locator(".gallery-reader-back").click();
+        await page.locator(".gallery-card").first().waitFor();
+        assert.equal(await shelfEntry.count(), 0);
+      } finally { releaseFull.resolve(); await page.close(); }
     });
     for (const error of ["", "old reader error"]) {
       await run(`host late album ${error ? "error" : "success"}`, async () => {
@@ -1916,6 +2474,115 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.locator('.gallery-image-pager-zoom').textContent(), '100%');
         assert.equal(await page.locator('.gallery-image-pager-stage').evaluate(stage => !stage.classList.contains('panning') && stage.scrollLeft === 0 && stage.scrollTop === 0), true);
       } finally { full.release(); await page.mouse.up().catch(() => {}); await page.close(); }
+    });
+    await run("photo overview and thumbnails request versioned previews while opened images stay original", async () => {
+      const page = await newPage();
+      const imageRevision = "abcdef0123456789abcdef01";
+      const source = album("A", 0, 8);
+      for (const image of source.images) image.bytes = image.index === 3 ? 1024 : 1024 * 1024;
+      const archive = { ...source, imageRevision, imageCount: source.images.length, previewThresholdBytes: 512 * 1024 };
+      await page.route(url => url.pathname === "/api/photo-sets/A", route => route.fulfill({ json: { album: archive } }));
+      try {
+        await clickAlbum(page, "A"); await readerTitle(page, "Album A");
+        await page.locator(".gallery-reader-open").click();
+        const stage = page.locator(".gallery-image-pager-stage img");
+        const thumb = page.locator('.gallery-image-pager-thumbnail[data-index="1"] img');
+        const original = index => `/synthetic/A/${index}.svg?archive=${imageRevision}`;
+        const variant = index => `${original(index)}&preview=1`;
+        assert.equal(await stage.getAttribute("src"), original(1));
+        assert.equal(await thumb.getAttribute("src"), variant(2));
+        await thumb.evaluate(image => image.decode());
+        await page.getByRole("button", { name: "图片总览", exact: true }).click();
+        const tiles = page.locator(".gallery-image-overview-tile");
+        assert.equal(await tiles.nth(2).locator("img").getAttribute("src"), original(3), "small and legacy images use the original URL");
+        assert.equal(await tiles.nth(6).locator("img").getAttribute("src"), variant(7));
+        await tiles.nth(6).locator("img").evaluate(image => image.decode());
+        assert(countRequests(url => url.pathname === "/synthetic/A/7.svg" && url.searchParams.get("preview") === "1") > 0);
+        await tiles.nth(6).click();
+        assert.equal(await stage.getAttribute("src"), original(7));
+        await stage.evaluate(image => image.decode());
+      } finally { await page.close(); }
+    });
+    for (const width of [1280, 320]) await run(`photo overview browses and searches a 10,000-image album at ${width}px`, async () => {
+      const page = await newPage({ real: true });
+      const largeAlbum = album("A", 0, 10000);
+      largeAlbum.images[9876].archivePath = "Archive/Deep Cased/Final Portrait.png";
+      const full = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") === "all", "", { album: largeAlbum });
+      const trigger = page.getByRole("button", { name: "图片总览", exact: true });
+      const overview = page.getByRole("region", { name: "图片总览", exact: true });
+      const tiles = overview.locator(".gallery-image-overview-tile");
+      const stage = page.locator(".gallery-image-pager-stage");
+      try {
+        await page.setViewportSize({ width, height: 740 }); await clickAlbum(page, "A"); await readerTitle(page, "Album A");
+        const opener = page.locator(".gallery-reader-open");
+        await opener.click(); await requested(full); await trigger.click();
+        const close = overview.getByRole("button", { name: "关闭总览", exact: true });
+        assert.equal(await close.evaluate(node => node === document.activeElement), true);
+        assert.equal(await overview.evaluate(panel => {
+          const rect = panel.getBoundingClientRect();
+          return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight
+            && panel.scrollWidth === panel.clientWidth;
+        }), true);
+        assert.equal(await tiles.count(), 18);
+        assert.equal(await tiles.first().getAttribute("aria-current"), "true");
+        await overview.getByRole("button", { name: "下一页总览", exact: true }).click();
+        assert.match(await tiles.first().getAttribute("aria-label"), /^打开第 19 张/);
+        assert.equal(await tiles.count(), 18);
+        assert.equal(await stage.locator("img").getAttribute("src"), "/synthetic/A/1.svg");
+
+        const input = overview.getByRole("searchbox", { name: "按文件名查找图片", exact: true });
+        await input.fill("DEEP CASED\\Ｆｉｎａｌ");
+        await input.dispatchEvent("compositionstart"); await input.press("Enter");
+        assert.equal(await tiles.count(), 18, "composition confirmation must leave the current overview page in place");
+        await input.dispatchEvent("compositionend"); await input.press("Enter");
+        assert.match(await overview.getByRole("status").textContent(), /已加载.*匹配 0 张/);
+        assert.equal(await tiles.count(), 0);
+        await settle(page, full);
+        assert.equal(await input.evaluate(node => node === document.activeElement), true);
+        assert.equal(await input.inputValue(), "DEEP CASED\\Ｆｉｎａｌ");
+        assert.equal(await overview.getByRole("status").textContent(), "匹配 1 张。");
+        const target = tiles.first();
+        assert.match(await target.getAttribute("aria-label"), /^打开第 9,877 张/);
+        await input.press("ArrowDown");
+        assert.equal(await stage.locator("img").getAttribute("src"), "/synthetic/A/1.svg");
+        await target.click();
+        assert.equal(await stage.locator("img").getAttribute("src"), "/synthetic/A/9877.svg");
+        assert.equal(await overview.isVisible(), false);
+        assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+
+        await trigger.press("Enter");
+        assert.equal(await input.inputValue(), "DEEP CASED\\Ｆｉｎａｌ");
+        assert.equal(await tiles.first().getAttribute("aria-current"), "true");
+        await overview.getByRole("button", { name: "清除", exact: true }).click();
+        assert.equal(await tiles.count(), 18);
+        await page.keyboard.press("Escape");
+        assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+        await page.keyboard.press("Escape");
+        assert.equal(await stage.count(), 0);
+        assert.equal(await opener.evaluate(node => node === document.activeElement), true);
+      } finally { full.release(); await page.close(); }
+    });
+    await run("photo overview retries its full catalogue without resetting the query or choosing a page", async () => {
+      const page = await newPage();
+      const failed = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") === "all", "synthetic catalogue failure");
+      const retry = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") === "all");
+      const overview = page.getByRole("region", { name: "图片总览", exact: true });
+      try {
+        await open(page, "A"); await page.locator(".gallery-reader-open").click(); await requested(failed);
+        await page.getByRole("button", { name: "图片总览", exact: true }).click();
+        const input = overview.getByRole("searchbox", { name: "按文件名查找图片", exact: true });
+        await input.fill("synthetic 9721"); await input.press("Enter");
+        await settle(page, failed);
+        assert.match(await overview.getByRole("status").textContent(), /完整目录读取失败/);
+        await overview.getByRole("button", { name: "重试目录", exact: true }).click(); await requested(retry);
+        assert.equal(await input.evaluate(node => node === document.activeElement), true);
+        await settle(page, retry);
+        const tile = overview.getByRole("button", { name: /打开第 9,721 张/ });
+        assert.equal(await input.inputValue(), "synthetic 9721");
+        assert.equal(await page.locator(".gallery-image-pager-range").inputValue(), "1");
+        await tile.focus(); await page.keyboard.press("Enter");
+        assert.equal(await page.locator(".gallery-image-pager-range").inputValue(), "9721");
+      } finally { failed.release(); retry.release(); await page.close(); }
     });
     for (const width of [1280, 320]) await run(`pager jump exact first last and same page ${width}px`, async () => {
       const page = await newPage({ real: true });
@@ -2387,6 +3054,10 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
       const initial = hold(url => url.pathname === "/api/photo-sets/A", "", { album: data });
       const writes = [];
       const coverUrl = "/media/gallery-cover/A?cover=fixture-new";
+      await page.route(url => url.pathname === "/media/gallery-cover/A" && url.searchParams.get("cover") === "fixture-new", route => route.fulfill({
+        contentType: "image/svg+xml",
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="150"><rect width="120" height="150" fill="#729b7c"/></svg>'
+      }));
       await page.route("**/api/photo-sets/A/cover", async route => {
         writes.push({ method: route.request().method(), body: route.request().postDataJSON() });
         if (writes.length === 1) await route.fulfill({ status: 409, json: { error: "Synthetic conflict" } });
@@ -2413,7 +3084,10 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await page.getByRole("button", { name: "编辑封面", exact: true }).waitFor();
         await page.keyboard.press("Escape");
         await page.locator(".gallery-reader-back").click();
-        await page.waitForFunction(() => document.querySelector('[data-gallery-album-id="A"] img')?.src.includes('cover=fixture-new'));
+        await page.waitForFunction(() => {
+          const image = document.querySelector('[data-gallery-album-id="A"] img');
+          return image?.complete && image.naturalWidth > 0 && new URL(image.src).searchParams.get("cover") === "fixture-new";
+        });
       } finally { initial.release(); await page.close(); }
     });
     await run("pager keyboard modal focus and opener restoration", async () => {
@@ -2457,7 +3131,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.evaluate(() => document.activeElement.matches('.gallery-image-pager-thumbnail[data-index="2"]')), true, "late full metadata must preserve the focused thumbnail");
         await page.keyboard.press("ArrowRight");
         assert.match(await page.locator(".gallery-image-pager-counter").textContent(), /第 4 \/ 10,000 张/);
-        assert.equal(await page.evaluate(() => document.activeElement.matches('.gallery-image-pager-thumbnail[data-index="3"]')), true);
+        assert.equal(await page.evaluate(() => document.activeElement.matches('.gallery-image-pager-thumbnail[data-index="3"]')), true, "arrow navigation must focus the newly selected thumbnail");
       } finally { full.release(); await page.close(); }
     });
     await run("pager keyboard controls remain visible while focused", async () => {
@@ -2675,6 +3349,129 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await page.locator(".gallery-reader-back").click();
         assert.equal(new URL(page.url()).pathname, "/photo/collections", "bootstrap must initialize routeReady for the current intent");
       } finally { await page.close(); }
+    });
+    await run("photo reader adjacent navigation crosses a filtered list boundary and preserves one-step Back", async () => {
+      const albums = Array.from({ length: 82 }, (_, index) => listItem(`P${index + 1}`));
+      collectionShelf = url => {
+        const offset = Number(url.searchParams.get("offset")), limit = Number(url.searchParams.get("limit"));
+        return { items: albums.slice(offset, offset + limit), total: albums.length, listRevision: "adjacent-list", facets: {} };
+      };
+      const page = await newPage({ real: true, route: "/photo/albums?site=Fixture&sort=title&dir=asc" });
+      const isNextList = url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "80";
+      const previousPageReads = countRequests(isNextList);
+      const failure = hold(isNextList, "下一页暂时不可用");
+      const continuation = hold(isNextList);
+      try {
+        await page.setViewportSize({ width: 320, height: 720 });
+        const origin = page.url();
+        const card = page.locator('[data-gallery-album-id="P80"]');
+        await card.evaluate(node => {
+          node.scrollIntoView({ block: "center", behavior: "instant" });
+          node.focus({ preventScroll: true });
+        });
+        const cardTop = await card.evaluate(node => node.getBoundingClientRect().top);
+        await page.keyboard.press("Enter");
+        await readerTitle(page, "Album P80");
+        const next = page.getByRole("button", { name: "下一套", exact: true });
+        const previous = page.getByRole("button", { name: "上一套", exact: true });
+        assert(await next.isEnabled());
+        assert(await previous.isEnabled());
+        assert.equal(await next.evaluate(button => {
+          const rect = button.getBoundingClientRect();
+          return rect.width >= 44 && rect.height >= 44 && rect.right <= innerWidth;
+        }), true, "album navigation fits and remains tappable at 320px");
+        assert.equal(countRequests(isNextList) - previousPageReads, 0, "entering a reader does not fetch the next album list page");
+        await next.press("Enter");
+        await requested(failure);
+        await settle(page, failure);
+        assert.equal(await page.locator(".gallery-reader-album-status").textContent(), "下一页暂时不可用");
+        assert.match(page.url(), /\/photo\/set\/P80\?/);
+        await next.press("Enter");
+        await requested(continuation);
+        const query = new URL(continuation.url, base).searchParams;
+        assert.deepEqual(Object.fromEntries(["mode", "photoView", "site", "sort", "direction"].map(key => [key, query.get(key)])), {
+          mode: "photo", photoView: "albums", site: "Fixture", sort: "title", direction: "asc"
+        });
+        await settle(page, continuation);
+        await readerTitle(page, "Album P81");
+        assert.equal(await next.evaluate(node => node === document.activeElement), true, "keyboard focus moves to the corresponding button");
+        assert.equal(await page.evaluate(() => scrollY), 0, "moving to the next album starts from its first image");
+        await next.press("Enter");
+        await readerTitle(page, "Album P82");
+        assert.equal(await next.isDisabled(), true);
+        assert.equal(await previous.evaluate(node => node === document.activeElement), true, "keyboard focus stays in the reader at the last album");
+        await previous.press("Enter");
+        await readerTitle(page, "Album P81");
+        const latest = page.url();
+        assert.equal(new URL(latest).searchParams.get("site"), "Fixture");
+        await page.locator(".gallery-reader-back").click();
+        await page.waitForURL(origin);
+        await page.waitForFunction(top => {
+          const target = document.querySelector('[data-gallery-album-id="P80"]');
+          return target === document.activeElement && Math.abs(target.getBoundingClientRect().top - top) <= 3;
+        }, cardTop);
+        await page.goForward();
+        await page.waitForURL(latest);
+        await readerTitle(page, "Album P81");
+        assert.equal(await previous.isEnabled(), true);
+        assert.equal(countRequests(isNextList) - previousPageReads, 2, "the reader fetches only on boundary and retry");
+      } finally { failure.release(); continuation.release(); collectionShelf = null; await page.close(); }
+    });
+    await run("photo reader adjacent failure leaves the active album usable and late success cannot reopen it", async () => {
+      const first = hold(url => url.pathname === "/api/photo-sets/A", "", { album: { ...album("A", 0, 2), imageCount: 6 } });
+      const failed = hold(url => url.pathname === "/api/photo-sets/B", "目标套图暂时不可用");
+      const full = hold(url => url.pathname === "/api/photo-sets/A" && url.searchParams.get("imageLimit") === "all", "",
+        { album: { ...album("A", 0, 6), imageCount: 6 } });
+      const stale = hold(url => url.pathname === "/api/photo-sets/B");
+      const page = await newPage({ real: true });
+      try {
+        const origin = page.url();
+        await clickAlbum(page, "A");
+        await requested(first); await settle(page, first);
+        await readerTitle(page, "Album A");
+        const next = page.getByRole("button", { name: "下一套", exact: true });
+        assert(await page.getByRole("button", { name: "上一套", exact: true }).isDisabled());
+        await next.click(); await requested(failed); await settle(page, failed);
+        await readerTitle(page, "Album A");
+        assert.equal(new URL(page.url()).pathname, "/photo/set/A");
+        assert.equal(await page.locator(".gallery-reader-album-status").textContent(), "目标套图暂时不可用");
+        await page.locator(".gallery-reader-open").click();
+        await requested(full); await settle(page, full);
+        await page.locator(".gallery-image-pager").waitFor();
+        await page.keyboard.press("Escape");
+        await next.click(); await requested(stale);
+        await page.goBack();
+        await page.waitForURL(origin);
+        await settle(page, stale);
+        assert.equal(await page.locator(".gallery-reader-toolbar").count(), 0);
+        assert.equal(page.url(), origin);
+        assert(await page.evaluate(() => __transport.aborted.some(url => url.startsWith("/api/photo-sets/B"))));
+      } finally { first.release(); failed.release(); full.release(); stale.release(); await page.close(); }
+    });
+    await run("photo reader adjacent list continuation stops after Back while its transport is held", async () => {
+      const albums = Array.from({ length: 81 }, (_, index) => listItem(`Q${index + 1}`));
+      collectionShelf = url => {
+        const offset = Number(url.searchParams.get("offset")), limit = Number(url.searchParams.get("limit"));
+        return { items: albums.slice(offset, offset + limit), total: albums.length, listRevision: "adjacent-held", facets: {} };
+      };
+      const tail = hold(url => url.pathname === "/api/image-library/items" && url.searchParams.get("offset") === "80");
+      const page = await newPage({ real: true });
+      try {
+        const origin = page.url();
+        const readNeighbor = url => url.pathname === "/api/photo-sets/Q81";
+        const before = countRequests(readNeighbor);
+        await page.locator('[data-gallery-album-id="Q80"]').evaluate(card => card.click());
+        await readerTitle(page, "Album Q80");
+        await page.getByRole("button", { name: "下一套", exact: true }).click();
+        await requested(tail);
+        await page.goBack();
+        await page.waitForURL(origin);
+        await settle(page, tail);
+        assert.equal(await page.locator(".gallery-reader-toolbar").count(), 0);
+        assert.equal(await page.locator('[data-gallery-album-id="Q81"]').count(), 0);
+        assert.equal(countRequests(readNeighbor), before, "a late list page must never start the next album read");
+        assert(await page.evaluate(() => __transport.aborted.some(url => url.includes("offset=80"))));
+      } finally { tail.release(); collectionShelf = null; await page.close(); }
     });
     for (const inPage of [false, true]) await run(`photo collection ${inPage ? "in-page" : "browser"} back restores deep cards on both levels after a delayed shelf reload`, async () => {
       const shelf = collectionShelfFixture(172);
@@ -2902,6 +3699,18 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
     for (const value of held) value.release(); if (browser) await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
   }
   function countRequests(match) { return [...requests].filter(([url]) => match(new URL(url, base))).reduce((sum, [, count]) => sum + count, 0); }
+  async function mockReadingArchive(page, fixture) {
+    await page.route(/\/api\/photo-sets\/A(?:\?|$)/, async route => {
+      const params = new URL(route.request().url()).searchParams;
+      const offset = Number(params.get("imageOffset") || 0);
+      const full = params.get("imageLimit") === "all";
+      const available = fixture.total - offset;
+      const limit = full ? available : Math.min(available, Number(params.get("imageLimit") || available));
+      if (full) await fixture.hold?.();
+      if (full && fixture.error) return route.fulfill({ status: 503, json: { error: fixture.error } });
+      return route.fulfill({ json: { album: { ...album("A", offset, limit), imageCount: fixture.total, imageRevision: fixture.revision } } });
+    });
+  }
   async function openFailedPager(page) {
     let serveImage = false;
     await page.route("**/synthetic/A/1.svg", route => serveImage ? route.continue()
@@ -2933,8 +3742,8 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
     const before = await page.evaluate(url => __transport.settled.filter(item => item.url === url).length, gate.url); gate.release();
     await page.waitForFunction(({ url, before }) => __transport.settled.filter(item => item.url === url).length > before, { url: gate.url, before }); await tick(page);
   }
-  async function newPage({ real = false, ignoreAbort = true, observer = true, route = "/photo?photoView=albums", waitReady = true, initialBack = false, downloadThroughput = null } = {}) {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 900 } }); page.on("pageerror", error => faults.push(error.message));
+  async function newPage({ real = false, ignoreAbort = true, observer = true, route = "/photo?photoView=albums", waitReady = true, initialBack = false, downloadThroughput = null, accountOwner = "" } = {}) {
+    const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, ...(accountOwner ? { extraHTTPHeaders: { 'X-Fixture-Owner': accountOwner } } : {}) }); page.on("pageerror", error => faults.push(error.message));
     if (downloadThroughput) {
       const session = await page.context().newCDPSession(page);
       await session.send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput, uploadThroughput: -1 });
@@ -2970,6 +3779,27 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
   }
 }
 async function tick(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
+async function holdSlideshowTimers(page) {
+  await page.evaluate(() => {
+    window.__slideTimers = new Map();
+    const set = window.setTimeout.bind(window), clear = window.clearTimeout.bind(window);
+    let id = 0;
+    window.setTimeout = (callback, delay, ...args) => {
+      if (delay !== 5000) return set(callback, delay, ...args);
+      const timer = --id;
+      __slideTimers.set(timer, () => callback(...args));
+      return timer;
+    };
+    window.clearTimeout = timer => timer < 0 ? __slideTimers.delete(timer) : clear(timer);
+  });
+}
+async function fireSlideshowTimer(page) {
+  await page.evaluate(() => {
+    const [timer, callback] = __slideTimers.entries().next().value;
+    __slideTimers.delete(timer);
+    callback();
+  });
+}
 async function beginRangeGesture(page, pointer) {
   const range = page.locator('.gallery-image-pager-range'), rect = await range.boundingBox();
   await range.evaluate(range => range.addEventListener('pointerdown', event => { window.__rangePointerType = event.pointerType; }, { once: true }));

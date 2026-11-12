@@ -74,6 +74,7 @@ export function createPersonProfile(deps) {
   const {
     api,
     coverUrl,
+    createPersonPin,
     els,
     formatLibraryPath,
     formatNumber,
@@ -162,6 +163,8 @@ function renderPersonProfile(person) {
   const title = document.createElement("h3");
   title.textContent = displayName;
   nameRow.append(title);
+  const pin = createPersonPin?.(person);
+  if (pin) nameRow.append(pin);
 
   if (profile?.javdbUrl) {
     const link = document.createElement("a");

@@ -233,7 +233,7 @@ export function createShortVideoListCards(dependencies) {
         toggleShortVideoSelected(video.id);
         return;
       }
-      openVideo(video.id, { video }).catch(showError);
+      openVideo(video.id, { video, trigger: open }).catch(showError);
     });
     thumb.append(open);
     const title = document.createElement("div");

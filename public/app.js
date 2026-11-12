@@ -16,16 +16,19 @@ import {
   resolveWorkPage,
   selectVisibleWorks,
   workServerMoreState
-} from "./modules/fanhao/index.js?v=20261023-traits-01";
+} from "./modules/fanhao/index.js?v=20261113-favorite-folder-merge-01";
 import { createBrowseNavigation } from "./modules/fanhao/browse-navigation.js?v=20260919-browse-01";
+import { createFavoriteFolderPicker } from "./modules/fanhao/features/works/favorite-folder-picker.js";
 import { installWorkSearchShortcut } from "./modules/fanhao/search-shortcut.js?v=20261028-search-shortcut-01";
+import { createWorkSearchSuggestions } from "./modules/fanhao/search-suggestions.js";
 import { createReadRecoveryPanel, createSearchRecoveryPanel } from "./modules/fanhao/search-recovery.js";
 import { createBrowseFilterControls, nextBrowseFilters } from "./modules/fanhao/browse-filters.js?v=20261105-media-classification-01";
-import { classificationQuery, createBrowseTraitControls, createClassificationNav, loadedTraitFacets, parseClassificationQuery, traitFilterLabel, workMatchesTraitFilter } from "./modules/fanhao/browse-traits.js?v=20261105-media-classification-01";
+import { classificationQuery, createBrowseTraitControls, loadedTraitFacets, parseClassificationQuery, traitFilterLabel, workMatchesTraitFilter } from "./modules/fanhao/browse-traits.js?v=20261112-classification-01";
+import { createPersonWorkSort, syncPersonWorkSort } from "./modules/fanhao/person-work-sort.js?v=20261111-person-controls-01";
 import { createLatestRequestGate } from "./modules/fanhao/latest-request.js?v=20260717-fanhao-latest-request-01";
 import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
-import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20261105-media-classification-01";
+import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeFanhaoSearchSort, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20261113-search-route-01";
 import { captureWebAccount } from "./platform/accounts/session-context.js";
 
 const browseTextCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
@@ -37,6 +40,7 @@ const state = {
   ...createFanhaoState({ readStoredFlag }),
   personWorksTraitFacets: null,
   searchTraitFacets: null,
+  searchDisplay: null,
   codePrefixTraitFacets: null,
   studioWorksTraitFacets: null,
   collectionTraitFacets: null,
@@ -62,6 +66,7 @@ const els = {
   missingLocalToggle: document.querySelector("#missingLocalToggle"),
   collectionToggle: document.querySelector("#collectionToggle"),
   compilationConfigButton: document.querySelector("#compilationConfigButton"),
+  workCardSize: document.querySelector("#workCardSize"),
   personProfile: document.querySelector("#personProfile"),
   currentPath: document.querySelector("#currentPath"),
   currentTitle: document.querySelector("#currentTitle"),
@@ -72,12 +77,14 @@ const els = {
 };
 
 const formatter = new Intl.NumberFormat("zh-CN");
+const compactRatingCount = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 const libraryRequests = createLatestRequestGate();
 let navigationSequence = 0;
 let searchLoadMoreOwner = null;
 const workLocalMarkerWrites = new Map();
 const workLocalMarkerReads = new Set();
 const workLocalMarkerForegroundReads = new Set();
+const personMissingLocalPreferences = new Map();
 let workLocalMarkerPresentation = null;
 let pendingWorkFilterFocus = null;
 const browseNavigation = createBrowseNavigation();
@@ -98,7 +105,7 @@ const COVER_OBSERVER_ROOT_MARGIN = "420px 0px";
 const COVER_RETRY_DELAYS = [700, 1400, 2400, 4000, 6500, 9000];
 const initialParams = new URLSearchParams(window.location.search);
 if (els.classificationLink) {
-  els.classificationLink.href = routeUrl({ q: classificationQuery("ltx") }, { initialParams, hash: "" });
+  els.classificationLink.href = routeUrl({ q: classificationQuery("all") }, { initialParams, hash: "" });
 }
 const isAndroidClient = initialParams.get("client") === "android";
 const api = createWorkLocalMarkerApi(createApiClient({ isAndroidClient }));
@@ -115,6 +122,17 @@ const searchRequests = createSearchRequestService({
   filter: serializedWorkFilterMode,
   pageSize: preferredWorkPageSize,
   sort: () => state.sortMode || "releaseDesc"
+});
+const workSearchSuggestions = createWorkSearchSuggestions({
+  input: els.workSearch,
+  list: document.querySelector("#workSearchSuggestions"),
+  visibleWorks: (works) => {
+    const overrides = workSearchEntryOverrides();
+    return selectWorkCards(works, { filters: normalizeWorkFilters(overrides?.filter ?? state.filterMode), sortMode: overrides?.sort });
+  },
+  onPerson: openSearchPerson,
+  onWork: openWorkCard,
+  onSearch: submitWorkSearch
 });
 
 function preferredWorkPageSize(configuredLimit = state.workPageSize) {
@@ -147,11 +165,14 @@ const peoplePage = createPeoplePage({
   els,
   formatLibraryPaths,
   formatNumber,
+  getAccountOwner: () => captureWebAccount().owner,
   getWorkFilterMode: serializedWorkFilterMode,
+  showMissingLocalForPerson,
   hidePersonProfile,
   onNavigationStarted: beginNavigation,
   preparePersonProfile: () => personProfilePage.load().catch(() => {}),
   renderPersonProfile,
+  renderPersonWorkSearch,
   renderPersonWorkStats,
   renderWorks,
   resetProgressiveCoverLoading,
@@ -187,10 +208,11 @@ const codePrefixPage = createCodePrefixPage({
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
-    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261023-person-aliases-01");
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261113-people-shortcuts-01");
     return createPersonProfile({
       api,
       coverUrl,
+      createPersonPin: peoplePage.createPinControl,
       els,
       formatLibraryPath,
       formatNumber,
@@ -210,6 +232,9 @@ const {
   isFavoriteFolderPending,
   isFavoritePending,
   moveFavoriteToFolder,
+  removeFavorites,
+  saveFavoriteToFolder,
+  syncFavoriteControl,
   toggleFavorite,
   updateWorkSnapshot
 } = createWorkActions({
@@ -220,6 +245,26 @@ const {
   renderStatsForWorks,
   renderWorks,
   state
+});
+const favoriteFolderPicker = createFavoriteFolderPicker({
+  readFolders: (signal) => api("/api/favorite-folders", { signal }),
+  async save(workId, folderId) {
+    const saving = saveFavoriteToFolder(workId, folderId);
+    syncVisibleFavoriteCards(workId);
+    try { return await saving; }
+    finally { syncVisibleFavoriteCards(workId); }
+  },
+  onSaved({ workId, favoriteFolder, removedWorkIds }) {
+    if (state.activeView !== "favorites") return;
+    if (collectionPage.refreshMovedFavorite(workId, favoriteFolder.folderId, { includeAll: true })) return;
+    if (removedWorkIds.length && els.workGrid.querySelector(".work-card")) {
+      cancelScheduledWorkRendering();
+      renderStatsForWorks(state.works);
+      renderFavoriteFolderControls();
+      if (state.works.length) appendLoadedWorkPage();
+      else renderWorks("还没有收藏。");
+    } else collectionPage.refreshFavoriteFolderCounts();
+  }
 });
 
 function beginWorkFavoriteUi({ workId, control, syncControl, showError, kind = "favorite", requestedFolderId = "" }) {
@@ -266,6 +311,8 @@ function beginWorkFavoriteUi({ workId, control, syncControl, showError, kind = "
         for (const card of cards) {
           const favorite = card.querySelector(".favorite-button");
           if (favorite) syncControl(favorite, work.favorite, isFavoritePending(workId));
+          const folder = card.querySelector(".work-favorite-folder-button");
+          if (folder) syncWorkFavoriteFolderButton(folder, work);
           if (kind === "folder") {
             const select = card.querySelector(".favorite-folder-select");
             if (select) {
@@ -484,12 +531,36 @@ function refreshFavoriteFilteredWorks() {
 
 const collectionPage = createCollectionPage({
   api,
+  onFavoriteFilterChange: ({ replace = false } = {}) => replace ? replaceRoute() : pushRoute(),
+  onHistoryFilterChange: () => pushRoute(),
   onWorkRead: beginWorkLocalMarkerForegroundRead,
   appendLoadedWorkPage,
   els,
   formatNumber,
   getNavigationIntent: () => navigationSequence,
   hidePersonProfile,
+  isFavoriteWritePending: (id) => isFavoritePending(id) || isFavoriteFolderPending(id),
+  async removeFavoriteBatch(workIds) {
+    const ids = new Set(workIds);
+    let result;
+    try {
+      result = await removeFavorites(workIds);
+    } finally {
+      const works = new Map();
+      for (const work of state.works) {
+        const id = String(work.id);
+        if (ids.has(id)) works.set(id, work);
+      }
+      for (const card of els.workGrid.querySelectorAll(".work-card[data-work-id]")) {
+        const work = works.get(card.dataset.workId);
+        if (work) syncWorkFavoriteCard(card, work);
+      }
+      if (result && works.size && state.activeView !== "favorites" && selectedWorkFilters().includes("favorite")) {
+        refreshFavoriteFilteredWorks();
+      }
+    }
+    return result;
+  },
   renderEmpty,
   renderReadError: renderCollectionReadError,
   renderStatsForWorks,
@@ -586,6 +657,55 @@ function writeStoredFlag(key, value) {
   } catch {}
 }
 
+function personMissingLocalPreferenceKey(personId) {
+  return `fanhao.showMissingLocalWorks.person.${encodeURIComponent(personId)}`;
+}
+
+function showMissingLocalForPerson(personId) {
+  const key = personMissingLocalPreferenceKey(personId);
+  return readStoredFlag(key, personMissingLocalPreferences.get(key) ?? true);
+}
+
+function showMissingLocalForCurrentView() {
+  if (state.activeView === "search") return state.searchDisplay?.showMissing ?? state.showMissingLocalWorks;
+  return state.activeView === "people" && state.selectedPersonId
+    ? showMissingLocalForPerson(state.selectedPersonId) : state.showMissingLocalWorks;
+}
+
+function showCompilationsForCurrentView() {
+  return state.activeView === "search" ? state.searchDisplay?.showCompilations ?? state.showCompilationWorks : state.showCompilationWorks;
+}
+
+function setShowMissingLocalForCurrentView(enabled) {
+  if (state.activeView === "people" && state.selectedPersonId) {
+    const key = personMissingLocalPreferenceKey(state.selectedPersonId);
+    personMissingLocalPreferences.set(key, enabled);
+    writeStoredFlag(key, enabled);
+  } else {
+    if (state.activeView === "search") state.searchDisplay.showMissing = enabled;
+    state.showMissingLocalWorks = enabled;
+    writeStoredFlag("fanhao.showMissingLocalWorks", enabled);
+  }
+  els.missingLocalToggle.checked = enabled;
+}
+
+function installWorkCardSizePreference() {
+  const control = els.workCardSize;
+  if (!control) return;
+  const key = "fanhao.workCardSize";
+  try {
+    const saved = window.localStorage?.getItem(key);
+    if ([...control.options].some((option) => option.value === saved)) control.value = saved;
+  } catch {}
+  els.workGrid.dataset.workCardSize = control.value;
+  control.addEventListener("change", () => {
+    els.workGrid.dataset.workCardSize = control.value;
+    try {
+      window.localStorage?.setItem(key, control.value);
+    } catch {}
+  });
+}
+
 function defaultUiConfig() {
   return {
     compilationPrefixes: ["OFJE", "THN", "THU"],
@@ -663,7 +783,17 @@ function currentRouteSnapshot(overrides = {}) {
     codePrefix: state.activeView === "codes" ? state.selectedCodePrefix || "" : "",
     codePrefixFamily: state.activeView === "codes" && Boolean(state.selectedCodePrefixFamily),
     personId: state.activeView === "people" ? state.selectedPersonId || "" : "",
+    personWorkQuery: state.personWorkQuery,
     q: state.activeView === "search" ? state.searchQuery || state.workQuery || "" : "",
+    searchFilters: state.activeView === "search" ? selectedWorkFilters().join(",") : "",
+    searchSort: state.sortMode,
+    searchShowMissing: showMissingLocalForCurrentView(),
+    searchShowCompilations: showCompilationsForCurrentView(),
+    favoriteFolderId: state.selectedFavoriteFolderId,
+    favoriteQuery: state.favoriteQuery,
+    historyRange: state.selectedHistoryRange,
+    historyWatch: state.selectedHistoryWatch,
+    historyQuery: state.historyQuery,
     workId: "",
     videoId: ""
   };
@@ -676,6 +806,10 @@ function writeRoute(route, mode = "push") {
   const next = normalizeRoute(route);
   const url = routeUrl(next, { initialParams });
   const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash || ""}`;
+  if (next.view === "search" && url !== currentUrl) {
+    const status = els.statsRow.querySelector(".search-link-controls [role=status]");
+    if (status) status.textContent = "";
+  }
   const historyState = { fanhaoRoute: true, ...next };
   if (mode === "replace" || url === currentUrl) {
     window.history.replaceState(historyState, "", url);
@@ -710,6 +844,9 @@ function initializeRouteHistory({ preserveUrl = false } = {}) {
 
 function beginNavigation(options = {}) {
   if (options.navigationIntent !== undefined) return options.navigationIntent;
+  favoriteFolderPicker.close({ restoreFocus: false });
+  workSearchSuggestions.close();
+  window.clearTimeout(state.searchTimer);
   state.restoringRoute = false;
   return ++navigationSequence;
 }
@@ -730,7 +867,7 @@ async function applyRoute(route, options = {}) {
     if (!isCurrent()) return false;
     state.restoringRoute = true;
     if (next.view === "search") {
-      await loadSearchResults(next.q, { skipRoute: true, navigationIntent });
+      await loadSearchResults(next.q, { skipRoute: true, navigationIntent, searchRoute: next });
     } else if (next.view === "codes") {
       await codePrefixPage.applyRoute(next, { navigationIntent, preserveSearchDraft: options.preserveSearchDraft });
     } else if (next.view === "people") {
@@ -742,6 +879,7 @@ async function applyRoute(route, options = {}) {
       if (routePerson) {
         await selectPerson(routePerson.id, {
           resetFilter: false,
+          personWorkQuery: next.personWorkQuery,
           navigationIntent,
           captureIndexScroll: false,
           skipRoute: routePerson.id === next.personId,
@@ -750,6 +888,7 @@ async function applyRoute(route, options = {}) {
       } else if (next.personId) {
         await selectPerson(next.personId, {
           resetFilter: false,
+          personWorkQuery: next.personWorkQuery,
           navigationIntent,
           captureIndexScroll: false,
           replaceRoute: true
@@ -759,6 +898,7 @@ async function applyRoute(route, options = {}) {
       }
     } else {
       if (!options.preserveSearchDraft) clearWorkSearch();
+      applyCollectionRoute(next);
       setActiveView(next.view, { skipRoute: true, navigationIntent });
     }
 
@@ -771,6 +911,17 @@ async function applyRoute(route, options = {}) {
     return false;
   } finally {
     if (isCurrent()) state.restoringRoute = false;
+  }
+}
+
+function applyCollectionRoute(route) {
+  if (route.view === "favorites") {
+    state.selectedFavoriteFolderId = route.favoriteFolderId;
+    state.favoriteQuery = route.favoriteQuery;
+  } else if (route.view === "history") {
+    state.selectedHistoryRange = route.historyRange;
+    state.selectedHistoryWatch = route.historyWatch;
+    state.historyQuery = route.historyQuery;
   }
 }
 
@@ -883,8 +1034,8 @@ async function loadLibrary(options = {}) {
     state.accessHints = data.access?.hints || {};
     state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
     if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
-    if (els.missingLocalToggle) els.missingLocalToggle.checked = state.showMissingLocalWorks;
-    if (els.collectionToggle) els.collectionToggle.checked = state.showCompilationWorks;
+    if (els.missingLocalToggle) els.missingLocalToggle.checked = showMissingLocalForCurrentView();
+    if (els.collectionToggle) els.collectionToggle.checked = showCompilationsForCurrentView();
     const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
     state.workPageSize = preferredWorkPageSize(Math.min(defaultWorkPageSize, Number(state.accessHints.workPageSize) || defaultWorkPageSize));
     state.personPageSize = peoplePage.personIndexPageSize();
@@ -1038,7 +1189,7 @@ function searchWorksByText(value) {
   const query = String(value || "").trim();
   if (!query) return;
   if (els.workSearch) els.workSearch.value = query;
-  loadSearchResults(query);
+  loadSearchResults(query, { replaceRoute: query === state.searchQuery });
 }
 
 function productButtonActive(button, view = state.activeView) {
@@ -1053,17 +1204,19 @@ function productButtonActive(button, view = state.activeView) {
 
 function syncNavigationState(view = state.activeView) {
   syncProductShell(view);
+  els.missingLocalToggle.checked = showMissingLocalForCurrentView();
+  if (els.collectionToggle) els.collectionToggle.checked = showCompilationsForCurrentView();
   const classification = activeWorkClassification(view);
   document.body.classList.toggle("work-classification-view", Boolean(classification));
   els.classificationLink?.classList.toggle("active", Boolean(classification));
   if (classification) {
-    document.title = `${classification.label} 分类 · FanHao`;
+    document.title = "分类 · FanHao";
     els.classificationLink?.setAttribute("aria-current", "page");
   } else els.classificationLink?.removeAttribute("aria-current");
   els.workSearch.placeholder = classification
-    ? `在 ${classification.label} 分类中搜索` : "全库搜索 · 番号 / 标题 / 人物 / 分类";
+    ? "搜索本地馆藏" : "全库搜索番号、标题、人物或分类";
   els.workSearch.setAttribute("aria-label", classification
-    ? `在 ${classification.label} 分类中搜索番号、标题或人物` : "全库搜索番号、标题、人物、类别或片商");
+    ? "搜索本地馆藏番号、标题或人物" : "全库搜索番号、标题、人物、类别或片商");
   for (const button of els.productTabs || []) {
     const active = productButtonActive(button, view);
     button.classList.toggle("active", active);
@@ -1108,6 +1261,7 @@ function setActiveView(view, options = {}) {
   if (view !== "search") {
     state.searchPeople = [];
     state.searchQuery = "";
+    state.searchDisplay = null;
     state.searchFacets = null;
     state.searchTraitFacets = null;
     state.searchTotal = 0;
@@ -1185,6 +1339,25 @@ async function goToPerson(personId) {
   await peoplePage.goToPerson(personId);
 }
 
+async function openSearchPerson(person) {
+  const activeScope = state.peopleScope || "main";
+  const scopes = person.searchScopes;
+  try {
+    if (!Array.isArray(scopes) || scopes.includes(activeScope)) {
+      await goToPerson(person.id);
+      return;
+    }
+    const scope = scopes.find(value => PEOPLE_SCOPE_NAMES.has(value));
+    if (!scope) return;
+    const navigationIntent = beginNavigation();
+    if (!await setPeopleScope(scope) || navigationIntent !== navigationSequence) return;
+    clearWorkSearch();
+    await selectPerson(person.id, { navigationIntent });
+  } catch (error) {
+    if (error?.code !== "ACCOUNT_CHANGED") toastInline(null, error.message);
+  }
+}
+
 async function loadFavorites() {
   await collectionPage.loadFavorites();
 }
@@ -1223,7 +1396,8 @@ function updateBackToPeopleIndexButton() {
   const indexOnly = (state.activeView === "people" && !state.selectedPersonId)
     || (state.activeView === "codes" && !state.selectedCodePrefix)
     || (state.activeView === "studios" && !state.selectedStudio);
-  els.missingLocalToggle.closest(".toolbar-controls").hidden = indexOnly || Boolean(activeWorkClassification());
+  els.missingLocalToggle.closest(".toolbar-controls").hidden = indexOnly;
+  els.missingLocalToggle.closest(".toolbar-work-filters").hidden = Boolean(activeWorkClassification());
   syncNavigationState();
   if (!els.backToPeopleIndex) return;
   const showPersonBack = state.activeView === "people" && Boolean(state.selectedPersonId);
@@ -1304,11 +1478,11 @@ function createWorkSortControls() {
   for (const [value, text] of WORK_SORT_OPTIONS) {
     select.append(new Option(text, value));
   }
+  if ((state.activeView === "people" && state.selectedPersonId) || activeWorkClassification()) group.append(createPersonWorkSort(select));
+  else group.append(label, select);
   select.value = state.sortMode || "releaseDesc";
   select.addEventListener("change", handleSortModeChange);
   els.sortSelect = select;
-
-  group.append(label, select);
   return group;
 }
 
@@ -1316,7 +1490,7 @@ function createWorkFilterControls() {
   const classification = activeWorkClassification();
   els.filterList = createBrowseFilterControls({
     options: classification ? WORK_FILTER_OPTIONS.filter(([key]) => !["missingLocal", "localOnly"].includes(key)) : WORK_FILTER_OPTIONS,
-    filters: selectedWorkFilters(), includeMissing: Boolean(classification) || state.showMissingLocalWorks, toggle: toggleWorkFilter,
+    filters: selectedWorkFilters(), includeMissing: Boolean(classification) || showMissingLocalForCurrentView(), toggle: toggleWorkFilter,
     clear: () => setWorkFilters([])
   });
   return els.filterList;
@@ -1324,6 +1498,7 @@ function createWorkFilterControls() {
 
 function handleSortModeChange(event) {
   if (event.target?.isConnected === false) return;
+  syncPersonWorkSort(event.target);
   state.sortMode = event.target.value;
   resetWorkPaging();
   if (state.activeView === "search" && state.searchQuery) {
@@ -1427,8 +1602,7 @@ function renderSearchStats() {
     const summary = document.createElement("div");
     summary.className = "browse-result-summary";
     summary.textContent = `当前结果 ${formatNumber(state.searchTotal)} 部`;
-    const nav = els.statsRow.querySelector(":scope > .work-classification-nav") || createClassificationNav(classification.key);
-    renderWorkStatsContent([nav, summary], state.works);
+    renderWorkStatsContent([summary], state.works);
     return;
   }
   const stats = [
@@ -1440,6 +1614,38 @@ function renderSearchStats() {
   ];
 
   renderWorkStatsContent(stats.map(([label, value]) => createStatCard(label, value)), state.works);
+}
+
+function createSearchLinkControls() {
+  const group = document.createElement("div");
+  group.className = "stat-filter-group search-link-controls";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "stat-filter-chip";
+  button.textContent = "复制搜索链接";
+  const status = document.createElement("span");
+  status.className = "stat-inline-summary";
+  status.setAttribute("role", "status");
+  const linkPath = () => routeUrl(currentRouteSnapshot(), { initialParams: new URLSearchParams(), hash: "" });
+  button.addEventListener("click", async () => {
+    if (!button.isConnected || state.activeView !== "search" || button.getAttribute("aria-disabled") === "true") return;
+    const owner = navigationSequence;
+    const path = linkPath();
+    const url = new URL(path, window.location.origin);
+    const isCurrent = () => button.isConnected && owner === navigationSequence && path === linkPath();
+    button.setAttribute("aria-disabled", "true");
+    status.textContent = "";
+    try {
+      await navigator.clipboard.writeText(url.href);
+      if (isCurrent()) status.textContent = "搜索链接已复制";
+    } catch {
+      if (isCurrent()) window.prompt("复制搜索链接", url.href);
+    } finally {
+      button.removeAttribute("aria-disabled");
+    }
+  });
+  group.append(button, status);
+  return group;
 }
 
 function searchFilterLabel() {
@@ -1459,11 +1665,95 @@ function renderPersonWorkStats() {
   }
 
   const focusedFilter = document.activeElement?.dataset.workFilter;
-  const summary = document.createElement("div");
-  summary.className = "browse-result-summary";
-  summary.textContent = `当前结果 ${formatNumber(state.personWorksTotal)} 部`;
-  renderWorkStatsContent([summary], state.works);
+  renderPersonWorkSearch();
+  renderWorkStatsContent([], state.works);
   if (focusedFilter) focusWorkFilter(focusedFilter);
+}
+
+let personWorkSearchControls = null;
+
+function renderPersonWorkSearch({ loading = false, error = false } = {}) {
+  const personId = state.selectedPersonId;
+  if (state.activeView !== "people" || !personId) return;
+  const scope = state.peopleScope || "main";
+  let controls = personWorkSearchControls;
+  if (controls?.form.parentNode !== els.statsRow || controls.personId !== personId || controls.scope !== scope) {
+    controls?.form.remove();
+    const form = document.createElement("form");
+    form.className = "person-work-search-form";
+    form.setAttribute("role", "search");
+    form.setAttribute("aria-label", "当前人物作品查找");
+    const input = document.createElement("input");
+    input.type = "search";
+    input.maxLength = 120;
+    input.placeholder = "查找当前人物的番号或标题";
+    input.setAttribute("aria-label", "当前人物的番号或标题");
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "stat-filter-chip";
+    submit.textContent = "查找";
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "stat-filter-chip";
+    clear.textContent = "清除搜索";
+    const status = document.createElement("span");
+    status.className = "person-work-search-status";
+    status.setAttribute("role", "status");
+    controls = { form, input, clear, status, personId, scope, committed: null };
+    personWorkSearchControls = controls;
+    let composing = false;
+    input.addEventListener("compositionstart", () => { composing = true; });
+    input.addEventListener("compositionend", () => { composing = false; });
+    function submitQuery(value) {
+      if (state.activeView !== "people" || state.selectedPersonId !== personId
+        || (state.peopleScope || "main") !== scope || form.parentNode !== els.statsRow) return;
+      const query = String(value || "").trim().slice(0, 120).toWellFormed();
+      if (query === state.personWorkQuery) {
+        input.value = query;
+        return;
+      }
+      const navigationIntent = beginNavigation();
+      pushRoute({ personWorkQuery: query });
+      const options = { navigationIntent, resetFilter: false, personWorkQuery: query, skipRoute: true };
+      void readPersonWorksForSearch(personId, options);
+    }
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      if (!composing) submitQuery(input.value);
+    });
+    clear.addEventListener("click", () => {
+      if (document.activeElement === clear) input.focus({ preventScroll: true });
+      submitQuery("");
+    });
+    form.append(input, submit, clear, status);
+    els.statsRow.prepend(form);
+  }
+  const query = state.personWorkQuery || "";
+  if (controls.committed !== query) {
+    controls.committed = query;
+    controls.input.value = query;
+    controls.clear.hidden = !query;
+  }
+  const statusText = query && !error ? loading ? "正在查找" : `${formatNumber(state.personWorksTotal)} 部匹配` : "";
+  if (controls.status.textContent !== statusText) controls.status.textContent = statusText;
+}
+
+async function readPersonWorksForSearch(personId, options) {
+  const isCurrent = () => options.navigationIntent === navigationSequence && state.activeView === "people"
+    && state.selectedPersonId === personId && state.personWorkQuery === options.personWorkQuery;
+  try {
+    await selectPerson(personId, options);
+  } catch (error) {
+    if (!isCurrent()) return;
+    renderPersonWorkSearch({ error: true });
+    els.workGrid.replaceChildren(createReadRecoveryPanel({
+      message: error?.message || "暂时无法载入人物作品。", isCurrent,
+      heading: "人物作品暂时无法读取", hintText: "重新读取会保留当前查找条件。",
+      retryLabel: "重新读取", className: "collection-error-state", retryClass: "collection-retry-button",
+      retry: () => readPersonWorksForSearch(personId, options),
+      getFocusTarget: () => els.workGrid.querySelector(".collection-retry-button") || personWorkSearchControls?.input
+    }));
+  }
 }
 
 function focusWorkFilter(value) {
@@ -1483,6 +1773,10 @@ function currentTraitFacets(works) {
 }
 
 function refreshLoadedWorkControls() {
+  if (activeWorkClassification()) {
+    appendWorkControls(state.works);
+    return;
+  }
   const previous = els.filterList;
   const wrap = previous?.closest(".stat-quick-filters");
   if (!wrap) return;
@@ -1499,16 +1793,19 @@ function workStatsContext() {
   return JSON.stringify([view, view === "search" ? state.searchQuery : "",
     view === "people" ? state.selectedPersonId : "", view === "codes" ? state.selectedCodePrefix : "",
     view === "studios" ? [state.selectedStudio?.id, state.selectedStudioSeriesId] : "",
-    view === "rankings" ? state.selectedRankingKey : "", view === "favorites" ? state.selectedFavoriteFolderId : "",
-    view === "history" ? state.selectedHistoryRange : ""]);
+    view === "rankings" ? state.selectedRankingKey : "", view === "favorites" ? [state.selectedFavoriteFolderId, state.favoriteQuery] : "",
+    view === "history" ? [state.selectedHistoryRange, state.selectedHistoryWatch, state.historyQuery] : ""]);
 }
 
 function renderWorkStatsContent(content, works) {
   let controls = els.statsRow.querySelector(":scope > .work-browse-controls");
   if (controls?.dataset.workStatsContext !== workStatsContext()) controls = null;
+  const search = state.activeView === "favorites" ? els.statsRow.querySelector(":scope > .favorite-search-form")
+    : state.activeView === "history" ? els.statsRow.querySelector(":scope > .history-search-form")
+    : state.activeView === "people" && state.selectedPersonId ? els.statsRow.querySelector(":scope > .person-work-search-form") : null;
   // Removing the sort group's ancestor would close a native picker and blur it.
-  for (const child of [...els.statsRow.children]) if (child !== controls && !content.includes(child)) child.remove();
-  for (const node of content) if (node.parentElement !== els.statsRow) els.statsRow.insertBefore(node, controls);
+  for (const child of [...els.statsRow.children]) if (child !== controls && child !== search && !content.includes(child)) child.remove();
+  for (const node of content) if (node.parentElement !== els.statsRow) els.statsRow.insertBefore(node, controls || search);
   appendWorkControls(works);
 }
 
@@ -1516,11 +1813,19 @@ function appendWorkControls(works) {
   const wrap = els.statsRow.querySelector(":scope > .work-browse-controls") || document.createElement("div");
   wrap.className = "stat-quick-filters work-browse-controls";
   wrap.dataset.workStatsContext = workStatsContext();
+  const personView = state.activeView === "people" && Boolean(state.selectedPersonId);
+  const classification = activeWorkClassification();
+  const advancedPaneId = personView ? "personAdvancedFilters" : classification ? "classificationAdvancedFilters" : "";
   const sort = wrap.querySelector(":scope > .stat-sort-group") || createWorkSortControls();
-  for (const child of [...wrap.children]) if (child !== sort) child.remove();
+  const advancedToggle = advancedPaneId ? wrap.querySelector(":scope > .browse-advanced-toggle") : null;
+  const searchLink = state.activeView === "search"
+    ? wrap.querySelector(":scope > .search-link-controls") || createSearchLinkControls() : null;
+  for (const child of [...wrap.children]) if (child !== sort && child !== advancedToggle && child !== searchLink) child.remove();
   if (sort.parentElement !== wrap) wrap.append(sort);
+  if (searchLink && searchLink.parentElement !== wrap) wrap.append(searchLink);
   if (els.sortSelect.value !== state.sortMode) els.sortSelect.value = state.sortMode;
-  wrap.insertBefore(createWorkFilterControls(), sort);
+  syncPersonWorkSort(els.sortSelect);
+  wrap.insertBefore(createWorkFilterControls(), advancedToggle || sort);
   if (isPersonBulkDeleteAvailable() && !isPersonBulkDeleteActive()) {
     const select = document.createElement("button");
     select.type = "button";
@@ -1533,14 +1838,48 @@ function appendWorkControls(works) {
     wrap.append(select);
   }
   appendPersonBulkDeleteControls(works, wrap);
-  appendMetadataQuickFilters(works, wrap);
-  const traits = createBrowseTraitControls({ ...currentTraitFacets(works), filters: selectedWorkFilters(), toggle: toggleWorkFilter });
-  if (traits) wrap.append(traits);
+  const traits = createBrowseTraitControls({ ...currentTraitFacets(works), filters: selectedWorkFilters(),
+    toggle: toggleWorkFilter, showResultTotal: !advancedPaneId });
+  if (advancedPaneId) appendAdvancedWorkFilters(wrap, sort, advancedToggle, traits, advancedPaneId);
+  else {
+    appendMetadataQuickFilters(works, wrap);
+    if (traits) wrap.append(traits);
+  }
   if (wrap.parentElement !== els.statsRow) els.statsRow.append(wrap);
   if (pendingWorkFilterFocus) {
     focusWorkFilter(pendingWorkFilterFocus);
     pendingWorkFilterFocus = null;
   }
+}
+
+function appendAdvancedWorkFilters(wrap, sort, existing, traits, paneId) {
+  const pane = document.createElement("div");
+  pane.className = "browse-advanced-filters";
+  pane.id = paneId;
+  if (traits) pane.append(traits);
+  if (!pane.childElementCount) {
+    existing?.remove();
+    return;
+  }
+  const hasAdvancedFilters = Boolean(traits.querySelector('[aria-pressed="true"]'));
+  const control = existing || document.createElement("button");
+  if (!existing) {
+    control.type = "button";
+    control.className = "folder-button browse-advanced-toggle";
+    control.textContent = "高级搜索";
+    control.setAttribute("aria-controls", pane.id);
+    control.setAttribute("aria-expanded", String(paneId === "classificationAdvancedFilters" && hasAdvancedFilters));
+    control.addEventListener("click", () => {
+      const current = wrap.querySelector(":scope > .browse-advanced-filters");
+      if (!current) return;
+      current.hidden = !current.hidden;
+      control.setAttribute("aria-expanded", String(!current.hidden));
+    });
+    wrap.insertBefore(control, sort);
+  }
+  control.classList.toggle("active", hasAdvancedFilters);
+  pane.hidden = control.getAttribute("aria-expanded") !== "true";
+  wrap.append(pane);
 }
 
 function isPersonBulkDeleteAvailable() {
@@ -1817,10 +2156,8 @@ function setWorkFilters(filters) {
 }
 
 function toggleWorkFilter(value) {
-  if ((value === "all" || value === "missingLocal") && !state.showMissingLocalWorks && !activeWorkClassification()) {
-    state.showMissingLocalWorks = true;
-    els.missingLocalToggle.checked = true;
-    writeStoredFlag("fanhao.showMissingLocalWorks", true);
+  if ((value === "all" || value === "missingLocal") && !showMissingLocalForCurrentView() && !activeWorkClassification()) {
+    setShowMissingLocalForCurrentView(true);
   }
   setWorkFilters(nextBrowseFilters(selectedWorkFilters(), value));
 }
@@ -1851,12 +2188,19 @@ function visibleWorks() {
   if (state.activeView === "people" && state.selectedPersonId) return state.works;
   if (state.activeView === "codes" && state.selectedCodePrefix) return state.works;
   if (state.activeView === "studios" && state.selectedStudio) return state.works;
-  return selectVisibleWorks(state.works, {
+  return selectWorkCards(state.works, {
     query: state.activeView === "search" ? "" : state.workQuery,
-    filters: selectedWorkFilters(),
-    sortMode: state.sortMode,
-    showCompilationWorks: state.showCompilationWorks,
-    showMissingLocalWorks: state.showMissingLocalWorks,
+    filters: selectedWorkFilters()
+  });
+}
+
+function selectWorkCards(works, { query = "", filters, sortMode = state.sortMode }) {
+  return selectVisibleWorks(works, {
+    query,
+    filters,
+    sortMode,
+    showCompilationWorks: showCompilationsForCurrentView(),
+    showMissingLocalWorks: state.activeView === "search" ? showMissingLocalForCurrentView() : state.showMissingLocalWorks,
     includesText,
     workSearchText: (work) => `${workInfoSearchText(work)} ${workPersonSearchText(work)}`,
     isCompilation: isCompilationWork,
@@ -1917,6 +2261,7 @@ function resetSearchPagination() {
 
 function clearWorkSearch() {
   window.clearTimeout(state.searchTimer);
+  workSearchSuggestions.close();
   searchRequests.cancel();
   resetSearchPagination();
   state.workQuery = "";
@@ -1929,7 +2274,8 @@ function submitWorkSearch(query, options = {}) {
   state.workQuery = value;
   els.workSearch.value = value;
   resetWorkPaging();
-  return loadSearchResults(scopedWorkSearch(value), options);
+  const scopedQuery = scopedWorkSearch(value);
+  return loadSearchResults(scopedQuery, { replaceRoute: !scopedQuery || scopedQuery === state.searchQuery, ...options });
 }
 
 function activeWorkClassification(view = state.activeView) {
@@ -1952,8 +2298,9 @@ function clearWorkFilter() {
 async function loadSearchResults(query, options = {}) {
   const navigationIntent = beginNavigation(options);
   resetSearchPagination();
-  const normalizedQuery = String(query || "").trim();
-  const classification = parseClassificationQuery(normalizedQuery);
+  const rawQuery = String(query || "").trim();
+  const classification = parseClassificationQuery(rawQuery);
+  const normalizedQuery = classification ? classificationQuery("all", classification.query) : rawQuery;
   const visibleQuery = classification ? classification.query : normalizedQuery;
   state.workQuery = visibleQuery;
   if (!options.preserveSearchDraft && els.workSearch && els.workSearch.value !== visibleQuery) {
@@ -1977,6 +2324,7 @@ async function loadSearchResults(query, options = {}) {
   }
 
   const enteringSearch = state.activeView !== "search";
+  const searchRoute = options.searchRoute;
   peoplePage.cancelPendingSelection();
   codePrefixPage.cancelPendingRequests();
   rankingPage.cancelPendingRequests();
@@ -1987,20 +2335,29 @@ async function loadSearchResults(query, options = {}) {
     if (selectedWorkFilters().length) {
       state.filterMode = "all";
     }
-    if (state.sortMode === "ranking") {
-      state.sortMode = "releaseDesc";
-      if (els.sortSelect) els.sortSelect.value = "releaseDesc";
-    }
   }
 
+  if (searchRoute || (classification && (classification.filter || !activeWorkClassification()))) {
+    const validFilters = normalizeWorkFilters(searchRoute?.searchFilters)
+      .filter(filter => WORK_FILTER_OPTIONS.some(([value]) => value === filter) || traitFilterLabel(filter));
+    const filters = normalizeWorkFilters([classification?.filter, ...validFilters]);
+    state.filterMode = filters.join(",") || "all";
+  }
+  if (searchRoute || enteringSearch) {
+    state.searchDisplay = {
+      showMissing: searchRoute?.searchShowMissing ?? state.showMissingLocalWorks,
+      showCompilations: searchRoute?.searchShowCompilations ?? state.showCompilationWorks
+    };
+  }
+  const searchSort = searchRoute?.searchSort ?? (enteringSearch && state.sortMode === "ranking" ? "releaseDesc" : state.sortMode);
+  state.sortMode = normalizeFanhaoSearchSort(searchSort, Boolean(classification));
   state.activeView = "search";
   if (enteringSearch || state.searchQuery !== normalizedQuery) els.statsRow.innerHTML = "";
   state.searchQuery = normalizedQuery;
   syncNavigationState("search");
   hidePersonProfile();
   if (classification) {
-    setMainHeader(`${classification.label} 分类`, "本地馆藏 · 按番号、标题或人物搜索");
-    if (!els.statsRow.querySelector(".work-classification-nav")) els.statsRow.append(createClassificationNav(classification.key));
+    setMainHeader("分类", "本地馆藏 · 按番号、标题或人物搜索");
   } else setMainHeader(`搜索：${normalizedQuery}`, "全库 · 番号 / 标题 / 文件名 / 人物 / 类别 / 片商");
   els.workGrid.innerHTML = `<div class="empty-state">正在全库搜索</div>`;
   state.searchTotal = 0;
@@ -2019,7 +2376,7 @@ async function loadSearchResults(query, options = {}) {
   try {
     const data = await searchRequests.fetchPage(normalizedQuery, 0, () => {
       searchRequests.cancel();
-      const reloadOptions = { ...routeOptions, preserveSearchDraft: true };
+      const reloadOptions = { ...routeOptions, preserveSearchDraft: true, searchRoute: undefined };
       delete reloadOptions.navigationIntent;
       return loadSearchResults(normalizedQuery, reloadOptions);
     });
@@ -2045,7 +2402,7 @@ async function loadSearchResults(query, options = {}) {
     els.workGrid.replaceChildren(createSearchRecoveryPanel({
       message: error.message,
       isCurrent: ownsSearch,
-      retry: () => loadSearchResults(normalizedQuery, { ...options, replaceRoute: true, navigationIntent, preserveSearchDraft: true }),
+      retry: () => loadSearchResults(normalizedQuery, { ...options, replaceRoute: true, navigationIntent, preserveSearchDraft: true, searchRoute: undefined }),
       clear: () => submitWorkSearch(""),
       getFocusTarget: () => els.workGrid.querySelector(".search-retry-button") || els.currentTitle
     }));
@@ -2125,7 +2482,7 @@ function renderWorks(emptyMessage = "没有匹配的作品。") {
   const serverMore = workServerMoreState(state);
   const hasServerMore = Object.values(serverMore).some(Boolean);
   if (!works.length && !hasServerMore) {
-    appendEmpty(emptyMessage);
+    appendEmpty(state.activeView === "favorites" && state.favoriteQuery ? "当前收藏中没有匹配的作品。" : emptyMessage);
     captureWorkLocalMarkerPresentation(els.workGrid.lastElementChild);
     return;
   }
@@ -2198,7 +2555,7 @@ function appendLoadMore(visibleCount, totalCount, options = {}) {
       : hasCodePrefixServerMore
         ? state.codePrefixTotal
         : hasRankingServerMore
-          ? state.rankingTotal
+          ? state.rankingScopeTotal ?? state.rankingTotal
           : hasCollectionServerMore
             ? state.collectionTotal
             : hasVrServerMore
@@ -2330,9 +2687,14 @@ function emptyStateInfo(message) {
   const actions = [];
 
   if (isPerson) {
+    if (state.personWorkQuery) {
+      if (activeFilters.length) actions.push({ label: "清除筛选", primary: true, run: clearEmptyStateFilters });
+      if (!showMissingLocalForCurrentView()) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+      return { title: "当前人物没有符合条件的作品。", detail: "试试其他番号或标题。", actions };
+    }
     if (hasFilteredWorks || activeFilters.length || state.workQuery.trim()) {
       actions.push({ label: "清除筛选", primary: true, run: clearEmptyStateFilters });
-      if (!state.showMissingLocalWorks) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+      if (!showMissingLocalForCurrentView()) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
       return {
         title: "当前筛选没有作品",
         detail: "这个人物仍在资料库中，换个筛选条件可以继续查看。",
@@ -2341,7 +2703,7 @@ function emptyStateInfo(message) {
     }
 
     actions.push({ label: "返回人物列表", primary: true, run: returnToPeopleIndex });
-    if (!state.showMissingLocalWorks) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
+    if (!showMissingLocalForCurrentView()) actions.push({ label: "显示未下载", run: showMissingLocalFromEmptyState });
     return {
       title: "本地作品已清空",
       detail: `${state.selectedPerson?.name || "这个人物"}还保留在资料库中，目前没有本地视频文件。`,
@@ -2396,9 +2758,7 @@ function clearEmptyStateFilters() {
 }
 
 function showMissingLocalFromEmptyState() {
-  state.showMissingLocalWorks = true;
-  writeStoredFlag("fanhao.showMissingLocalWorks", true);
-  if (els.missingLocalToggle) els.missingLocalToggle.checked = true;
+  setShowMissingLocalForCurrentView(true);
   resetWorkPaging();
   if (state.activeView === "people" && state.selectedPersonId) {
     selectPerson(state.selectedPersonId, { resetFilter: false });
@@ -2458,7 +2818,9 @@ async function refreshRankingsFromLibrary(event) {
 }
 
 function renderSearchPeoplePanel() {
-  if (state.activeView !== "search" || !state.searchPeople.length) return;
+  if (state.activeView !== "search") return;
+  const people = state.searchPeople.filter(person => !Array.isArray(person.searchScopes) || person.searchScopes.length);
+  if (!people.length) return;
 
   const panel = document.createElement("div");
   panel.className = "search-people-panel";
@@ -2471,13 +2833,13 @@ function renderSearchPeoplePanel() {
   const list = document.createElement("div");
   list.className = "search-people-list";
 
-  for (const person of state.searchPeople) {
+  for (const person of people) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "search-person-chip";
     button.textContent = `${displayPersonName(person)} · ${formatNumber(person.workCount)} 部`;
     button.addEventListener("click", () => {
-      goToPerson(person.id);
+      void openSearchPerson(person);
     });
     list.append(button);
   }
@@ -2640,8 +3002,6 @@ function createWorkCard(work, index = 0) {
   const card = document.createElement("article");
   const bulkOwner = capturePersonBulkDeleteOwner();
   card.className = `work-card${work.missingLocal ? " missing-local" : ""}`;
-  const isRankingCard = state.activeView === "rankings";
-  if (isRankingCard) card.classList.add("ranking-card");
   card.dataset.workId = work.id;
   if (isPersonBulkDeleteActive() && state.personBulkDeleteSelectedIds.has(String(work.id))) {
     card.classList.add("bulk-delete-selected");
@@ -2651,7 +3011,11 @@ function createWorkCard(work, index = 0) {
   cover.type = "button";
   cover.className = "cover-wrap work-card-main";
   cover.setAttribute("aria-label", work.missingLocal ? `打开 JavDB：${work.title}` : `打开作品：${work.title}`);
-  cover.addEventListener("click", () => handleWorkCardPrimaryClick(work, cover, bulkOwner));
+
+  const coverFrame = document.createElement("div");
+  coverFrame.className = "work-cover";
+  coverFrame.addEventListener("click", () => handleWorkCardPrimaryClick(work, cover, bulkOwner));
+  coverFrame.append(cover);
 
   const resolvedCoverUrl = workCoverUrl(work);
   if (resolvedCoverUrl) {
@@ -2660,38 +3024,50 @@ function createWorkCard(work, index = 0) {
     cover.append(els.placeholderTemplate.content.cloneNode(true));
   }
 
+  const coverTop = document.createElement("div");
+  coverTop.className = "work-cover-top";
+  const coverActions = document.createElement("div");
+  coverActions.className = "work-cover-actions";
   const rankNo = Number(work.ranking?.rankNo);
   if (Number.isInteger(rankNo) && rankNo > 0) {
     const rank = document.createElement("span");
-    rank.className = `cover-ranking${rankNo <= 3 ? ` podium-${rankNo}` : ""}`;
+    rank.className = `cover-badge cover-ranking${rankNo <= 3 ? ` podium-${rankNo}` : ""}`;
     rank.textContent = `TOP ${formatNumber(rankNo)}`;
     rank.setAttribute("aria-hidden", "true");
     cover.setAttribute("aria-label", `${rank.textContent}，${cover.getAttribute("aria-label")}`);
-    cover.append(rank);
+    coverTop.append(rank);
   }
   if (!work.missingLocal && work.traits?.flags?.quality4k === true) {
     const quality = document.createElement("span");
-    quality.className = "cover-quality";
+    quality.className = "cover-badge cover-quality";
     quality.textContent = "4K";
     quality.setAttribute("aria-hidden", "true");
     cover.setAttribute("aria-label", `4K，${cover.getAttribute("aria-label")}`);
-    cover.append(quality);
+    coverTop.append(quality);
   }
-
-  const favorite = document.createElement("button");
-  const favoritePending = isFavoritePending(work.id);
-  const favoriteOwner = navigationSequence;
-  favorite.type = "button";
-  favorite.className = `favorite-button${work.favorite ? " active" : ""}${favoritePending ? " pending" : ""}`;
-  favorite.disabled = favoritePending;
-  favorite.title = work.favorite ? "取消收藏" : "收藏";
-  favorite.setAttribute("aria-label", favoritePending ? `${favorite.title}中` : favorite.title);
-  favorite.textContent = "★";
-  favorite.addEventListener("click", (event) => {
-    event.stopPropagation();
-    if (favoriteOwner !== navigationSequence || !favorite.isConnected || !els.workGrid.contains(favorite)) return;
-    toggleFavorite(work.id, favorite);
-  });
+  if (!work.missingLocal) {
+    coverActions.prepend(createWorkFavoriteButton(work), createLocalMarkerButton(work, "A"));
+    if (isPersonBulkDeleteActive()) coverActions.prepend(createBulkDeleteSelectButton(work));
+    const flags = work.traits?.flags || {};
+    const markers = [
+      [flags.ltxLocal, "本机LTX", "本机 LTX 处理完成"],
+      [flags.ltx && !flags.ltxLocal, "LTX", "LTX 版本标记"],
+      [flags.embeddedChinese, "C", "视频文件名或目录名标记为内嵌中字"],
+      [flags.uncensored, "U", "无码版本标记"],
+      [flags.hasChineseSidecar, "中字", "有外挂中文字幕文件"],
+      [flags.hasSidecar && !flags.hasChineseSidecar, "外挂字幕", "有独立字幕文件"]
+    ];
+    for (const [enabled, label, description] of markers) {
+      if (!enabled) continue;
+      const badge = document.createElement("span");
+      badge.className = "cover-badge cover-marker";
+      badge.textContent = label;
+      badge.title = description;
+      coverActions.append(badge);
+    }
+  }
+  if (coverActions.childElementCount) coverTop.append(coverActions);
+  if (coverTop.childElementCount) coverFrame.append(coverTop);
 
   const body = document.createElement("div");
   body.className = "work-body";
@@ -2703,56 +3079,121 @@ function createWorkCard(work, index = 0) {
 
   const facts = document.createElement("div");
   facts.className = "work-card-facts";
-  const rating = createRatingLine(work);
   const updated = document.createElement("div");
   updated.className = "work-updated";
-  updated.textContent = formatDate(work.infoSummary?.releaseDate || work.modifiedAt) || (work.missingLocal ? "未下载" : "日期未知");
-  facts.append(rating, updated);
-
-  const flags = document.createElement("div");
-  flags.className = "work-card-flags";
-  if (!work.missingLocal && work.traits?.flags?.ltxLocal) {
-    const badge = document.createElement("span");
-    badge.className = "info-chip";
-    badge.textContent = "LTX 本地";
-    flags.append(badge);
+  const watchedDate = state.activeView === "history" ? formatDate(work.progress?.updatedAt) : "";
+  updated.textContent = watchedDate ? `观看于 ${watchedDate}`
+    : formatDate(work.infoSummary?.releaseDate || work.modifiedAt) || (work.missingLocal ? "未下载" : "日期未知");
+  facts.append(updated);
+  if (!work.missingLocal && state.activeView !== "favorites" && !isPersonBulkDeleteActive()) {
+    facts.classList.add("has-favorite-folder-action");
+    facts.append(createWorkFavoriteFolderButton(work));
   }
+
+  const coverBottom = document.createElement("div");
+  coverBottom.className = "work-cover-bottom";
   if (work.missingLocal && work.availability?.hasMagnet === true) {
     const magnet = document.createElement("span");
-    magnet.className = "info-chip magnet";
+    magnet.className = "cover-badge info-chip magnet";
     magnet.textContent = work.availability.hasSubtitles ? "中字磁链" : "含磁链";
     magnet.title = "资料来源标记有磁链，未验证当前下载可用性。中字磁链仅表示资源资料线索，不代表本地文件有字幕。";
-    flags.append(magnet);
+    coverBottom.append(magnet);
   }
   if (work.missingLocal && state.accessMode === "local") {
     const compilationButton = document.createElement("button");
     compilationButton.type = "button";
-    compilationButton.className = "inline-rule-button";
+    compilationButton.className = "cover-badge inline-rule-button";
     compilationButton.textContent = "标为合集";
     compilationButton.addEventListener("click", (event) => {
       event.stopPropagation();
       markWorkAsCompilation(work, compilationButton);
     });
-    flags.append(compilationButton);
-  }
-  if (state.activeView === "favorites" && work.favorite) {
-    flags.append(createFavoriteFolderSelect(work));
+    coverBottom.append(compilationButton);
   }
 
-  body.append(title, facts);
-  if (flags.childElementCount) body.append(flags);
-  if (work.missingLocal) {
-    card.append(cover, body);
-  } else {
-    if (!isPersonBulkDeleteActive()) {
-      cover.dataset.playbackWorkId = String(work.id);
-      body.dataset.playbackWorkId = String(work.id);
-    }
-    card.append(cover, favorite, createLocalMarkerButton(work, "A"));
-    if (isPersonBulkDeleteActive()) card.append(createBulkDeleteSelectButton(work));
-    card.append(body);
+  const rating = createCoverRating(work);
+  if (rating) {
+    cover.title = rating.getAttribute("aria-label");
+    coverBottom.append(rating);
   }
+  if (coverBottom.childElementCount) coverFrame.append(coverBottom);
+
+  body.append(title, facts);
+  if (state.activeView === "history" && !work.missingLocal && work.progress?.videoId) {
+    body.append(createHistoryPlaybackAction(work));
+  }
+  if (state.activeView === "favorites" && work.favorite) {
+    const flags = document.createElement("div");
+    flags.className = "work-card-flags";
+    flags.append(createFavoriteFolderSelect(work), collectionPage.createFavoriteBatchSelection(work));
+    body.append(flags);
+  }
+  if (!work.missingLocal && !isPersonBulkDeleteActive()) {
+    cover.dataset.playbackWorkId = String(work.id);
+    body.dataset.playbackWorkId = String(work.id);
+  }
+  card.append(coverFrame, body);
   return card;
+}
+
+function createWorkFavoriteButton(work) {
+  const favorite = document.createElement("button");
+  const favoritePending = isFavoritePending(work.id);
+  const owner = navigationSequence;
+  favorite.type = "button";
+  favorite.className = `favorite-button${work.favorite ? " active" : ""}${favoritePending ? " pending" : ""}`;
+  favorite.disabled = favoritePending;
+  favorite.title = work.favorite ? "取消收藏" : "收藏";
+  favorite.setAttribute("aria-label", favoritePending ? `${favorite.title}中` : favorite.title);
+  favorite.textContent = "★";
+  favorite.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (owner !== navigationSequence || !favorite.isConnected || !els.workGrid.contains(favorite)) return;
+    toggleFavorite(work.id, favorite);
+  });
+  return favorite;
+}
+
+function createWorkFavoriteFolderButton(work) {
+  const button = document.createElement("button");
+  const owner = navigationSequence;
+  button.type = "button";
+  button.className = "work-favorite-folder-button";
+  button.textContent = "收藏到…";
+  button.setAttribute("aria-haspopup", "dialog");
+  syncWorkFavoriteFolderButton(button, work);
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (owner !== navigationSequence || !button.isConnected || !els.workGrid.contains(button)) return;
+    const current = state.works.find(item => String(item.id) === String(work.id));
+    if (current && !current.missingLocal) favoriteFolderPicker.open(current, button);
+  });
+  return button;
+}
+
+function syncWorkFavoriteFolderButton(button, work) {
+  button.title = work.favoriteFolderName ? `当前收藏夹：${work.favoriteFolderName}` : "选择收藏夹";
+  button.setAttribute("aria-label", `${work.title}：选择收藏夹`);
+}
+
+function syncVisibleFavoriteCards(workId) {
+  const work = state.works.find(item => String(item.id) === String(workId));
+  if (!work) return;
+  for (const card of els.workGrid.querySelectorAll(`.work-card[data-work-id="${CSS.escape(String(workId))}"]`)) {
+    syncWorkFavoriteCard(card, work);
+  }
+}
+
+function syncWorkFavoriteCard(card, work) {
+  const star = card.querySelector(".favorite-button");
+  if (star) syncFavoriteControl(star, work.favorite, isFavoritePending(work.id));
+  const folder = card.querySelector(".work-favorite-folder-button");
+  if (folder) syncWorkFavoriteFolderButton(folder, work);
+  const select = card.querySelector(".favorite-folder-select");
+  if (select) {
+    select.value = work.favoriteFolderId || "default";
+    select.disabled = isFavoriteFolderPending(work.id);
+  }
 }
 
 function createBulkDeleteSelectButton(work) {
@@ -2780,7 +3221,42 @@ function handleWorkCardPrimaryClick(work, control, owner) {
     togglePersonBulkDeleteSelection(work.id);
     return;
   }
-  openWorkCard(work);
+  openWorkCard(work, { fromHistory: state.activeView === "history" });
+}
+
+function createHistoryPlaybackAction(work) {
+  const progress = work.progress;
+  const percent = Math.floor(Math.max(0, Math.min(100, Number(progress.percent) || 0)));
+  const finished = percent === 100;
+  const action = finished ? "从头播放" : progress.position > 5 ? "继续播放" : "播放";
+  const link = document.createElement("a");
+  link.className = "work-history-playback";
+  link.href = historyPlayerUrl(work);
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.dataset.playbackWorkId = String(work.id);
+  link.setAttribute("aria-label", `${action}：${work.title}，${finished ? "已看完" : `已看 ${percent}%`}`);
+  const copy = document.createElement("span");
+  copy.className = "work-history-copy";
+  const label = document.createElement("strong");
+  label.textContent = action;
+  const percentLabel = document.createElement("small");
+  percentLabel.textContent = finished ? "已看完" : `${percent}%`;
+  copy.append(label, percentLabel);
+  const meter = document.createElement("progress");
+  meter.max = 100;
+  meter.value = percent;
+  meter.setAttribute("aria-hidden", "true");
+  link.append(copy, meter);
+  link.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!link.isConnected || state.activeView !== "history") {
+      event.preventDefault();
+      return;
+    }
+    void playbackPrefetch.prepare(work.id);
+  });
+  return link;
 }
 
 function createLocalMarkerButton(work, marker) {
@@ -3082,7 +3558,7 @@ function beginWorkLocalMarkerForegroundRead(path, isCurrent, refresh = null) {
 
 function workLocalMarkerReadContext() {
   return JSON.stringify([workStatsContext(), state.peopleScope || "main", Boolean(state.selectedCodePrefixFamily),
-    state.sortMode, serializedWorkFilterMode(), Boolean(state.showMissingLocalWorks), Boolean(state.showCompilationWorks)]);
+    state.sortMode, serializedWorkFilterMode(), showMissingLocalForCurrentView(), showCompilationsForCurrentView()]);
 }
 
 function captureWorkLocalMarkerReadOwner(path) {
@@ -3108,16 +3584,20 @@ function findPendingWorkLocalMarkerMembershipRead() {
       current = path === "/api/search" && String(params.get("q") || "").trim() === state.searchQuery;
     } else if (state.activeView === "people" && state.selectedPersonId) {
       current = path === `/api/people/${encodeURIComponent(state.selectedPersonId)}`
-        && (params.get("scope") || "main") === (state.peopleScope || "main");
+        && (params.get("scope") || "main") === (state.peopleScope || "main")
+        && (params.get("q") || "") === state.personWorkQuery;
     } else if (state.activeView === "codes" && state.selectedCodePrefix) {
       current = path === `/api/code-prefixes/${encodeURIComponent(state.selectedCodePrefix)}`
         && (params.get("family") === "1") === Boolean(state.selectedCodePrefixFamily);
     } else if (state.activeView === "studios") {
       current = /^\/api\/studios\/[^/]+$/.test(path) && typeof read.refresh === "function";
     } else if (state.activeView === "favorites") {
-      current = path === "/api/favorites" && (params.get("folder") || "all") === (state.selectedFavoriteFolderId || "all");
+      current = path === "/api/favorites" && (params.get("folder") || "all") === (state.selectedFavoriteFolderId || "all")
+        && (params.get("q") || "") === state.favoriteQuery;
     } else if (state.activeView === "history") {
-      current = path === "/api/history" && (params.get("days") || "all") === (state.selectedHistoryRange || "all");
+      current = path === "/api/history" && (params.get("days") || "all") === (state.selectedHistoryRange || "all")
+        && (params.get("watch") || "all") === (state.selectedHistoryWatch || "all")
+        && (params.get("q") || "") === (state.historyQuery || "");
     } else if (state.activeView === "vr") current = path === "/api/works";
     if (current) return read;
   }
@@ -3213,7 +3693,7 @@ async function toggleWorkLocalMarker(work, marker, button, explicitEnabled) {
   }
 }
 
-function openWorkCard(work) {
+function openWorkCard(work, { fromHistory = false } = {}) {
   if (work.missingLocal) {
     if (work.javdbUrl) {
       window.open(work.javdbUrl, "_blank", "noreferrer");
@@ -3221,12 +3701,22 @@ function openWorkCard(work) {
     return;
   }
   void playbackPrefetch.prepare(work.id);
-  window.open(playerPageUrl(work.id), "_blank", "noopener");
+  window.open(fromHistory ? historyPlayerUrl(work) : playerPageUrl(work.id), "_blank", "noopener");
 }
 
-function playerPageUrl(workId, videoId = "") {
+function historyPlayerUrl(work) {
+  const progress = work.progress;
+  return playerPageUrl(work.id, progress?.videoId, {
+    returnTo: routeUrl(currentRouteSnapshot(), { initialParams }),
+    fromStart: progress?.percent >= 100
+  });
+}
+
+function playerPageUrl(workId, videoId = "", { returnTo, fromStart = false } = {}) {
   const params = new URLSearchParams({ workId: String(workId || "") });
   if (videoId) params.set("videoId", String(videoId));
+  if (returnTo) params.set("returnTo", returnTo);
+  if (fromStart) params.set("t", "0");
   return `/player.html?${params.toString()}`;
 }
 
@@ -3266,33 +3756,26 @@ async function markWorkAsCompilation(work, button) {
   }
 }
 
-function createRatingLine(work) {
-  const row = document.createElement("div");
-  row.className = "work-rating-line";
-
+function createCoverRating(work) {
   const rating = numericRating(work.infoSummary?.rating);
-  const ratingForStars = rating === null ? 0 : rating > 5 ? rating / 2 : rating;
-  const percent = Math.max(0, Math.min(100, (ratingForStars / 5) * 100));
+  const ratingCount = work.infoSummary?.ratingCount;
+  if (rating === null || (rating === 0 && (ratingCount === 0 || ratingCount === "0"))) return null;
 
-  const stars = document.createElement("span");
-  stars.className = "rating-stars";
-  stars.setAttribute("aria-hidden", "true");
-  stars.innerHTML = `<span class="rating-stars-empty">★★★★★</span><span class="rating-stars-fill" style="width:${percent.toFixed(1)}%">★★★★★</span>`;
-
-  const text = document.createElement("span");
-  text.className = "rating-text";
-  const count = Number(work.infoSummary?.ratingCount || 0);
-  if (rating !== null) {
-    const ratingText = Number.isInteger(rating) ? rating.toFixed(1) : String(rating);
-    text.textContent = count ? `${ratingText}分, 由${formatNumber(count)}人评价` : `${ratingText}分`;
-    row.setAttribute("aria-label", text.textContent);
-  } else {
-    text.textContent = "暂无评分";
-    row.classList.add("empty");
+  const count = Number(ratingCount);
+  const hasCount = Number.isFinite(count) && count > 0;
+  const ratingText = Number.isInteger(rating) ? rating.toFixed(1) : String(rating);
+  const badge = document.createElement("span");
+  badge.className = "cover-badge cover-rating";
+  badge.setAttribute("role", "img");
+  badge.setAttribute("aria-label", hasCount ? `${ratingText}分，${formatNumber(count)}人评价` : `${ratingText}分`);
+  badge.textContent = `★ ${ratingText}`;
+  if (hasCount) {
+    const countText = document.createElement("span");
+    countText.className = "cover-rating-count";
+    countText.textContent = compactRatingCount.format(count).toLowerCase();
+    badge.append(countText);
   }
-
-  row.append(stars, text);
-  return row;
+  return badge;
 }
 
 function formatDate(value) {
@@ -3345,19 +3828,32 @@ function isVrWork(work) {
 }
 
 installWorkSearchShortcut(els.workSearch);
+installWorkCardSizePreference();
 let workSearchComposing = false;
+
+function workSearchEntryOverrides() {
+  return state.activeView === "search" ? undefined : {
+    filter: "all",
+    sort: normalizeFanhaoSearchSort(state.sortMode === "ranking" ? "releaseDesc" : state.sortMode)
+  };
+}
 
 function scheduleWorkSearchPrefetch(event) {
   window.clearTimeout(state.searchTimer);
+  workSearchSuggestions.close();
   if (workSearchComposing || event?.isComposing) return;
   const query = els.workSearch.value.trim();
   if (!query || globalThis.navigator?.connection?.saveData) return;
-  state.searchTimer = window.setTimeout(() => searchRequests.prefetch(scopedWorkSearch(query)), 160);
+  state.searchTimer = window.setTimeout(() => {
+    const overrides = workSearchEntryOverrides();
+    void workSearchSuggestions.show(query, searchRequests.prefetch(scopedWorkSearch(query), overrides));
+  }, 160);
 }
 
 els.workSearch.addEventListener("compositionstart", () => {
   workSearchComposing = true;
   window.clearTimeout(state.searchTimer);
+  workSearchSuggestions.close();
 });
 
 els.workSearch.addEventListener("compositionend", () => {
@@ -3366,11 +3862,13 @@ els.workSearch.addEventListener("compositionend", () => {
 });
 
 els.workSearch.addEventListener("input", scheduleWorkSearchPrefetch);
+els.workSearch.addEventListener("blur", () => window.clearTimeout(state.searchTimer));
 
 els.workSearch.addEventListener("keydown", (event) => {
   // Confirming or cancelling an IME candidate belongs to the input method.
   // Some browsers end composition before keydown but retain keyCode 229.
   if (workSearchComposing || event.isComposing || event.keyCode === 229) return;
+  if (workSearchSuggestions.handleKey(event)) return;
   if (event.key === "Enter") {
     event.preventDefault();
     submitWorkSearch(event.currentTarget.value);
@@ -3384,9 +3882,9 @@ els.workSearch.addEventListener("keydown", (event) => {
 });
 
 els.missingLocalToggle?.addEventListener("change", (event) => {
-  state.showMissingLocalWorks = Boolean(event.target.checked);
-  writeStoredFlag("fanhao.showMissingLocalWorks", state.showMissingLocalWorks);
+  setShowMissingLocalForCurrentView(Boolean(event.target.checked));
   resetWorkPaging();
+  if (state.activeView === "search" && routeFromUrl().q === state.searchQuery) replaceRoute();
   if (state.activeView === "people" && state.selectedPersonId) {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
@@ -3401,8 +3899,10 @@ els.missingLocalToggle?.addEventListener("change", (event) => {
 
 els.collectionToggle?.addEventListener("change", (event) => {
   state.showCompilationWorks = Boolean(event.target.checked);
+  if (state.activeView === "search") state.searchDisplay.showCompilations = state.showCompilationWorks;
   writeStoredFlag("fanhao.showCompilationWorks", state.showCompilationWorks);
   resetWorkPaging();
+  if (state.activeView === "search" && routeFromUrl().q === state.searchQuery) replaceRoute();
   if (state.activeView === "people" && state.selectedPersonId) {
     selectPerson(state.selectedPersonId, { resetFilter: false });
     return;
@@ -3457,7 +3957,8 @@ window.addEventListener("popstate", () => {
 installAndroidClientReturn({ isAndroidClient, initialParams });
 
 async function bootApp() {
-  const initialRoute = routeFromUrl();
+  const initialRoute = normalizeRoute(routeFromUrl());
+  applyCollectionRoute(initialRoute);
   collectionPage.prefetch(initialRoute.view, { retainFailureForActivation: true });
   const moduleNavigationPromise = initializeModuleNavigation();
   const routePromise = applyRoute(initialRoute);

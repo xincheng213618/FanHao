@@ -245,7 +245,7 @@ function pageFunction(name, required = true) {
 const pageImplementation = [
   ...["activeShortVideoFullscreenTarget", "shortVideoFullscreenActive", "toggleShortVideoFullscreen",
     "syncShortVideoFullscreenControls", "syncShortVideoFullscreenControl", "handleShortVideoFullscreenChange", "syncShortVideoNativePlaybackModes",
-    "cancelShortVideoNativePlaybackModes", "showHome", "refreshShortVideoHome", "renderView"].map(name => pageFunction(name)),
+    "cancelShortVideoNativePlaybackModes", "showHome", "resetShortVideoViewerForHome", "refreshShortVideoHome", "renderView"].map(name => pageFunction(name)),
   pageFunction("ensureShortVideoFullscreenController", false), pageFunction("cancelShortVideoFullscreen", false)
 ].join("\n");
 const keyHandlerStart = pageSource.indexOf('    window.addEventListener("keydown", (event) => {');

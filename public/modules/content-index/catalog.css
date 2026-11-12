@@ -468,7 +468,7 @@ body.gallery-view .gallery-browse-shell .gallery-controls {
 @supports (content-visibility: auto) {
   /* Reserve the same caption height while offscreen. The poster and focus
      outline stay outside containment, and list captions keep their natural height. */
-  .gallery-browse-shell .gallery-movie-explore[data-layout="posters"] .gallery-movie-list > .gallery-movie-list-item > .gallery-movie-list-copy {
+  .gallery-browse-shell .gallery-movie-explore[data-layout="posters"] .gallery-movie-list .gallery-movie-list-item > .gallery-movie-list-copy {
     content-visibility: auto;
     block-size: var(--gallery-movie-copy-height);
   }

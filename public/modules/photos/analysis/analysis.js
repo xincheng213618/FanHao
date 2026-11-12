@@ -69,6 +69,7 @@ function renderSummary() {
 }
 
 function renderRows() {
+  if (!data) return;
   const list = visibleCollections();
   els.count.textContent = `${number.format(list.length)} 个`;
   els.rows.replaceChildren(...list.slice(0, limit).map(renderRow));
@@ -90,11 +91,13 @@ function renderRow(item) {
   fill.style.width = `${Math.round(ratio * 100)}%`;
   meter.append(fill);
   bar.append(meter, element("span", "", `${Math.round(ratio * 100)}%`));
+  const range = element("span", "analysis-range", item.prefix ? issueRange(item.prefix, item.min, item.max) : "—");
+  if (item.numberingFamilies > 1) range.append(element("small", "", `另有 ${number.format(item.numberingFamilies - 1)} 个系列`));
   row.append(
     name,
     element("span", "analysis-num", number.format(item.count)),
     element("span", "analysis-num", bytes(item.size)),
-    element("span", "analysis-range", item.prefix ? issueRange(item.prefix, item.min, item.max) : "—"),
+    range,
     bar,
     element("span", `analysis-num${item.missing ? " is-warn" : " is-muted"}`, item.missing ? number.format(item.missing) : "—"),
     element("span", `analysis-num${item.duplicateGroups ? " is-warn" : " is-muted"}`,
@@ -138,14 +141,22 @@ async function toggleDetail(wrapper, row, item) {
 }
 
 function renderDetail(panel, health) {
-  const family = health.numbering?.[0];
-  if (family?.missing) {
+  const numbering = health.numbering || [];
+  const missingFamilies = numbering.filter(family => family.missing > 0);
+  if (missingFamilies.length) {
     const section = element("section");
-    section.append(element("h3", "", `缺少的期号 · ${number.format(family.missing)}`));
-    const chips = element("ul", "analysis-chips");
-    for (const range of family.missingRanges) chips.append(element("li", "", issueRange(family.prefix, range[0], range[1])));
-    if (family.truncated) chips.append(element("li", "is-more", "仅显示前 120 段"));
-    section.append(chips);
+    const missing = health.missing ?? missingFamilies.reduce((sum, family) => sum + family.missing, 0);
+    section.append(element("h3", "", `缺少的期号 · ${number.format(missing)}`));
+    for (const family of missingFamilies) {
+      if (numbering.length > 1) {
+        const range = issueRange(family.prefix, family.min, family.max);
+        section.append(element("h4", "analysis-issue-family", `${range} · 缺 ${number.format(family.missing)} 期`));
+      }
+      const chips = element("ul", "analysis-chips");
+      for (const range of family.missingRanges) chips.append(element("li", "", issueRange(family.prefix, range[0], range[1])));
+      if (family.truncated) chips.append(element("li", "is-more", `仅显示前 ${number.format(family.missingRanges.length)} 段`));
+      section.append(chips);
+    }
     panel.append(section);
   }
   if (health.duplicates?.length) {
@@ -168,7 +179,7 @@ function renderDetail(panel, health) {
     section.append(list, element("p", "analysis-note", "按期号或同日同标题判断，只做提示。"));
     panel.append(section);
   }
-  if (!family?.missing && !health.duplicates?.length) panel.append(element("p", "analysis-note", "没有发现缺期或重复。"));
+  if (!missingFamilies.length && !health.duplicates?.length) panel.append(element("p", "analysis-note", "没有发现缺期或重复。"));
 }
 
 els.filters.addEventListener("input", () => { limit = PAGE; renderRows(); });

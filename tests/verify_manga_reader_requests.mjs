@@ -42,6 +42,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
   const addBodies = [];
   let libraryComics = null;
   let addJobResponse = null;
+  let taskJobs = [];
   const comicSnapshots = new Map();
   const currentComic = id => comicSnapshots.get(id) || comic(id);
   const server = createServer(async (req, res) => {
@@ -50,6 +51,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
     try {
       const syntheticAdd = req.method === 'POST' && url.pathname === '/api/manga/add';
       const syntheticMutation = syntheticAdd || (req.method === "POST" && /^\/api\/manga\/[CD]\/update$/.test(url.pathname))
+        || (req.method === "POST" && /^\/api\/manga\/jobs\/fixture-[\w-]+\/retry$/.test(url.pathname))
         || (req.method === "DELETE" && /^\/api\/manga\/[CD]$/.test(url.pathname));
       assert(req.method === "GET" || syntheticMutation, `unexpected fixture mutation: ${req.method} ${key}`);
       if (syntheticAdd) {
@@ -67,6 +69,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
       }
       if (url.pathname === "/probe") { sendText(res, harness(), "text/html; charset=utf-8"); return; }
       if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
+      if (url.pathname === "/api/manga/jobs") { sendJson(res, { jobs: taskJobs }); return; }
       if (syntheticMutation) {
         if (syntheticAdd) { sendJson(res, { job: addJobResponse || { id: `synthetic-add-${addBodies.length}`, status: 'complete', comicId: 'D', message: 'Synthetic add complete' } }); return; }
         sendJson(res, req.method === "DELETE" ? { ok: true } : { job: { status: "complete", message: "Synthetic update complete" } }); return;
@@ -97,6 +100,97 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
     browser = await chromium.launch({ executablePath, headless: true });
+    await run("manga task panel filters and retries jobs without losing the library draft", async () => {
+      const page = await newPage({ real: true });
+      const read = (url, req) => url.pathname === "/api/manga/jobs" && req.method === "GET";
+      const retry = (url, req) => url.pathname === "/api/manga/jobs/fixture-failed/retry" && req.method === "POST";
+      const retryPath = url => url.pathname === "/api/manga/jobs/fixture-failed/retry";
+      const running = { id: "fixture-running", comicId: "D", comicAvailable: true, title: "Comic D", kind: "update", status: "running", startedAt: "2026-01-03T00:00:00Z", progressPercent: 25 };
+      const failed = { id: "fixture-failed", comicId: "C", comicAvailable: true, title: "Comic C", kind: "update", status: "failed", startedAt: "2026-01-02T00:00:00Z", message: "Synthetic chapter failed" };
+      const finished = { id: "fixture-finished", comicId: "E", comicAvailable: false, title: "Old title", kind: "add", status: "complete", startedAt: "2026-01-01T00:00:00Z" };
+      taskJobs = [running, failed, finished];
+      const trigger = page.locator(".manga-task-trigger");
+      const dialog = page.getByRole("dialog", { name: "漫画任务" });
+      const input = page.locator('.manga-library-controls input[type="search"]');
+      const failedRow = dialog.locator('[data-job-id="fixture-failed"]');
+      const runningRow = dialog.locator('[data-job-id="fixture-running"]');
+      const attempt = dialog.getByRole("button", { name: "重试", exact: true });
+      const before = countRequests(retryPath);
+      try {
+        await page.setViewportSize({ width: 320, height: 720 });
+        await input.fill("未提交的漫画筛选");
+        await input.evaluate(node => { window.__mangaTaskDraft = node; });
+        await trigger.press("Enter");
+        await dialog.getByText("运行中 25%", { exact: true }).waitFor();
+        const geometry = await dialog.boundingBox();
+        assert(geometry.x >= 0 && geometry.x + geometry.width <= 320);
+        assert.equal(await dialog.evaluate(node => node.scrollWidth <= node.clientWidth), true);
+        await dialog.getByRole("button", { name: "失败 1" }).click();
+        assert.equal(await runningRow.isVisible(), false);
+        assert.equal(await dialog.locator('[data-job-id="fixture-finished"]').isVisible(), false);
+        assert.equal(await failedRow.isVisible(), true);
+        const error = hold(retry, "Synthetic retry unavailable");
+        await attempt.press("Enter"); await requested(error);
+        await failedRow.getByRole("button", { name: "正在重试…" }).evaluate(node => node.click());
+        assert.equal(countRequests(retryPath), before + 1);
+        await settle(page, error);
+        await failedRow.getByText("Synthetic retry unavailable", { exact: true }).waitFor();
+        assert.equal(await attempt.evaluate(node => node === document.activeElement), true);
+
+        const restarted = { ...failed, id: "fixture-restarted", startedAt: "2026-01-04T00:00:00Z", status: "running", progressPercent: 10, message: "" };
+        const accepted = hold(retry, "", { job: restarted });
+        // A pre-retry manual refresh must not overwrite the accepted new job.
+        const old = hold(read, "", { jobs: taskJobs });
+        await dialog.getByRole("button", { name: "刷新", exact: true }).click(); await requested(old);
+        await attempt.press("Enter"); await requested(accepted);
+        taskJobs = [restarted, running, failed, finished];
+        await settle(page, accepted);
+        await dialog.getByRole("button", { name: "运行中 2" }).waitFor();
+        await settle(page, old);
+        assert.equal(await dialog.getByRole("button", { name: "失败 1" }).getAttribute("aria-pressed"), "true");
+        await dialog.getByRole("button", { name: "运行中 2" }).click();
+        await runningRow.getByRole("button", { name: "查看作品" }).focus();
+        await runningRow.evaluate(node => { window.__mangaTaskRow = node; });
+        taskJobs = [restarted, { ...running, progressPercent: 60 }, failed, finished];
+        await runningRow.getByText("运行中 60%", { exact: true }).waitFor({ timeout: 6000 });
+        assert.equal(await runningRow.evaluate(node => node === __mangaTaskRow && node.contains(document.activeElement)), true);
+        const libraryReads = countRequests(url => url.pathname === "/api/manga");
+        taskJobs = [running, { ...restarted, status: "complete", progressPercent: 100 }, failed, finished];
+        await dialog.getByRole("button", { name: "已完成 2" }).waitFor({ timeout: 6000 });
+        await until(() => countRequests(url => url.pathname === "/api/manga") > libraryReads, "completed task refreshes the library");
+        await page.keyboard.press("Escape");
+        assert.equal(await dialog.count(), 0);
+        assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+        assert.equal(await input.evaluate(node => node === __mangaTaskDraft && node.value === "未提交的漫画筛选"), true);
+        assert.equal(countRequests(retryPath), before + 2);
+      } finally { taskJobs = []; await page.close(); }
+    });
+    await run("manga task panel releases old reads and opens a confirmed comic", async () => {
+      const page = await newPage({ real: true });
+      const match = url => url.pathname === "/api/manga/jobs";
+      const old = hold(match, "Obsolete synthetic history error");
+      const trigger = page.locator(".manga-task-trigger");
+      const dialog = page.getByRole("dialog", { name: "漫画任务" });
+      taskJobs = [{ id: "fixture-confirmed", comicId: "C", comicAvailable: true, title: "Comic C", kind: "add", status: "complete", startedAt: "2026-01-04T00:00:00Z" }];
+      try {
+        await trigger.click(); await requested(old);
+        await page.keyboard.press("Escape");
+        assert.equal(await dialog.count(), 0);
+        await trigger.click();
+        await dialog.getByText("Comic C", { exact: true }).waitFor();
+        await settle(page, old);
+        assert.equal(await dialog.getByText("Obsolete synthetic history error").count(), 0);
+        assert.equal(await page.evaluate(() => __transport.aborted.includes("/api/manga/jobs?limit=50")), true);
+        await dialog.getByRole("button", { name: "查看作品" }).click();
+        await detailTitle(page, "Comic C");
+        assert.equal(await dialog.count(), 0);
+        await trigger.click();
+        await dialog.getByText("Comic C", { exact: true }).waitFor();
+        await navigateRoute(page, "/manga/D");
+        await detailTitle(page, "Comic D");
+        assert.equal(await dialog.count(), 0);
+      } finally { old.release(); taskJobs = []; await page.close(); }
+    });
     await run("storage failure: chapters remain readable with a full progress store", async () => {
       const page = await newPage({ real: true, route: "/manga/C" });
       try {
@@ -126,6 +220,7 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
           localStorage.setItem("fanhao.manga.favorites", JSON.stringify(["C", "D"]));
           localStorage.setItem("fanhao.manga.progress", JSON.stringify({ C: 1, D: 2 }));
           localStorage.setItem("fanhao.manga.positions", JSON.stringify({ C: { page: 2 }, D: { page: 4 } }));
+          localStorage.setItem("fanhao.manga.recent", JSON.stringify(["C", "D"]));
         });
         await denyMangaProgressWrites(page);
         const completed = page.waitForResponse(response => response.request().method() === "DELETE" && new URL(response.url()).pathname === "/api/manga/C");
@@ -136,8 +231,9 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         assert.equal(new URL(page.url()).pathname, "/manga");
         assert.deepEqual(await page.evaluate(() => [
           JSON.parse(localStorage.getItem("fanhao.manga.favorites")),
-          JSON.parse(localStorage.getItem("fanhao.manga.positions"))
-        ]), [["D"], { D: { page: 4 } }], "one blocked storage key must not prevent other local cleanup");
+          JSON.parse(localStorage.getItem("fanhao.manga.positions")),
+          JSON.parse(localStorage.getItem("fanhao.manga.recent"))
+        ]), [["D"], { D: { page: 4 } }, ["D"]], "one blocked storage key must not prevent other local cleanup");
       } finally { await page.close(); }
     });
 
@@ -780,6 +876,27 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         } finally { update.release(); detail?.release(); library?.release(); comicSnapshots.delete('C'); await page.close(); }
       }
     });
+    await run('partial manga update refreshes newly saved chapters and retains the failure message', async () => {
+      const page = await newPage({ real: true, route: '/manga/C' });
+      const matchUpdate = (url, method) => (requestUrl, req) => requestUrl.pathname === url && req.method === method;
+      const post = hold(matchUpdate('/api/manga/C/update', 'POST'), '', { job: { status: 'running', progressPercent: 5 } });
+      const terminal = hold(matchUpdate('/api/manga/C/update', 'GET'), '', { job: {
+        id: 'fixture-partial', comicId: 'C', comicAvailable: true, status: 'failed', failedChapters: 1,
+        progressPercent: 66, message: '采集未完成，1 章未完整保存'
+      } });
+      try {
+        await detailTitle(page, 'Comic C');
+        await page.locator('[data-action="update"]').click();
+        await requested(post); await settle(page, post); await requested(terminal);
+        const original = currentComic('C');
+        comicSnapshots.set('C', { ...original, chapters: original.chapters.map(chapter => chapter.index === 2
+          ? { ...chapter, title: 'Chapter saved before failure' } : chapter) });
+        await settle(page, terminal);
+        await page.getByText('Chapter saved before failure', { exact: true }).waitFor();
+        await page.getByText('采集未完成，1 章未完整保存', { exact: true }).waitFor();
+        assert(await page.locator('[data-action="update"]').isEnabled());
+      } finally { post.release(); terminal.release(); comicSnapshots.delete('C'); await page.close(); }
+    });
     await run('directory search: update progress leaves the mounted directory untouched', async () => {
       const original = catalogComic('C', Array.from({ length: 2000 }, (_, index) => index + 1));
       comicSnapshots.set('C', original);
@@ -1175,6 +1292,46 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         await page.screenshot({ path: path.join(directory, 'page-navigation-320.png') });
       } finally { failures.forEach(gate => gate.release()); readerImageCount = 3; readerImageDimensions = null; readerImageIntrinsic = { width: 800, height: 1400 }; await page.close(); }
     });
+    await run("library resume: legacy progress opens the saved page and promotes the last read comic", async () => {
+      readerImageCount = 12;
+      readerImageDimensions = { width: 800, height: 1400 };
+      libraryComics = ["C", "D", "E", "F", "G", "MissingImages"].map(id => {
+        const { chapters, ...summary } = comic(id);
+        if (id === "MissingImages") summary.doneChapterCount = 0;
+        return summary;
+      });
+      const page = await newPage({ real: true, route: "/manga?sort=title" });
+      try {
+        const shelf = page.getByRole("region", { name: "继续阅读" });
+        assert.equal(await shelf.count(), 0);
+        await page.evaluate(() => {
+          localStorage.setItem("fanhao.manga.progress", JSON.stringify({ C: 1, D: 2, E: 1, F: 2, G: 1, MissingImages: 1, Removed: 1 }));
+          localStorage.setItem("fanhao.manga.positions", JSON.stringify({ D: { chapter: 2, page: 7, ratio: 0.35 } }));
+          localStorage.setItem("fanhao.manga.recent", JSON.stringify(["Removed", "MissingImages"]));
+        });
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.reload();
+        await ready(page);
+        assert.deepEqual(await shelf.getByRole("link").allTextContents().then(values => values.map(value => value.trim())), [
+          "Comic C第 1 话", "Comic D第 2 话", "Comic E第 1 话", "Comic F第 2 话"
+        ]);
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+        const resume = shelf.getByRole("link", { name: "Comic D 第 2 话" });
+        assert.equal(await resume.getAttribute("href"), "/manga/D/read/2?sort=title");
+        await resume.focus();
+        await page.keyboard.press("Enter");
+        await readerTitle(page, "Comic D", "Chapter 2");
+        await ready(page);
+        await assertReadingAnchor(page, 7, .35);
+        await page.goBack();
+        await ready(page);
+        assert.match(await shelf.getByRole("link").first().textContent(), /Comic D/);
+        const search = page.locator(".manga-library-controls input");
+        await search.fill("Comic C");
+        await search.press("Enter");
+        assert.equal(await shelf.count(), 0, "search results show only matching catalog cards");
+      } finally { libraryComics = null; readerImageCount = 3; readerImageDimensions = null; await page.close(); }
+    });
     await run('reader position: continue reading restores the saved page inside a long chapter', async () => {
       readerImageCount = 40; readerImageDimensions = { width: 800, height: 1400 };
       const page = await newPage({ real: true, route: '/manga/C/read/1' });
@@ -1447,6 +1604,77 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         assert.equal(new URL(page.url()).searchParams.get('sort'), 'title');
       } finally { await page.close(); }
     });
+    await run('manga shelf filters: favorites and reading progress compose with search, sorting and Back', async () => {
+      const page = await newPage({ real: true });
+      const favorites = page.getByRole('button', { name: '仅收藏' });
+      const started = page.getByRole('button', { name: '有阅读记录' });
+      const unread = page.getByRole('button', { name: '未开始' });
+      const search = page.locator('.manga-library-controls input');
+      const cards = () => page.locator('.manga-card').evaluateAll(items => items.map(item => item.dataset.comicId));
+      try {
+        await page.setViewportSize({ width: 320, height: 740 });
+        await page.locator('.manga-card').first().waitFor();
+        await page.evaluate(() => {
+          localStorage.setItem('fanhao.manga.favorites', JSON.stringify(['C', 'missing', { toString: null }]));
+          localStorage.setItem('fanhao.manga.progress', JSON.stringify({ C: 1, D: { toString: null } }));
+        });
+        const reads = countRequests(url => url.pathname === '/api/manga');
+        await search.fill('Unsubmitted draft');
+        await favorites.press('Enter');
+        assert.deepEqual(await cards(), ['C']);
+        assert.equal(await search.inputValue(), 'Unsubmitted draft');
+        assert.equal(await favorites.getAttribute('aria-pressed'), 'true');
+        await unread.press('Enter');
+        assert.deepEqual(await cards(), []);
+        assert.match(await page.locator('.manga-empty').textContent(), /没有符合当前筛选/);
+        await started.press('Enter');
+        assert.deepEqual(await cards(), ['C']);
+        assert.equal(await started.evaluate(button => button === document.activeElement), true);
+        assert.equal(await page.locator('.manga-shelf-filters').evaluate(group => {
+          const bounds = group.getBoundingClientRect();
+          return bounds.left >= 0 && bounds.right <= innerWidth && group.scrollWidth <= group.clientWidth;
+        }), true);
+        await search.fill('Comic C'); await search.press('Enter');
+        await page.locator('.manga-library-controls select').selectOption('title');
+        assert.deepEqual(await cards(), ['C']);
+        assert.equal(countRequests(url => url.pathname === '/api/manga'), reads, 'local shelf filters must reuse the loaded catalogue');
+        const shelfUrl = new URL(page.url());
+        assert.equal(shelfUrl.pathname, '/manga/search');
+        assert.deepEqual(Object.fromEntries(shelfUrl.searchParams), { q: 'Comic C', sort: 'title', favorites: '1', reading: 'started' });
+        await page.locator('.manga-card-open').click(); await detailTitle(page, 'Comic C');
+        const returnUrl = await page.getByRole('link', { name: '书库', exact: true }).getAttribute('href');
+        assert.equal(returnUrl, `${shelfUrl.pathname}${shelfUrl.search}`);
+        await page.getByRole('button', { name: '已收藏', exact: true }).click();
+        await page.goBack();
+        await page.locator('.manga-empty').waitFor();
+        assert.deepEqual(await cards(), [], 'a removed favorite must disappear when returning to the saved shelf');
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await page.locator('.manga-empty').waitFor();
+        assert.equal(await favorites.getAttribute('aria-pressed'), 'true');
+        assert.equal(await started.getAttribute('aria-pressed'), 'true');
+        await page.getByRole('button', { name: '清除筛选', exact: true }).click();
+        assert.deepEqual(await cards(), ['C']);
+        assert.deepEqual(Object.fromEntries(new URL(page.url()).searchParams), { q: 'Comic C', sort: 'title' });
+      } finally { await page.close(); }
+    });
+    await run('manga shelf filters: a newly started title moves out of the unread shelf', async () => {
+      const page = await newPage({ real: true, route: '/manga?reading=unread' });
+      try {
+        const before = page.locator('.manga-card[data-comic-id="D"]');
+        await before.locator('.manga-card-open').click(); await detailTitle(page, 'Comic D');
+        await page.getByRole('button', { name: '开始阅读', exact: true }).click();
+        await readerTitle(page, 'Comic D', 'Chapter 1');
+        assert.equal(new URL(page.url()).searchParams.get('reading'), 'unread');
+        await page.getByRole('button', { name: '返回目录', exact: true }).click();
+        await detailTitle(page, 'Comic D');
+        await page.getByRole('link', { name: '书库', exact: true }).click();
+        await page.locator('.manga-card[data-comic-id="C"]').waitFor();
+        assert.equal(await before.count(), 0);
+        await page.getByRole('button', { name: '有阅读记录', exact: true }).click();
+        await before.waitFor();
+        assert.equal(await page.locator('.manga-card').count(), 1);
+      } finally { await page.close(); }
+    });
     for (const destination of ['comic', 'route', 'view']) await run(`library filter controls: detached controls cannot change a new ${destination}`, async () => {
       const page = await newPage();
       try {
@@ -1473,6 +1701,117 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
           sort: fixture.state.manga.sort, add: fixture.state.manga.addOpen, html: document.querySelector('#workGrid').innerHTML, route: location.href })), before,
           'retired library controls must not alter a newer view, comic, route or its accepted filter state');
       } finally { await page.close(); }
+    });
+    await run('reader chapter picker: bounded full-catalog search in the standalone mobile reader', async () => {
+      comicSnapshots.set('C', searchableCatalogComic('C'));
+      const page = await newPage({ real: true, route: '/manga/C/read/490' });
+      try {
+        await page.setViewportSize({ width: 390, height: 730 });
+        await readerTitle(page, 'Comic C', 'Chapter 490');
+        const trigger = page.getByRole('button', { name: '选章节', exact: true });
+        const picker = page.getByRole('dialog', { name: '选择章节' });
+        const input = picker.getByRole('searchbox', { name: '查找章节' });
+        const rows = picker.locator('[data-chapter-index]');
+        const reads = countRequests(url => url.pathname.startsWith('/api/manga/C'));
+        await page.evaluate(() => {
+          window.__pickerReader = document.querySelector('.manga-reader');
+          window.__pickerImage = __pickerReader.querySelector('img');
+          window.scrollTo(0, 400);
+        });
+        await tick(page);
+        const start = await page.evaluate(() => [scrollY, location.pathname]);
+        assert(start[0] > 0);
+        await trigger.press('Enter');
+        assert.equal(await rows.count(), 32);
+        assert.equal(await picker.locator('[aria-current=true]').getAttribute('data-chapter-index'), '490');
+        await picker.getByRole('button', { name: '下一页' }).click();
+        assert.equal(await rows.first().getAttribute('data-chapter-index'), '513');
+        assert.equal(await picker.evaluate(dialog => {
+          const rect = dialog.getBoundingClientRect();
+          return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight && dialog.scrollWidth <= dialog.clientWidth;
+        }), true, 'mobile picker stays within the viewport');
+        await input.press('Escape');
+        await picker.waitFor({ state: 'hidden' });
+        assert.equal(await trigger.evaluate(button => button === document.activeElement), true);
+        assert.deepEqual(await page.evaluate(() => [scrollY, location.pathname]), start);
+        assert.equal(await page.evaluate(() => __pickerReader === document.querySelector('.manga-reader') && __pickerImage === __pickerReader.querySelector('img')), true);
+        await trigger.click();
+        await input.fill('ALPHA');
+        assert.deepEqual(await rows.evaluateAll(buttons => buttons.map(button => [button.dataset.chapterIndex, button.disabled])), [['127', false], ['128', true]]);
+        await input.evaluate(node => {
+          node.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+          node.value = '第 ５００５ 話';
+          node.dispatchEvent(new InputEvent('input', { bubbles: true, isComposing: true }));
+        });
+        assert.equal(await rows.count(), 2, 'an IME candidate does not publish a filter before composition ends');
+        await input.evaluate(node => node.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+        assert.deepEqual(await rows.evaluateAll(buttons => buttons.map(button => button.dataset.chapterIndex)), ['5005']);
+        assert.equal(countRequests(url => url.pathname.startsWith('/api/manga/C')), reads, 'all searches and paging use the existing catalog');
+        await input.press('Enter');
+        assert.equal(await rows.first().evaluate(button => button === document.activeElement), true);
+        await rows.first().press('Enter');
+        await readerTitle(page, 'Comic C', 'Chapter 5005');
+        await page.waitForFunction(() => location.pathname === '/manga/C/read/5005');
+        assert.equal(countRequests(url => url.pathname.startsWith('/api/manga/C')), reads + 1);
+        await trigger.click();
+        await input.fill('1');
+        await rows.first().evaluate(button => { window.__retiredChapterChoice = button; });
+        await page.goBack();
+        await readerTitle(page, 'Comic C', 'Chapter 490');
+        assert.equal(await picker.isVisible(), false);
+        const afterBack = countRequests(url => url.pathname.startsWith('/api/manga/C'));
+        await page.evaluate(() => __retiredChapterChoice.click());
+        assert.equal(countRequests(url => url.pathname.startsWith('/api/manga/C')), afterBack);
+      } finally { comicSnapshots.clear(); await page.close(); }
+    });
+    await run('reader chapter picker: failed jump preserves the current chapter and can retry', async () => {
+      const page = await newPage();
+      const failure = hold(url => url.pathname === '/api/manga/C/chapters/2', 'synthetic chapter read interrupted');
+      try {
+        await openTarget(page, { mangaComicId: 'C', mangaChapterIndex: '1' });
+        await readerTitle(page, 'Comic C', 'Chapter 1');
+        const before = await rememberReader(page);
+        await page.getByRole('button', { name: '选章节' }).click();
+        const picker = page.getByRole('dialog', { name: '选择章节' });
+        await picker.locator('[data-chapter-index="1"]').click();
+        assert.equal(await picker.isVisible(), false);
+        assert.equal(failure.used, false);
+        await page.getByRole('button', { name: '选章节' }).click();
+        await picker.locator('[data-chapter-index="2"]').click();
+        await requested(failure);
+        await assertReaderPreserved(page, before);
+        await settle(page, failure);
+        await assertReaderPreserved(page, before);
+        await page.getByRole('button', { name: '重试本话' }).click();
+        await readerTitle(page, 'Comic C', 'Chapter 2');
+      } finally { failure.release(); held.delete(failure); await page.close(); }
+    });
+    await run('reader chapter picker: a background download enables a chapter without replacing the reader', async () => {
+      const page = await newPage();
+      const update = hold((url, req) => req.method === 'POST' && url.pathname === '/api/manga/C/update');
+      const first = comic('C').chapters[0], second = { ...comic('C').chapters[1], status: 'pending', downloadedCount: 0 };
+      comicSnapshots.set('C', { ...comic('C'), chapters: [first, second] });
+      try {
+        await openTarget(page, { mangaComicId: 'C' });
+        await page.locator('[data-action="update"]').click();
+        await requested(update);
+        await openTarget(page, { mangaComicId: 'C', mangaChapterIndex: '1' });
+        const before = await rememberReader(page);
+        await page.getByRole('button', { name: '选章节' }).click();
+        const picker = page.getByRole('dialog', { name: '选择章节' });
+        const input = picker.getByRole('searchbox');
+        await input.fill('2');
+        const target = picker.locator('[data-chapter-index="2"]');
+        assert.equal(await target.isDisabled(), true);
+        comicSnapshots.set('C', comic('C'));
+        await settle(page, update);
+        await page.waitForFunction(() => document.querySelector('.manga-reader-chapters [data-chapter-index="2"]')?.disabled === false);
+        await assertReaderPreserved(page, before);
+        assert.equal(await input.inputValue(), '2');
+        assert.equal(await input.evaluate(node => document.activeElement === node), true);
+        await target.click();
+        await readerTitle(page, 'Comic C', 'Chapter 2');
+      } finally { update.release(); held.delete(update); comicSnapshots.clear(); await page.close(); }
     });
     await run('reader chapter navigation: completed update unlocks a newly downloaded next chapter', async () => {
       const page = await newPage();
@@ -1995,7 +2334,11 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
       const page = await newPage({ real: true, route: "/manga/C/read/1", waitReady: false });
       let pending;
       try {
-        await requested(failures[0]); failures.forEach(gate => gate.release());
+        await Promise.all(failures.map(gate => requested(gate)));
+        for (const index of [0, 2, 1, 3, 5, 4]) {
+          failures[index].release();
+          await page.waitForFunction(index => document.querySelectorAll(".manga-reader-image")[index]?.classList.contains("load-failed"), index);
+        }
         await readerTitle(page, "Comic C", "Chapter 1"); await ready(page);
         await page.setViewportSize({ width: 320, height: 740 });
         await page.waitForFunction(() => document.querySelectorAll(".manga-reader-image.load-failed").length === 6);
@@ -2004,6 +2347,8 @@ export async function runMangaReaderFixture({ legacyManga = false, legacyHost = 
         assert(before > 0, "keyboard recovery must start away from the failed image rows");
         const retry = index => page.getByRole("button", { name: `重试第 ${index} 页`, exact: true });
         const focusedRetry = () => page.evaluate(() => document.activeElement.textContent);
+        assert.deepEqual(await page.locator(".manga-reader-recovery button").allTextContents(),
+          [1, 2, 3, 4, 5, 6].map(index => `重试第 ${index} 页`), "compact retry order follows the chapter, even when failures arrive out of order");
         pending = hold(url => url.pathname === imagePath(2));
         await retry(2).focus(); await page.keyboard.press("Enter"); await requested(pending);
         assert.equal(await page.evaluate(() => document.activeElement.matches(".manga-reader-recovery .manga-reader-image-error")), true,

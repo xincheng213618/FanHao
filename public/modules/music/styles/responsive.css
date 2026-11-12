@@ -36,6 +36,12 @@
 }
 
 @media (max-width: 1180px) {
+  body.music-view .main:has(.music-track-selection),
+  .music-layout:has(.music-track-selection),
+  .music-track-panel:has(.music-track-selection) {
+    overflow: clip;
+  }
+
   .music-player-stage {
     grid-template-rows: minmax(0, 1fr) 54px auto;
   }
@@ -245,6 +251,20 @@
   .music-track-row:not(.head) {
     min-height: 104px;
     contain-intrinsic-size: auto 104px;
+  }
+
+  .music-track-row.music-track-selectable {
+    min-height: 60px;
+    contain-intrinsic-size: auto 60px;
+  }
+
+  .music-panel-heading:has([data-music-select-control="open"]) {
+    flex-wrap: wrap;
+  }
+
+  .music-panel-actions:has([data-music-select-control="open"]) {
+    flex-wrap: wrap;
+    flex-shrink: 1;
   }
 
   .music-track-row > .music-track-actions {

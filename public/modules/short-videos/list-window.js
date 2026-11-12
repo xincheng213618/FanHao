@@ -242,6 +242,34 @@ export function createShortVideoListWindow(dependencies) {
     }
   }
 
+  function restorePosition(position) {
+    const grid = gridElement;
+    if (!grid?.isConnected || !innerElement) return;
+    const videos = shortVideosWithCovers(getState().shortVideo.data?.videos || []);
+    const index = videos.findIndex(video => String(video.id) === position.videoId);
+    const gridTop = grid.getBoundingClientRect().top + window.scrollY;
+    const sameWidth = grid.clientWidth === position.gridWidth;
+    const top = sameWidth || index < 0 ? position.scrollY : gridTop + Math.floor(index / columns) * rowHeight - position.cardTop;
+    window.scrollTo({ top, left: 0, behavior: "instant" });
+    render();
+    const selector = `[data-video-id="${CSS.escape(position.videoId)}"]`;
+    // Moving the virtual window can change its first row and the anchor's
+    // measured position because virtual heights are estimates.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const card = innerElement.querySelector(selector);
+      if (!card) break;
+      const offset = card.getBoundingClientRect().top - position.cardTop;
+      if (Math.abs(offset) <= 1) break;
+      const before = window.scrollY;
+      window.scrollBy({ top: offset, left: 0, behavior: "instant" });
+      if (window.scrollY === before) break;
+      render();
+    }
+    if (position.restoreFocus && document.activeElement === document.body) {
+      innerElement.querySelector(selector)?.querySelector(".short-video-thumb-open")?.focus({ preventScroll: true });
+    }
+  }
+
   function cancelExpansion() {
     if (!expandIdle) return;
     if (typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(expandIdle);
@@ -404,6 +432,7 @@ export function createShortVideoListWindow(dependencies) {
     attach,
     render,
     reset,
+    restorePosition,
     resize,
     scheduleAppendContinuation,
     scheduleUpdate

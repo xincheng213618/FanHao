@@ -226,11 +226,105 @@ try {
   assert.equal((await good("/api/works/102", options(again))).body.work.progress.position, 72);
   assert.equal((await good("/api/library", options(again))).body.user.favoriteCount, 2);
   await verifyFolderManagement(alice, again);
+  await verifyFavoriteBatch(alice, again);
+  await verifyDirectFavoriteFolder(alice, again);
+  await verifyFavoriteBatchRemoval(alice, again);
   await verifyGuestInterruptedWrite(guestFolder);
+  await verifyFolderMerge(alice, again);
   assert.equal(fixture.errors.length, 0);
-  console.log("Account personal library HTTP fixtures passed: account isolation, cache projections, owner assertions, folder rename/delete, hidden favorites and storage rollback.");
+  console.log("Account personal library HTTP fixtures passed: account isolation, cache projections, owner assertions, folder rename/delete/merge, direct folder saves, atomic batch moves/removals, hidden favorites and storage rollback.");
 } finally {
   await fixture.close();
+}
+
+async function verifyFolderMerge(alice, bob) {
+  const a = options(alice), b = options(bob);
+  const create = async (auth, name) => (await good("/api/favorite-folders", { ...auth, body: { name } })).body.folder;
+  const source = await create(a, "Whole folder source");
+  const destination = await create(a, "Whole folder destination");
+  const bobSource = await create(b, source.name);
+  assert.equal(bobSource.id, source.id);
+  const route = `/api/favorite-folders/${encodeURIComponent(source.id)}/merge`;
+  const timestamp = "2025-06-01T10:00:00Z";
+  fixture.scoped.runForUser(alice.user, () => {
+    const state = fixture.scoped.state();
+    state.favorites["101"] = { folderId: source.id, createdAt: timestamp };
+    state.favorites["102"] = { folderId: destination.id, createdAt: timestamp };
+    for (let index = 0; index < 501; index++) state.favorites[`merge-hidden-${index}`] = { folderId: source.id, createdAt: timestamp };
+    fixture.scoped.save();
+  });
+  fixture.scoped.runForUser(bob.user, () => {
+    fixture.scoped.state().favorites["101"] = { folderId: bobSource.id, createdAt: timestamp };
+    fixture.scoped.save();
+  });
+  const snapshot = (account) => fixture.scoped.runForUser(account.user, () => structuredClone(fixture.scoped.state()));
+  const previous = snapshot(alice), previousBob = snapshot(bob);
+  assert.equal((await api(route, { ...a, body: { destinationId: source.id } })).status, 400);
+  assert.equal((await api(route, { ...a, body: { destinationId: "__proto__" } })).status, 404);
+  assert.equal((await api(route, { ...a, body: { destinationId: destination.id, sourceCreatedAt: "obsolete" } })).status, 409);
+  assert.equal((await api(route, { ...a, body: { destinationId: destination.id, destinationCreatedAt: "obsolete" } })).status, 409);
+  assert.equal((await api("/api/favorite-folders/default/merge", { ...a, body: { destinationId: destination.id } })).status, 400);
+  assert.equal((await api(route, { ...b, body: { destinationId: destination.id, userId: alice.user.id } })).status, 404);
+  assert.deepEqual(snapshot(alice), previous);
+  assert.deepEqual(snapshot(bob), previousBob);
+
+  const database = new DatabaseSync(path.join(fixture.root, "account-user-state.sqlite"));
+  try {
+    const read = () => database.prepare("SELECT state_json FROM account_user_state WHERE account_id=?").get(alice.user.id).state_json;
+    const before = read();
+    database.exec("CREATE TRIGGER reject_folder_merge BEFORE UPDATE ON account_user_state BEGIN SELECT RAISE(ABORT, 'fixture merge storage failure'); END;");
+    try {
+      const failed = await api(route, { ...a, body: { destinationId: destination.id } });
+      assert.equal(failed.status, 500);
+      assert.equal(failed.body.error, "合并收藏夹失败，请重试");
+      assert.equal(read(), before);
+      assert.deepEqual(snapshot(alice), previous);
+    } finally { database.exec("DROP TRIGGER reject_folder_merge;"); }
+  } finally { database.close(); }
+
+  const merged = (await good(route, { ...a, body: { destinationId: destination.id } })).body;
+  assert.equal(merged.deletedFolderId, source.id);
+  assert.equal(merged.movedCount, 502);
+  assert.equal(merged.destinationFolder.id, destination.id);
+  assert.equal(merged.destinationFolder.count, 2);
+  assert.ok(!merged.folders.some(({ id }) => id === source.id));
+  const after = snapshot(alice);
+  for (const [id, before] of Object.entries(previous.favorites)) {
+    const wanted = before.folderId === source.id ? destination.id : before.folderId;
+    assert.deepEqual(after.favorites[id], { ...before, folderId: wanted });
+  }
+  assert.deepEqual(after.progress, previous.progress);
+  assert.deepEqual(snapshot(bob), previousBob);
+  assert.equal((await api(route, { ...a, body: { destinationId: destination.id } })).status, 404);
+  assert.deepEqual(snapshot(alice), after);
+}
+
+async function verifyDirectFavoriteFolder(alice, bob) {
+  const aliceAuth = options(alice), bobAuth = options(bob);
+  const route = "/api/favorites/102";
+  if ((await good("/api/works/102", aliceAuth)).body.work.favorite) await good(route, { ...aliceAuth, method: "POST" });
+  const destination = (await good("/api/favorite-folders", { ...aliceAuth, body: { name: "Direct save target" } })).body.folder.id;
+  const foreign = (await good("/api/favorite-folders", { ...bobAuth, body: { name: "Foreign direct save target" } })).body.folder.id;
+  const bobBefore = (await good("/api/works/102", bobAuth)).body.work.favoriteFolderId;
+  const save = (folderId, auth = aliceAuth) => api(route, { ...auth, method: "PUT", body: { folderId } });
+  assert.equal((await save(foreign)).status, 404, "foreign or deleted folders cannot silently route a save to default");
+  assert.equal((await save(destination, { ...aliceAuth, headers: { "X-FanHao-Account-Owner": owner(bob) } })).status, 409);
+  assert.equal((await good("/api/works/102", aliceAuth)).body.work.favorite, false);
+  const added = await save(destination);
+  assert.equal(added.status, 200);
+  assert.equal(added.body.favorite, true);
+  assert.equal(added.body.workId, "102");
+  assert.equal(added.body.favoriteFolder.folderId, destination);
+  assert.ok(added.body.favoriteFolder.createdAt);
+  const revision = () => fixture.scoped.runForUser(alice.user, () => fixture.scoped.revision());
+  const afterAdd = revision();
+  const repeated = await save(destination);
+  assert.deepEqual(repeated.body.favoriteFolder, added.body.favoriteFolder);
+  assert.equal(revision(), afterAdd, "an identical retry must neither remove the favorite nor write again");
+  const moved = await save("default");
+  assert.equal(moved.body.favoriteFolder.folderId, "default");
+  assert.equal(moved.body.favoriteFolder.createdAt, added.body.favoriteFolder.createdAt);
+  assert.equal((await good("/api/works/102", bobAuth)).body.work.favoriteFolderId, bobBefore);
 }
 
 async function verifyGuestInterruptedWrite(folderId) {
@@ -258,10 +352,20 @@ async function verifyGuestInterruptedWrite(folderId) {
     const rename = await api(`/api/favorite-folders/${encodeURIComponent(folderId)}`, { method: "PATCH", body: { name: "Must not rename" } });
     assert.equal(rename.status, 500, "strict folder mutations still report persistence errors");
     assert.deepEqual(fixture.legacy.state.favoriteFolders[folderId], committed.favoriteFolders[folderId]);
+    const batch = await api("/api/favorites/batch-move", { method: "PUT", body: { workIds: ["101", "102"], folderId: "default" } });
+    assert.equal(batch.status, 500);
+    assert.deepEqual(fixture.legacy.state.favorites, committed.favorites, "failed batch move must restore every original membership");
+    const removal = await api("/api/favorites/batch-remove", { method: "PUT", body: { workIds: ["101", "102"] } });
+    assert.equal(removal.status, 500);
+    assert.deepEqual(fixture.legacy.state.favorites, committed.favorites, "failed batch removal must restore every original membership");
+    const direct = await api("/api/favorites/102", { method: "PUT", body: { folderId: "default" } });
+    assert.equal(direct.status, 500);
+    assert.deepEqual(fixture.legacy.state.favorites, committed.favorites, "failed direct save must restore the original favorite folder");
+    assert.equal(fs.readFileSync(statePath, "utf8"), committedText);
     assert.equal(fixture.legacy.revision(), revision + 1, "a rejected strict write must not publish a revision");
   } finally { fs.writeFileSync = writeFile; }
 
-  assert.equal(failures, 2);
+  assert.equal(failures, 5);
   assert.deepEqual(reload(), committed, "restart retains guest favorites, history and manual covers");
   assert.equal(fs.readdirSync(fixture.root).some((name) => name.startsWith("user-state.json.") && name.endsWith(".tmp")), false);
   await good("/api/progress/v102", { body: { workId: "102", position: 34, duration: 120 } });
@@ -270,6 +374,75 @@ async function verifyGuestInterruptedWrite(folderId) {
   assert.deepEqual(recovered.progress.v101, committed.progress.v101);
   assert.deepEqual(recovered.favorites, committed.favorites);
   assert.deepEqual(recovered.manualCovers, committed.manualCovers);
+}
+
+async function verifyFavoriteBatch(alice, bob) {
+  const route = "/api/favorites/batch-move";
+  const auth = options(alice);
+  const send = (body, scope = auth) => api(route, { ...scope, method: "PUT", body });
+  const folderId = (await good("/api/favorite-folders", { ...auth, body: { name: "Batch destination" } })).body.folder.id;
+  const personal = account => fixture.scoped.runForUser(account.user, () => structuredClone(fixture.scoped.state()));
+  const revision = () => JSON.parse(fixture.scoped.runForUser(alice.user, fixture.scoped.revision))[1];
+  const before = personal(alice);
+  const other = personal(bob);
+  const prior = revision();
+  assert.equal((await send({ workIds: ["101"], folderId }, options(bob))).status, 404);
+  assert.equal((await send({ workIds: ["101", "temporarily-unavailable-work"], folderId })).status, 409);
+  assert.equal((await send({ workIds: [], folderId })).status, 400);
+  assert.equal((await send({ workIds: Array(501).fill("101"), folderId })).status, 400);
+  assert.deepEqual(personal(alice), before);
+  assert.equal(revision(), prior);
+
+  const selection = { workIds: ["101", "102", "101"], folderId };
+  const result = await send(selection);
+  assert.equal(result.status, 200);
+  assert.equal(result.headers.get("x-fanhao-account-owner"), owner(alice));
+  assert.deepEqual(result.body.workIds, ["101", "102"]);
+  assert.equal(result.body.movedCount, 2);
+  assert.equal(result.body.folders.find(folder => folder.id === folderId).count, 2);
+  assert.equal(revision(), prior + 1, "the entire selection must publish one revision");
+  const after = personal(alice);
+  assert.deepEqual(after.favorites["101"], { ...before.favorites["101"], folderId });
+  assert.deepEqual(after.favorites["102"], { ...before.favorites["102"], folderId });
+  assert.deepEqual(after.favorites["temporarily-unavailable-work"], before.favorites["temporarily-unavailable-work"]);
+  assert.deepEqual(after.progress, before.progress);
+  assert.deepEqual(personal(bob), other);
+  assert.deepEqual(workIds((await good(`/api/favorites?folder=${folderId}`, auth)).body), ["101", "102"]);
+  const repeat = await send(selection);
+  assert.equal(repeat.status, 200);
+  assert.equal(repeat.body.movedCount, 0);
+  assert.equal(revision(), prior + 1, "retrying the same destination must not write again");
+}
+
+async function verifyFavoriteBatchRemoval(alice, bob) {
+  const route = "/api/favorites/batch-remove";
+  const send = (workIds, scope = options(alice)) => api(route, { ...scope, method: "PUT", body: { workIds } });
+  const personal = account => fixture.scoped.runForUser(account.user, () => structuredClone(fixture.scoped.state()));
+  const revision = () => JSON.parse(fixture.scoped.runForUser(alice.user, fixture.scoped.revision))[1];
+  const before = personal(alice), other = personal(bob), guest = structuredClone(fixture.legacy.state);
+  assert(before.favorites["101"] && before.favorites["102"]);
+  const prior = revision();
+  assert.equal((await send([], options(alice))).status, 400);
+  assert.equal((await send(["101", 102])).status, 400);
+  assert.equal((await send(Array(501).fill("101"))).status, 400);
+  assert.equal((await send(["101"], { ...options(bob), headers: { "X-FanHao-Account-Owner": owner(alice) } })).status, 409);
+  assert.deepEqual(personal(alice), before);
+  const selection = ["101", "102", "101", "already-absent"];
+  const result = await send(selection);
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.workIds, ["101", "102", "already-absent"]);
+  assert.equal(result.body.removedCount, 2);
+  assert.equal(revision(), prior + 1);
+  const expected = structuredClone(before);
+  delete expected.favorites["101"];
+  delete expected.favorites["102"];
+  assert.deepEqual(personal(alice), expected);
+  assert.deepEqual(personal(bob), other);
+  assert.deepEqual(fixture.legacy.state, guest);
+  const repeat = await send(selection);
+  assert.equal(repeat.status, 200);
+  assert.equal(repeat.body.removedCount, 0);
+  assert.equal(revision(), prior + 1, "retrying a confirmed removal must not write or recreate favorites");
 }
 
 async function verifyFolderManagement(alice, bob) {

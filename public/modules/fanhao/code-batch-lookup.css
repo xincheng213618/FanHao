@@ -1,0 +1,53 @@
+.code-batch-dialog {
+  box-sizing: border-box;
+  width: min(700px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--ink);
+}
+.code-batch-dialog::backdrop { background: rgba(16, 32, 24, .55); }
+.code-batch-dialog [hidden] { display: none; }
+.code-batch-header, .code-batch-results { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.code-batch-header h2 { margin: 0; font-size: 20px; }
+.code-batch-form { display: grid; gap: 6px; margin-top: 16px; }
+.code-batch-form label, .code-batch-results label { color: var(--muted); font-size: 13px; }
+.code-batch-dialog textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  background: var(--bg);
+  font: inherit;
+}
+.code-batch-dialog button, .code-batch-dialog select, .code-batch-launch {
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 9px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.code-batch-dialog button, .code-batch-launch { cursor: pointer; }
+.code-batch-dialog button:disabled { opacity: .55; cursor: default; }
+.code-batch-form .code-batch-primary { justify-self: start; border-color: var(--accent); background: var(--accent); color: #fff; }
+.code-batch-status, .code-batch-copy-status { margin: 10px 0; color: var(--muted); font-size: 13px; }
+.code-batch-status:empty, .code-batch-copy-status:empty { display: none; }
+.code-batch-status.is-error { color: var(--rust); }
+.code-batch-copy-text { margin-top: 8px; }
+.code-batch-list { max-height: 44dvh; overflow: auto; margin: 8px 0 0; padding: 0; list-style: none; }
+.code-batch-list:empty { display: none; }
+.code-batch-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 9px; padding: 8px 3px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.code-batch-list a { color: var(--accent-strong); font-weight: 700; }
+.code-batch-badge { padding: 1px 6px; border-radius: 5px; color: var(--muted); background: var(--panel-soft); font-size: 12px; }
+.code-batch-badge[data-status="local"] { color: var(--accent-strong); }
+.code-batch-badge[data-status="known"], .code-batch-badge[data-status="invalid"] { color: var(--rust); }
+.code-batch-work-title { min-width: 0; color: var(--muted); font-size: 13px; }

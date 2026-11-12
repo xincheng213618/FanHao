@@ -18,7 +18,7 @@ function take(name) {
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 async function flush() { for (let turn = 0; turn < 50; turn++) await Promise.resolve(); }
 const implementation = source.slice(source.indexOf("  function shortVideoNavigationScope("), source.indexOf("  function adjacentPlayer("))
-  + ["promoteAdjacentMedia", "hydratePromotedShortVideo", "loadAdjacentVideos", "syncCurrentNavigationDom", "renderBrowserNav", "showHome"].map(take).join("\n");
+  + ["promoteAdjacentMedia", "hydratePromotedShortVideo", "loadAdjacentVideos", "syncCurrentNavigationDom", "renderBrowserNav", "showHome", "resetShortVideoViewerForHome"].map(take).join("\n");
 const fixtureContext = vm.createContext({ vm, createShortVideoInteractionState, implementation, deferred, URLSearchParams, AbortController, runShortVideoRead });
 vm.runInContext(navigationFixture.slice(navigationFixture.indexOf("function fixture()"), navigationFixture.indexOf("\n{\n  const f = fixture();")) + "\nglobalThis.make = fixture;", fixtureContext);
 

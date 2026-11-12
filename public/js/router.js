@@ -1,4 +1,4 @@
-import { classificationQuery, parseClassificationQuery } from "../modules/fanhao/browse-traits.js?v=20261105-media-classification-01";
+import { classificationQuery, parseClassificationQuery } from "../modules/fanhao/browse-traits.js?v=20261112-classification-01";
 
 export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "manga", "novels", "shortVideos", "music", "tools"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
@@ -143,6 +143,21 @@ const LEGACY_PATH_VIEWS = new Map([
   ["/rankings", "rankings"]
 ]);
 
+const FANHAO_SEARCH_SORTS = new Set([
+  "releaseDesc", "updated", "title", "ranking", "releaseAsc", "ratingDesc",
+  "ratingCountDesc", "popularityDesc", "progress", "sizeDesc", "durationDesc", "videos"
+]);
+const FANHAO_CLASSIFICATION_SORTS = new Set(["ratingAsc", "sizeAsc", "durationAsc", "codeAsc", "codeDesc"]);
+
+export function normalizeFanhaoSearchSort(value, classification = false) {
+  return FANHAO_SEARCH_SORTS.has(value) || (classification && FANHAO_CLASSIFICATION_SORTS.has(value)) ? value : "releaseDesc";
+}
+
+function readFlagParam(params, key) {
+  const value = params.get(key);
+  return value === "1" ? true : value === "0" ? false : undefined;
+}
+
 export function routeFromUrl(url = window.location.href) {
   const parsed = new URL(url, window.location.href);
   const params = parsed.searchParams;
@@ -197,6 +212,8 @@ export function routeFromUrl(url = window.location.href) {
       musicFavorite: false,
       codePrefix: pathView === "codes" ? params.get("prefix") || "" : "",
       codePrefixFamily: pathView === "codes" && params.get("family") === "1",
+      ...(pathView === "favorites" ? favoritesFromParams(params) : {}),
+      ...(pathView === "history" ? historyFromParams(params) : {}),
       personId: "",
       q: "",
       workId: "",
@@ -209,11 +226,28 @@ export function routeFromUrl(url = window.location.href) {
     peopleScope: PEOPLE_SCOPE_NAMES.has(params.get("scope")) ? params.get("scope") : "main",
     codePrefix: rawView === "codes" ? params.get("prefix") || "" : "",
     codePrefixFamily: rawView === "codes" && params.get("family") === "1",
+    ...(rawView === "favorites" && !query ? favoritesFromParams(params) : {}),
+    ...(rawView === "history" && !query ? historyFromParams(params) : {}),
+    ...(params.has("workQuery") ? { personWorkQuery: params.get("workQuery") } : {}),
     personId: params.get("personId") || params.get("person") || "",
     q: query,
+    ...(query ? {
+      searchFilters: params.get("filter") || "",
+      searchSort: params.get("sort") || "",
+      searchShowMissing: readFlagParam(params, "missing"),
+      searchShowCompilations: readFlagParam(params, "compilations")
+    } : {}),
     workId: params.get("workId") || params.get("work") || "",
     videoId: params.get("videoId") || params.get("video") || ""
   };
+}
+
+function favoritesFromParams(params) {
+  return { favoriteFolderId: params.get("folder"), favoriteQuery: params.get("q") };
+}
+
+function historyFromParams(params) {
+  return { historyRange: params.get("days"), historyWatch: params.get("watch"), historyQuery: params.get("q") };
 }
 
 export function normalizeRoute(route = {}) {
@@ -223,6 +257,11 @@ export function normalizeRoute(route = {}) {
   const galleryMode = view === "gallery" && GALLERY_MODE_NAMES.has(route.galleryMode) ? route.galleryMode : "";
   const galleryQuery = view === "gallery" ? String(route.galleryQuery || "").trim() : "";
   const galleryBrowse = view === "gallery" && !galleryQuery;
+  const galleryPerson = galleryBrowse ? String(route.galleryPerson || "all").trim() || "all" : "all";
+  const episodicGallery = galleryBrowse && ["tv", "media"].includes(galleryMode);
+  const gallerySeriesKey = episodicGallery ? String(route.gallerySeriesKey || "").trim() : "";
+  const galleryEpisodeQuery = episodicGallery && !route.galleryMediaId && (gallerySeriesKey || galleryPerson !== "all")
+    ? String(route.galleryEpisodeQuery || "").trim().slice(0, 120).toWellFormed() : "";
   const galleryPhotoView = galleryBrowse && galleryMode === "photo" ? normalizeGalleryPhotoView(route.galleryPhotoView) : "albums";
   const galleryPhotoCollection = galleryBrowse && galleryPhotoView !== "people" ? String(route.galleryPhotoCollection || "").trim() : "";
   const peopleScope = view === "people" && PEOPLE_SCOPE_NAMES.has(route.peopleScope) ? route.peopleScope : "main";
@@ -233,6 +272,15 @@ export function normalizeRoute(route = {}) {
     peopleScope,
     codePrefix,
     codePrefixFamily: Boolean(codePrefix && route.codePrefixFamily),
+    ...(view === "favorites" ? {
+      favoriteFolderId: String(route.favoriteFolderId || "all").trim().slice(0, 128).toWellFormed() || "all",
+      favoriteQuery: String(route.favoriteQuery || "").trim().slice(0, 120).toWellFormed()
+    } : {}),
+    ...(view === "history" ? {
+      historyRange: ["7", "all"].includes(route.historyRange) ? route.historyRange : "30",
+      historyWatch: ["unfinished", "finished"].includes(route.historyWatch) ? route.historyWatch : "all",
+      historyQuery: String(route.historyQuery || "").trim().slice(0, 120).toWellFormed()
+    } : {}),
     galleryPhotoView,
     galleryPhotoCollection,
     galleryAlbumId: view === "gallery" ? String(route.galleryAlbumId || "").trim() : "",
@@ -243,8 +291,9 @@ export function normalizeRoute(route = {}) {
     galleryMediaKind: galleryBrowse && galleryMode === "media" ? normalizeGalleryMediaKind(route.galleryMediaKind) : "all",
     galleryCategory: galleryBrowse ? normalizeGalleryCategory(route) : "all",
     gallerySubCategory: galleryBrowse ? String(route.gallerySubCategory || "all").trim() || "all" : "all",
-    galleryPerson: galleryBrowse ? String(route.galleryPerson || "all").trim() || "all" : "all",
-    gallerySeriesKey: galleryBrowse && ["tv", "media"].includes(galleryMode) ? String(route.gallerySeriesKey || "").trim() : "",
+    galleryPerson,
+    gallerySeriesKey,
+    ...(galleryEpisodeQuery ? { galleryEpisodeQuery } : {}),
     galleryPhotoDate: galleryBrowse ? String(route.galleryPhotoDate || "all").trim() || "all" : "all",
     galleryPhotoSite: galleryBrowse && galleryMode === "photo" ? String(route.galleryPhotoSite || "").trim() : "",
     gallerySort: galleryBrowse ? normalizeGallerySort(route.gallerySort, galleryPhotoView, galleryMode === "photo" && galleryPhotoCollection ? "issue" : "updated") : "updated",
@@ -253,10 +302,14 @@ export function normalizeRoute(route = {}) {
     mangaChapterIndex: view === "manga" ? String(route.mangaChapterIndex || "").trim() : "",
     mangaQuery: view === "manga" ? String(route.mangaQuery || route.q || "").trim() : "",
     mangaSort: view === "manga" && ["updated", "title", "chapters"].includes(route.mangaSort) ? route.mangaSort : "updated",
+    ...(view === "manga" && route.mangaFavorites === true ? { mangaFavorites: true } : {}),
+    ...(view === "manga" && ["started", "unread"].includes(route.mangaReading) ? { mangaReading: route.mangaReading } : {}),
     novelBookId: view === "novels" ? String(route.novelBookId || "").trim() : "",
     novelChapterIndex: view === "novels" ? String(route.novelChapterIndex || "").trim() : "",
     novelQuery: view === "novels" ? String(route.novelQuery || route.q || "").trim() : "",
     novelCategory: view === "novels" ? String(route.novelCategory || "all").trim() || "all" : "all",
+    ...(view === "novels" && !["mine", "rankings", "manage"].includes(route.novelMode)
+      && ["unread", "reading", "finished", "review"].includes(route.novelReadingStatus) ? { novelReadingStatus: route.novelReadingStatus } : {}),
     novelSort: view === "novels" ? normalizeNovelSort(route.novelSort) : "updated",
     novelMode: view === "novels" && ["mine", "author", "rankings", "manage"].includes(route.novelMode) ? route.novelMode : "books",
     novelAuthor: view === "novels" ? String(route.novelAuthor || "").trim() : "",
@@ -287,7 +340,16 @@ export function normalizeRoute(route = {}) {
     musicAlbumSort: view === "music" ? normalizeMusicAlbumSort(route.musicAlbumSort || route.albumSort) : "updated",
     musicFavorite: view === "music" ? Boolean(route.musicFavorite) : false,
     personId: view === "people" ? route.personId || "" : "",
+    ...(view === "people" && route.personId ? {
+      personWorkQuery: String(route.personWorkQuery || "").trim().slice(0, 120).toWellFormed()
+    } : {}),
     q: view === "search" ? searchQuery : "",
+    ...(view === "search" ? {
+      searchFilters: String(route.searchFilters || "").trim(),
+      searchSort: normalizeFanhaoSearchSort(route.searchSort, Boolean(parseClassificationQuery(searchQuery))),
+      searchShowMissing: typeof route.searchShowMissing === "boolean" ? route.searchShowMissing : undefined,
+      searchShowCompilations: typeof route.searchShowCompilations === "boolean" ? route.searchShowCompilations : undefined
+    } : {}),
     workId: route.workId || "",
     videoId: route.videoId || ""
   };
@@ -306,9 +368,19 @@ export function routeUrl(route, options = {}) {
     params.set("view", next.view);
   }
   if (next.personId) params.set("personId", next.personId);
+  if (next.personWorkQuery) params.set("workQuery", next.personWorkQuery);
   if (next.codePrefix) {
     params.set("prefix", next.codePrefix);
     if (next.codePrefixFamily) params.set("family", "1");
+  }
+  if (next.view === "history") {
+    if (next.historyRange !== "30") params.set("days", next.historyRange);
+    if (next.historyWatch !== "all") params.set("watch", next.historyWatch);
+    if (next.historyQuery) params.set("q", next.historyQuery);
+  }
+  if (next.view === "favorites") {
+    if (next.favoriteFolderId !== "all") params.set("folder", next.favoriteFolderId);
+    if (next.favoriteQuery) params.set("q", next.favoriteQuery);
   }
   if (next.view === "gallery") {
     if (next.galleryQuery) params.set("q", next.galleryQuery);
@@ -327,6 +399,7 @@ export function routeUrl(route, options = {}) {
       else params.set(["tv", "media"].includes(next.galleryMode) ? "series" : "person", next.galleryPerson);
     }
     if (next.gallerySeriesKey) params.set("seriesKey", next.gallerySeriesKey);
+    if (next.galleryEpisodeQuery) params.set("episode", next.galleryEpisodeQuery);
     if (photo && next.galleryPhotoDate !== "all") params.set("date", next.galleryPhotoDate);
     if (next.galleryPhotoSite) params.set("site", next.galleryPhotoSite);
     const defaultGallerySort = photo && next.galleryPhotoCollection ? "issue" : photo && (next.galleryPhotoView === "people"
@@ -338,9 +411,12 @@ export function routeUrl(route, options = {}) {
   } else if (next.view === "manga") {
     if (next.mangaQuery) params.set("q", next.mangaQuery);
     if (next.mangaSort && next.mangaSort !== "updated") params.set("sort", next.mangaSort);
+    if (next.mangaFavorites) params.set("favorites", "1");
+    if (next.mangaReading) params.set("reading", next.mangaReading);
   } else if (next.view === "novels") {
     if (next.novelQuery) params.set("q", next.novelQuery);
     if (next.novelCategory && next.novelCategory !== "all") params.set("category", next.novelCategory);
+    if (next.novelReadingStatus) params.set("readingStatus", next.novelReadingStatus);
     const defaultNovelSort = next.novelMode === "mine" ? "progress" : next.novelMode === "rankings" ? "chars" : next.novelMode === "author" ? "title" : "updated";
     if (next.novelSort && next.novelSort !== defaultNovelSort) params.set("sort", next.novelSort);
     if (next.novelPage > 0) params.set("page", String(next.novelPage + 1));
@@ -382,6 +458,10 @@ export function routeUrl(route, options = {}) {
       params.set("classification", classification.key);
       if (classification.query) params.set("q", classification.query);
     } else params.set("q", next.q);
+    if (next.searchFilters) params.set("filter", next.searchFilters);
+    if (next.searchSort && next.searchSort !== "releaseDesc") params.set("sort", next.searchSort);
+    if (next.searchShowMissing !== undefined) params.set("missing", next.searchShowMissing ? "1" : "0");
+    if (next.searchShowCompilations !== undefined) params.set("compilations", next.searchShowCompilations ? "1" : "0");
   }
   if (next.workId) params.set("workId", next.workId);
   if (next.videoId) params.set("videoId", next.videoId);
@@ -471,6 +551,7 @@ function peopleRouteFromPath(routePath, params = new URLSearchParams()) {
     novelQuery: "",
     novelCategory: "all",
     novelSort: "updated",
+    ...(params.has("workQuery") ? { personWorkQuery: params.get("workQuery") } : {}),
     personId: params.get("personId") || params.get("person") || "",
     q: params.get("q") || params.get("search") || "",
     workId: params.get("workId") || params.get("work") || "",
@@ -598,6 +679,7 @@ function galleryRouteFromPath(routePath, params = new URLSearchParams()) {
     gallerySubCategory: photoFilter("subCategory") || params.get("subCategory") || params.get("folder") || "all",
     galleryPerson: ["tv", "media"].includes(galleryMode) ? params.get("series") || params.get("person") || "all" : photoFilter("person") || params.get("person") || "all",
     gallerySeriesKey: ["tv", "media"].includes(galleryMode) ? params.get("seriesKey") || "" : "",
+    galleryEpisodeQuery: params.get("episode") || "",
     galleryPhotoDate: galleryMode === "photo" ? params.get("date") || "all" : "all",
     galleryPhotoSite: photo ? params.get("site") || "" : "",
     gallerySort: normalizeGallerySort(params.get("sort")),
@@ -668,6 +750,8 @@ function mangaRouteFromPath(routePath, params = new URLSearchParams()) {
     mangaChapterIndex: decodeRouteSegment(reader ? rest[2] || "" : legacy ? rest[1] || "" : ""),
     mangaQuery: params.get("q") || params.get("search") || "",
     mangaSort: ["updated", "title", "chapters"].includes(params.get("sort")) ? params.get("sort") : "updated",
+    ...(params.get("favorites") === "1" ? { mangaFavorites: true } : {}),
+    ...(["started", "unread"].includes(params.get("reading")) ? { mangaReading: params.get("reading") } : {}),
     personId: "",
     q: "",
     workId: "",
@@ -686,6 +770,7 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
   const mine = ["mine", "my"].includes(rest[0]);
   const retiredSearchPage = rest[0] === "search";
   const rankings = ["rankings", "ranking", "rank"].includes(rest[0]);
+  const readingStatus = params.get("readingStatus");
   const specialRoute = retiredAuthorList || retiredSearchPage || Boolean(authorPage) || manage || mine || rankings;
   const chapterSegment = specialRoute ? "" : rest[1] === "read" ? rest[2] || "" : rest[1] || "";
   return {
@@ -706,6 +791,7 @@ function novelRouteFromPath(routePath, params = new URLSearchParams()) {
     novelChapterIndex: decodeRouteSegment(chapterSegment),
     novelQuery: params.get("q") || params.get("search") || "",
     novelCategory: params.get("category") || "all",
+    ...(!mine && !rankings && !manage && ["unread", "reading", "finished", "review"].includes(readingStatus) ? { novelReadingStatus: readingStatus } : {}),
     novelSort: normalizeNovelSort(params.get("sort") || (mine ? "progress" : rankings ? "chars" : authorPage || legacyAuthor ? "title" : "updated")),
     novelMode: manage ? "manage" : mine ? "mine" : rankings ? "rankings" : authorPage || legacyAuthor ? "author" : "books",
     novelAuthor: authorPage || legacyAuthor,

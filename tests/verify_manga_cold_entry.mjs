@@ -181,7 +181,12 @@ try {
       };
       const scale = { count, before: await pending(a), current: await pending(b) };
       await settle(a, a.gate); await settle(b, b.gate); await reader(a, "C", target); await reader(b, "C", target);
-      assert.deepEqual(await snapshot(b), await snapshot(a), "complete frozen/current final reader DTO and DOM");
+      const currentReader = await snapshot(b);
+      assert.deepEqual(currentReader.reader.buttons.filter(button => button.action === "choose-chapter"), [
+        { action: "choose-chapter", text: "选章节", disabled: false }
+      ]);
+      currentReader.reader.buttons = currentReader.reader.buttons.filter(button => button.action !== "choose-chapter");
+      assert.deepEqual(currentReader, await snapshot(a), "the frozen reader controls, images and DTO still match");
       assert.deepEqual([...b.requests].sort(), [...a.requests].sort(), "the comic and chapter GETs each issue exactly once"); comparisons += 2;
       assert.equal(scale.before.rows, count); measurements.push(scale);
       await b.page.locator('.manga-reader-bar [data-action="detail"]').press("Enter");

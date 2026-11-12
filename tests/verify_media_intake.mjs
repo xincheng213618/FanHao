@@ -7,7 +7,9 @@ import { once } from "node:events";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { chromium } from "playwright-core";
+import { createLtxCatalogService } from "../src/modules/fanhao/server/catalog/ltx-catalog-service.js";
 import { createCoreLibraryService } from "../src/modules/fanhao/server/library/core-library-service.js";
+import { createSubtitlecatProvider } from "../src/modules/fanhao/server/playback/subtitlecat-provider.js";
 import { createMediaIntakeService } from "../src/modules/fanhao/server/workflows/media-intake-service.js";
 import { classifyIntakeAds, nameForIntake, stageIntakeFile, signature } from "../src/modules/fanhao/server/workflows/intake-files.js";
 import { routeFileWorkflows } from "../src/modules/fanhao/server/workflows/routes.js";
@@ -23,7 +25,14 @@ const outside = path.join(root, "other-drive");
 const archive = path.join(library, "[Archive]");
 const db = new DatabaseSync(path.join(root, "fixture.sqlite"));
 const timestamp = "2026-11-06T00:00:00Z";
+const fixtureCoverUrl = "https://c0.jdbstatic.com/covers/fixture/ABC-789.jpg";
 const openCalls = [];
+const probeGates = new Map();
+const fixtureChineseSubtitle = [
+  "1\n00:00:01,000 --> 00:00:04,000\n你好，我们今天一起核对这个字幕文件。",
+  "2\n00:15:00,000 --> 00:15:03,000\n这是一条中文测试字幕，我现在可以看到了。",
+  "3\n00:29:55,000 --> 00:29:58,000\n请把字幕和这个视频一起放到正确的目录里。"
+].join("\n\n") + "\n";
 let indexReads = 0, browser, server;
 let accessMode = "local";
 const bytes = (file) => fs.readFileSync(file, "utf8");
@@ -64,19 +73,63 @@ function oldVideo(id, code, marker, contents, actorDir = actor, folderPrefix = "
   return file;
 }
 
-const serviceOptions = { getDb: () => db, sourceRoots: [incoming], libraryRoots: [library, archive],
+const snapshotItem = { title: "LTX fixture title", title_zh: "Translated title", actors: ["Fixture Person"], links: [] };
+const restoredName = "ABC-943_restored.mp4";
+const restoredLink = `ed2k://|file|${restoredName}|${Buffer.byteLength("fixture incoming 1080p")}|00112233445566778899aabbccddeeff|/`;
+const directSubtitle = "https://www.subtitlecat.com/subs/1/ABC-943-zh-CN.srt";
+const mismatchedSubtitle = "https://www.subtitlecat.com/subs/1/ABC-999-zh-CN.srt";
+const batchCode = "ABC-899", batchSubtitle = `https://www.subtitlecat.com/subs/1/${batchCode}-zh-CN.srt`;
+const { findIntakeMetadata } = createLtxCatalogService({ snapshotPath: write(path.join(root, "ltx-catalog.json"), JSON.stringify({
+  schema_version: 1, items: [{ ...snapshotItem, code: "ABC-937" }, { ...snapshotItem, code: "ABC-938" }, { ...snapshotItem, code: "ABC-0938" },
+    { ...snapshotItem, code: "ABC-943", subtitle: directSubtitle, links: [restoredLink] }, { ...snapshotItem, code: "ABC-944", subtitle: mismatchedSubtitle },
+    { ...snapshotItem, code: batchCode, subtitle: batchSubtitle }]
+})) });
+const subtitleRequests = [];
+const directProvider = createSubtitlecatProvider({ fetchImpl: async (url) => {
+  if (url === batchSubtitle) return new Response(fixtureChineseSubtitle, { headers: { "Content-Type": "application/x-subrip" } });
+  assert([directSubtitle, mismatchedSubtitle].includes(url));
+  subtitleRequests.push(url);
+  if (subtitleRequests.length === 1) return new Response("temporary outage", { status: 503 });
+  return new Response(fixtureChineseSubtitle, { headers: { "Content-Type": "application/x-subrip" } });
+} });
+let resolveIntakeWork = () => null;
+const serviceOptions = { getDb: () => db, resolveWork: (id) => resolveIntakeWork(id), sourceRoots: [incoming], libraryRoots: [library, archive], findLocalMetadata: findIntakeMetadata,
+  subtitleBackupRoot: path.join(root, "subtitle-backups"),
+  subtitleProvider: {
+    downloadDirect: directProvider.downloadDirect,
+    async search(code) {
+      if (code === "ABC-945") return { results: [] };
+      assert.equal(code, "ABC-935");
+      return { results: [{ id: "fixture-subtitle", title: "ABC-935 中文", pageUrl: "https://www.subtitlecat.com/subs/1/ABC-935.html" }] };
+    },
+    async files(id) {
+      assert.equal(id, "fixture-subtitle");
+      return { files: [{ id: "fixture-zh-cn", name: "ABC-935-zh-CN.srt", label: "简体中文", language: "zh-CN" }] };
+    },
+    async download(resultId, fileId) {
+      assert.deepEqual([resultId, fileId], ["fixture-subtitle", "fixture-zh-cn"]);
+      return { bytes: Buffer.from(fixtureChineseSubtitle), name: "ABC-935-zh-CN.srt", language: "zh-CN" };
+    }
+  },
   searchRoots: async () => [outside, library],
   classifyAds: (unnumbered, numbered) => classifyIntakeAds(process.env.PYTHON || "python", path.resolve("tools/clean.py"), unnumbered, numbered),
   targetDevice: (folder) => folder.startsWith(archive + path.sep) ? "archive" : "main",
   relativeFromRoot: (file) => path.relative(library, file), openPath: async (file) => { openCalls.push(file); },
   probeVideo: async (file) => {
+    await probeGates.get(file);
     const contents = bytes(file);
     if (contents.includes("unreadable metadata")) return null;
     const fourK = contents.includes("2160p");
     return { width: fourK ? 3840 : 1920, height: fourK ? 2160 : 1080, duration: 1800, videoCodec: "h264", audioCodec: "aac" };
   },
-  fetchMetadata: async (code) => ({ code, title: `${code} New Work`,
-    actors: code === "ABC-936" ? ["Fixture Person", "Other Fixture Person"] : ["Fixture Person"], tags: ["fixture"], date: "2025-03-01" }),
+  fetchMetadata: async (code, detailUrl) => {
+    if (code === "ABC-936" && !detailUrl) return null;
+    if (code === "ABC-937" || code === "ABC-938") return { accessBlocked: "login" };
+    if (detailUrl === "https://javdb.com/v/GatewayFixture") return { upstreamStatus: 502 };
+    const pageCode = detailUrl === "https://javdb.com/v/WrongFixture" ? "ABC-999" : code;
+    return { code: pageCode, title: `${pageCode} New Work`, detailUrl, imageUrl: code === "ABC-789" ? fixtureCoverUrl : "",
+      actors: code === "ABC-936" ? ["Fixture Person", "Other Fixture Person"] : ["Fixture Person"], tags: ["fixture"], date: "2025-03-01" };
+  },
   onIndexChanged: () => { indexReads += 1; }
 };
 const service = createMediaIntakeService(serviceOptions);
@@ -193,6 +246,9 @@ try {
   await assert.rejects(service.prepare({ action: "new", path: newWork }), /115Chrome/);
   const meta = await service.metadata({ path: newWork });
   assert.equal(meta.metadata.actors[0], "Fixture Person");
+  await assert.rejects(service.metadata({ path: newWork, detailUrl: "https://javdb.com.example.invalid/v/Fixture" }), /请粘贴 JavDB/);
+  await assert.rejects(service.metadata({ path: newWork, detailUrl: "https://javdb.com/v/WrongFixture" }), /番号与 ABC-789 不一致/);
+  await assert.rejects(service.metadata({ path: newWork, detailUrl: "https://javdb.com/v/GatewayFixture" }), /详情页返回 HTTP 502/);
   const imported = await service.prepare({ action: "new", path: newWork, tags: { a: true, ltx: false, u: true, c: true } });
   assert.match(imported.target, /\[A\]\..+-UC\.mkv$/);
   service.run(imported.id);
@@ -200,6 +256,17 @@ try {
   assert.match(bytes(path.join(path.dirname(imported.target), "info.txt")), /actor_names: Fixture Person/);
   assert.equal(db.prepare("SELECT release_date FROM works WHERE code='ABC-789'").get().release_date, "2025-03-01");
   assert(indexReads >= 3);
+
+  const localFallback = source("ABC-937.mp4");
+  const fallbackResult = await service.metadata({ path: localFallback });
+  assert.equal(fallbackResult.metadata.source, "LTX 本地目录");
+  assert.equal(fallbackResult.metadata.title, "LTX fixture title");
+  assert.equal(fallbackResult.actors[0].folder, actor);
+  await assert.rejects(service.metadata({ path: localFallback, detailUrl: "https://javdb.com/v/Fixture937" }), /详情页需要 JavDB 登录/);
+  await assert.rejects(service.metadata({ path: source("ABC-938.mp4") }), /跳到了登录页/);
+  const fallbackPlan = await service.prepare({ action: "new", path: localFallback });
+  assert.match(fallbackPlan.target, /ABC-937 LTX fixture title-LTX\.mp4$/);
+  service.cancel(fallbackPlan.id);
 
   const cross = source("ABC-991 系统文件传输 [fixture]'s.mp4");
   const item = { source: cross, temp: path.join(library, ".copy-fixture.part"), sourceSignature: signature(fs.statSync(cross)) };
@@ -262,7 +329,33 @@ try {
   };
   try {
     service.run(firstJob.id);
-    assert.equal(service.run(secondJob.id).state, "queued");
+    while (!held.has(firstSource)) await delay(5);
+    // Distinct NTFS IDs can round to the same Number above 2^53. Exercise
+    // only the admission check with that representation, while the second
+    // job cannot start. The file transfers below use native identities.
+    const preciseInodes = new Map([[firstSource, 2n ** 54n], [secondSource, 2n ** 54n + 1n]]);
+    const savedSignatures = db.prepare("SELECT id,plan_json FROM media_intake_jobs WHERE id IN (?,?)")
+      .all(firstJob.id, secondJob.id).map(({ id, plan_json }) => ({ id, signature: JSON.parse(plan_json).sourceSignature }));
+    const saveSignature = db.prepare("UPDATE media_intake_jobs SET plan_json=json_set(plan_json,'$.sourceSignature',json(?)) WHERE id=?");
+    const roundedInode = Number(preciseInodes.get(firstSource));
+    assert.equal(roundedInode, Number(preciseInodes.get(secondSource)));
+    let sameExactIdentity = true;
+    try {
+      for (const { id, signature } of savedSignatures) saveSignature.run(JSON.stringify([signature[0], roundedInode, ...signature.slice(2)]), id);
+      fs.lstatSync = (file, options) => {
+        const stat = nativeLstat(file, options);
+        const inode = preciseInodes.get(file);
+        if (stat && inode !== undefined) stat.ino = options?.bigint ? (sameExactIdentity ? preciseInodes.get(firstSource) : inode) : roundedInode;
+        return stat;
+      };
+      assert.throws(() => service.run(secondJob.id), { statusCode: 409, message: "这个视频已在执行队列中" });
+      assert.equal(db.prepare("SELECT 1 FROM media_intake_queue WHERE job_id=?").get(secondJob.id), undefined);
+      sameExactIdentity = false;
+      assert.equal(service.run(secondJob.id).state, "queued", "different exact inodes must not conflict when their Number IDs round together");
+    } finally {
+      fs.lstatSync = nativeLstat;
+      for (const { id, signature } of savedSignatures) saveSignature.run(JSON.stringify(signature), id);
+    }
     assert.equal(service.run(archiveJob.id).state, "working");
     while (!held.has(firstSource) || !held.has(archiveSource)) await delay(5);
     assert.equal(service.detail(secondJob.id).position, 1);
@@ -309,6 +402,50 @@ try {
     assert.equal(bytes(firstOld), "fixture incoming 1080p");
     assert(!fs.existsSync(firstSource) && !fs.existsSync(secondSource));
   } finally { fsp.link = nativeLink; for (const resume of held.values()) resume(); }
+
+  // A separate SQLite connection can acquire the write lock after the files
+  // have been published and the index refresh begins. The receipt and owner
+  // release must survive that lock without executing the file operation again.
+  const receiptLocker = new DatabaseSync(path.join(root, "fixture.sqlite"));
+  const { timeout: fixtureBusyTimeout } = db.prepare("PRAGMA busy_timeout").get();
+  db.exec("PRAGMA busy_timeout=5000");
+  let receiptRefreshes = 0, lockedAt = 0;
+  const receiptService = createMediaIntakeService({ ...serviceOptions, onIndexChanged() {
+    if (++receiptRefreshes === 1) {
+      receiptLocker.exec("BEGIN IMMEDIATE");
+      lockedAt = performance.now();
+    }
+  } });
+  try {
+    const first = oldVideo(38, "TST-930", "-LTX", "original 1080p");
+    const second = oldVideo(39, "TST-940", "-LTX", "original 1080p");
+    const input = source("TST-930.mp4", "replacement one 1080p");
+    const follower = source("TST-940.mp4", "replacement two 1080p");
+    const job = await receiptService.prepare({ action: "replace", path: input, oldId: 38 });
+    const next = await receiptService.prepare({ action: "replace", path: follower, oldId: 39 });
+    receiptService.run(job.id);
+    assert.equal(receiptService.run(next.id).state, "queued");
+    for (let i = 0; i < 160 && !lockedAt; i++) await delay(20);
+    assert(lockedAt, "the second connection must hold the real write lock during terminal receipt publication");
+    assert(performance.now() - lockedAt < 2000, "the retry must yield to the event loop before the configured 5-second timeout");
+    assert.equal(db.prepare("PRAGMA busy_timeout").get().timeout, 5000, "the receipt retry must restore the shared connection timeout");
+    assert.equal(receiptService.detail(job.id).state, "committed");
+    assert.equal(receiptService.detail(next.id).state, "queued");
+    assert.equal(bytes(first), "replacement one 1080p");
+    assert(!fs.existsSync(input));
+    receiptLocker.exec("COMMIT");
+    lockedAt = 0;
+    assert.equal((await settle(job)).state, "completed");
+    assert.equal((await settle(next)).state, "completed");
+    assert.equal(bytes(second), "replacement two 1080p");
+    assert.equal(receiptRefreshes, 2, "retrying the journal write must not repeat either index refresh");
+    assert.deepEqual(db.prepare("SELECT owner FROM media_intake_jobs WHERE id IN (?,?)").all(job.id, next.id).map(({ owner }) => owner), ["", ""]);
+  } finally {
+    if (lockedAt) receiptLocker.exec("ROLLBACK");
+    await receiptService.close();
+    receiptLocker.close();
+    db.exec(`PRAGMA busy_timeout=${fixtureBusyTimeout}`);
+  }
 
   // A stopped instance leaves confirmed, unclaimed jobs for startup to resume.
   const priorService = createMediaIntakeService(serviceOptions);
@@ -485,10 +622,65 @@ try {
       people: [], peopleById: new Map(), totals: {} }),
     fileBase: (name) => path.parse(name).name, getCoreDb: () => db, hasCoreDb: () => true, libraryRoots: [],
     normalizeExt: (name) => path.extname(name), normalizePersonSearchValue: String, parseJsonTextArray: () => [], dbBoolOrNull: () => null,
-    personRecordFromWorks: (entry) => entry, relativeFromRoot: String,
+    personRecordFromWorks: (entry) => entry, relativeFromRoot: String, publicRemoteUrl: (url) => url,
     registerFiles: (index, files) => files.forEach((file) => index.filesById.set(file.id, file)),
     sourcePathToAbsolute: (value) => String(value || ""), uniquePersonNames: (values) => values
   });
+  const importedWork = projectedLibrary.loadLibrary().worksById.get(String(service.detail(imported.id).result.workId));
+  resolveIntakeWork = (id) => projectedLibrary.loadLibrary().worksById.get(String(id));
+  const discardWorkId = "190";
+  const discardVideo = oldVideo(190, "ABC-987", "-CD1", "fixture video to delete");
+  const retainedVideo = write(path.join(path.dirname(discardVideo), "ABC-987 Fixture-CD2.mp4"), "fixture video to keep");
+  const retainedSubtitle = write(discardVideo.replace(/\.mp4$/, ".zh-CN.srt"), fixtureChineseSubtitle);
+  const fileMtime = (file) => fs.statSync(file).mtime.toISOString();
+  db.prepare("UPDATE local_files SET modified_at=? WHERE id=190").run(fileMtime(discardVideo));
+  db.prepare(`INSERT INTO local_files(id,work_id,local_work_id,file_id,file_type,file_path,name,size,modified_at,sort_order)
+    VALUES(191,190,190,'video-191','video',?,?,?,?,1)`)
+    .run(retainedVideo, path.basename(retainedVideo), fs.statSync(retainedVideo).size, fileMtime(retainedVideo));
+  const discardRequest = (video) => ({
+    action: "discardLibraryVideo", workId: discardWorkId, videoId: video.id,
+    path: video.path, size: video.size, modifiedAt: video.modifiedAt
+  });
+  const [discardEntry, retainedEntry] = resolveIntakeWork(discardWorkId).videos;
+  const discardRequestBody = discardRequest(discardEntry);
+  await assert.rejects(service.prepare({ ...discardRequestBody, videoId: retainedEntry.id }), /已改变/);
+  const rollbackSingleVideo = await service.prepare(discardRequestBody);
+  db.exec(`CREATE TEMP TRIGGER fail_single_video_discard BEFORE DELETE ON local_files WHEN OLD.id=190
+    BEGIN SELECT RAISE(ABORT, 'fixture single-video discard failure'); END;`);
+  service.run(rollbackSingleVideo.id);
+  assert.equal((await settle(rollbackSingleVideo)).state, "blocked");
+  assert.equal(bytes(discardVideo), "fixture video to delete");
+  assert.equal(bytes(retainedVideo), "fixture video to keep");
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM local_files WHERE local_work_id=190").get().count, 2);
+  db.exec("DROP TRIGGER fail_single_video_discard");
+  service.cancel(rollbackSingleVideo.id);
+  const missingVideo = path.join(path.dirname(discardVideo), "ABC-987 Fixture-CD3.mp4");
+  const unreadableVideo = path.join(path.dirname(discardVideo), "unavailable", "ABC-987 Fixture-CD4.mp4");
+  const addMissingVideo = db.prepare(`INSERT INTO local_files(id,work_id,local_work_id,file_id,file_type,file_path,name,size,modified_at,sort_order)
+    VALUES(?,190,190,?,'video',?,?,1024,?,?)`);
+  addMissingVideo.run(192, "video-192", missingVideo, path.basename(missingVideo), fileMtime(discardVideo), 2);
+  addMissingVideo.run(193, "video-193", unreadableVideo, path.basename(unreadableVideo), fileMtime(discardVideo), 3);
+  const staleRequest = (file) => discardRequest(resolveIntakeWork(discardWorkId).videos.find((video) => video.path === file));
+  await assert.rejects(service.prepare(staleRequest(unreadableVideo)), /无法读取视频所在目录/);
+  assert.equal(db.prepare("SELECT file_path FROM local_files WHERE id=193").get().file_path, unreadableVideo);
+  db.prepare("DELETE FROM local_files WHERE id=193").run();
+  fs.mkdirSync(missingVideo);
+  await assert.rejects(service.prepare(staleRequest(missingVideo)), /已变成链接或其他类型/);
+  fs.rmdirSync(missingVideo);
+  const reappearingVideo = await service.prepare(staleRequest(missingVideo));
+  assert.equal(reappearingVideo.missingSource, true);
+  write(missingVideo, "fixture file returned");
+  service.run(reappearingVideo.id);
+  const blockedCleanup = await settle(reappearingVideo);
+  assert.equal(blockedCleanup.state, "blocked");
+  assert.match(blockedCleanup.error, /已重新出现/);
+  assert.equal(bytes(missingVideo), "fixture file returned");
+  assert.equal(db.prepare("SELECT file_path FROM local_files WHERE id=192").get().file_path, missingVideo);
+  service.cancel(reappearingVideo.id);
+  fs.unlinkSync(missingVideo);
+  assert.equal(importedWork.coverId, null);
+  assert.equal(importedWork.infoSummary.imageUrl, fixtureCoverUrl,
+    "an imported cover must remain available from persisted metadata when the local image is missing");
   const projectedParts = () => projectedLibrary.loadLibrary().worksById.get("80").videos.map(({ id, path: file }) => [id, file]);
   assert.deepEqual(projectedParts(), [["80-1", siblingBefore], ["80-2", selectedPart], ["80-3", siblingAfter]]);
   const renamePart = await service.prepare({ action: "replace", path: source("ABC-950.mp4"), oldId: 80 });
@@ -622,6 +814,102 @@ try {
   const executablePath = process.env.FANHAO_CHROME_PATH || ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "/usr/bin/chromium"].find(fs.existsSync);
   assert(executablePath, "Chromium is required");
   browser = await chromium.launch({ headless: true, executablePath });
+  const batchPage = await browser.newPage();
+  const batchFiles = Array.from({ length: 24 }, (_, index) => source(`ABC-${870 + index}.mp4`));
+  const batchVideo = source(`${batchCode}-LTX/${batchCode}-LTX.mp4`);
+  const batchFolder = path.dirname(batchVideo);
+  const batchOld = oldVideo(76, batchCode, "-LTX", "fixture library old 1080p");
+  const firstCode = "ABC-870", backgroundSubtitle = Promise.withResolvers(), selectedSubtitle = Promise.withResolvers();
+  const subtitleCalls = [], prepareCalls = [];
+  await batchPage.route("**/intake/subtitle-download-direct", async (route) => {
+    const { code } = route.request().postDataJSON();
+    subtitleCalls.push(code);
+    if (code === firstCode) {
+      await backgroundSubtitle.promise;
+      return route.fulfill({ json: { available: false, reason: "no-direct-link" } });
+    }
+    if (code === batchCode) await selectedSubtitle.promise;
+    return route.continue();
+  });
+  batchPage.on("request", (request) => {
+    if (request.url().endsWith("/intake/prepare")) prepareCalls.push(request.postDataJSON());
+  });
+  const autoRequestFor = (code) => (request) => request.url().endsWith("/intake/subtitle-download-direct") && request.postDataJSON().code === code;
+  try {
+    await batchPage.goto(`${address}/fanhao/file-workflows/intake`);
+    await batchPage.getByText("把视频或文件夹拖到这里").waitFor();
+    await Promise.all([
+      batchPage.waitForRequest(autoRequestFor(firstCode)),
+      batchPage.evaluate((files) => {
+        const transfer = new DataTransfer();
+        for (const { name, size, modified } of files) transfer.items.add(new File([new Uint8Array(size)], name, { lastModified: modified }));
+        document.getElementById("dropArea").dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+      }, [...batchFiles, batchVideo].map((file) => descriptor(file)))
+    ]);
+    assert.equal(await batchPage.locator("#queue .queue-pick").count(), 25);
+    await batchPage.locator("#queue").getByText(path.basename(batchVideo), { exact: true }).click();
+    await batchPage.waitForFunction(() => ["replace", "keep", "discard"].every((id) => !document.getElementById(id).disabled));
+    const resolution = batchPage.getByRole("row").filter({ hasText: "分辨率" });
+    assert.equal(await resolution.getByText("1920×1080", { exact: true }).count(), 2);
+    assert.deepEqual(subtitleCalls, [firstCode]);
+
+    await Promise.all([batchPage.waitForRequest(autoRequestFor(batchCode)), batchPage.locator("#replace").click()]);
+    assert.match(await batchPage.locator("#actionHint").textContent(), /当前视频的自动字幕/);
+    assert.equal(prepareCalls.length, 0, "prepare waits for the selected video's subtitle write");
+    const openFile = fsp.open;
+    const temporaryOpened = Promise.withResolvers(), finishWrite = Promise.withResolvers();
+    fsp.open = async (file, ...options) => {
+      const handle = await openFile(file, ...options);
+      if (path.dirname(file) === batchFolder && path.basename(file).startsWith(".fanhao-subtitle-")) {
+        temporaryOpened.resolve();
+        await finishWrite.promise;
+      }
+      return handle;
+    };
+    try {
+      selectedSubtitle.resolve();
+      await Promise.race([temporaryOpened.promise, delay(5000, undefined, { ref: false }).then(() => { throw new Error("Subtitle write did not start"); })]);
+      const sourceRequest = { path: batchVideo, phase: "source" };
+      const reading = await service.compare(sourceRequest);
+      assert.equal(reading.source.probe.width, 1920);
+      assert.deepEqual(reading.package.subtitles, []);
+      assert.equal(prepareCalls.length, 0);
+      const partial = write(path.join(batchFolder, `${batchCode}.mp4.part`), "fixture incomplete download");
+      try { await assert.rejects(service.compare(sourceRequest), /还有未完成文件/); }
+      finally { fs.unlinkSync(partial); }
+    } finally {
+      fsp.open = openFile;
+      finishWrite.resolve();
+    }
+    const dialog = batchPage.getByRole("dialog");
+    await dialog.getByText("配套文件", { exact: true }).waitFor();
+    assert.deepEqual(subtitleCalls, [firstCode, batchCode]);
+    const [preparedInput] = prepareCalls;
+    const saved = path.join(batchFolder, preparedInput.automaticSubtitle.name);
+    assert.equal(bytes(saved), fixtureChineseSubtitle);
+    const discardWithSubtitle = await service.prepare({ ...preparedInput, action: "discard" });
+    service.cancel(discardWithSubtitle.id);
+    const unrelatedSubtitle = write(path.join(batchFolder, "unreviewed.srt"), "fixture added separately");
+    try {
+      await assert.rejects(service.prepare(preparedInput), /正片或字幕已改变/);
+      await assert.rejects(service.prepare({ ...preparedInput, action: "discard" }), /下载包内容已改变/);
+    } finally { fs.unlinkSync(unrelatedSubtitle); }
+
+    await dialog.getByRole("button", { name: "确认提交" }).click();
+    await batchPage.locator("#notice").filter({ hasText: /替换馆藏视频完成/ }).waitFor();
+    assert.deepEqual(subtitleCalls, [firstCode, batchCode], "migration completes while the earlier subtitle request is still pending");
+    assert(!fs.existsSync(batchVideo) && !fs.existsSync(saved));
+    const indexedSubtitle = db.prepare("SELECT file_path FROM local_files WHERE work_id=76 AND file_type='info'").get();
+    assert.equal(path.dirname(indexedSubtitle.file_path), path.dirname(batchOld));
+    assert.equal(bytes(indexedSubtitle.file_path), fixtureChineseSubtitle);
+    backgroundSubtitle.resolve();
+    await batchPage.waitForRequest(autoRequestFor("ABC-893"));
+    assert.equal(subtitleCalls.filter((code) => code === batchCode).length, 1);
+    console.log("media intake: 25-file drop, independent probing, priority subtitle write and sidecar migration verified");
+  } finally {
+    backgroundSubtitle.resolve(); selectedSubtitle.resolve();
+    await batchPage.close();
+  }
   const shots = process.env.FANHAO_INTAKE_SHOTS;
   const desk = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const fits = (target) => target.evaluate(() => document.documentElement.scrollHeight <= innerHeight + 1 && document.documentElement.scrollWidth <= innerWidth + 1);
@@ -635,7 +923,30 @@ try {
   const deskOld = oldVideo(40, "ABC-931", "-LTX", "fixture library old 1080p");
   oldVideo(41, "ABC-932", "-LTX", "fixture library old 1080p");
   const deskFirst = source("ABC-931.mp4"), deskSecond = source("ABC-932.mp4");
-  await desk.locator("#filePicker").setInputFiles([deskFirst, deskSecond]);
+  const sourceGate = Promise.withResolvers(), libraryGate = Promise.withResolvers();
+  probeGates.set(deskFirst, sourceGate.promise);
+  probeGates.set(deskOld, libraryGate.promise);
+  try {
+    await desk.locator("#filePicker").setInputFiles([deskFirst, deskSecond]);
+    await desk.locator("#workMetadata").getByText("ABC-931 Fixture", { exact: true }).waitFor();
+    await desk.locator("#compareTable").getByText("ABC-931 Fixture-LTX.mp4", { exact: true }).waitFor();
+    const resolutionRow = desk.getByRole("row").filter({ hasText: "分辨率" });
+    assert.equal(await resolutionRow.getByText("读取中…", { exact: true }).count(), 2);
+    assert(await desk.getByRole("button", { name: "替换所选馆藏" }).isDisabled());
+    sourceGate.resolve();
+    await resolutionRow.getByText("1920×1080", { exact: true }).waitFor();
+    assert.equal(await resolutionRow.getByText("读取中…", { exact: true }).count(), 1);
+    assert(await desk.getByRole("button", { name: "替换所选馆藏" }).isDisabled());
+    await desk.locator("#queue").getByText("ABC-932.mp4", { exact: true }).click();
+    await desk.locator("#workMetadata").getByText("ABC-932 Fixture", { exact: true }).waitFor();
+    libraryGate.resolve();
+    await desk.locator("#compareTable").getByText("ABC-932 Fixture-LTX.mp4", { exact: true }).waitFor();
+    assert.equal(await desk.locator("#compareTable").getByText("ABC-931 Fixture-LTX.mp4", { exact: true }).count(), 0);
+  } finally {
+    sourceGate.resolve(); libraryGate.resolve();
+    probeGates.clear();
+  }
+  await desk.locator("#queue").getByText("ABC-931.mp4", { exact: true }).click();
   await desk.locator("#compareTable").getByText("ABC-931.mp4", { exact: true }).waitFor();
   assert(await fits(desk));
   fsp.link = heldLink;
@@ -729,23 +1040,448 @@ try {
   await desk.locator("#filePicker").setInputFiles(autoImport);
   await desk.locator("#queue").getByText("ABC-935.mp4", { exact: true }).click();
   await desk.locator("#compareTable").getByText("ABC-935.mp4", { exact: true }).waitFor();
+  await desk.locator("#compareTable").getByRole("button", { name: "字幕", exact: true }).click();
+  const subtitleDialog = desk.locator("#sourceSubtitles");
+  await subtitleDialog.getByRole("button", { name: "一键下载字幕" }).click();
+  await subtitleDialog.getByRole("button", { name: "查看中文字幕" }).click();
+  await subtitleDialog.getByRole("button", { name: "下载并匹配" }).click();
+  const pendingSubtitle = path.join(incoming, "ABC-935.zh-CN.srt");
+  await desk.locator("#compareTable").getByText("ABC-935.zh-CN.srt", { exact: true }).waitFor({ state: "attached" });
+  assert.equal(bytes(pendingSubtitle), fixtureChineseSubtitle);
+  assert(!(await desk.locator("#tagC").isChecked()));
+  await subtitleDialog.waitFor({ state: "hidden" });
+  await desk.locator("#compareTable").getByRole("button", { name: "移除外挂…", exact: true }).click();
+  const removal = desk.waitForResponse((response) => response.url().endsWith("/intake/subtitle-remove") && response.ok());
+  await subtitleDialog.getByRole("button", { name: "移除外挂 ABC-935.zh-CN.srt" }).click();
+  const { backupPath } = await (await removal).json();
+  await subtitleDialog.getByText(/已移除 ABC-935\.zh-CN\.srt/).waitFor();
+  assert(!fs.existsSync(pendingSubtitle));
+  assert.equal(bytes(backupPath), fixtureChineseSubtitle);
+  await desk.locator("#sourceSubtitlePicker").setInputFiles(backupPath);
+  await subtitleDialog.waitFor({ state: "hidden" });
+  assert.equal(bytes(pendingSubtitle), fixtureChineseSubtitle);
   await desk.getByRole("button", { name: "作为新番号入库" }).click();
   await desk.getByRole("dialog").getByText(/ABC-935 New Work.*-LTX\.mp4$/).waitFor();
   assert(fs.existsSync(autoImport));
   await desk.getByRole("button", { name: "确认提交" }).click();
   await desk.locator("#notice").filter({ hasText: /新番号入库完成.*ABC-935/ }).waitFor();
   assert(!fs.existsSync(autoImport));
+  assert(!fs.existsSync(pendingSubtitle));
+  const indexedSubtitle = db.prepare(`SELECT f.file_path FROM local_files f JOIN works w ON w.id=f.work_id
+    WHERE w.code_search='abc935' AND f.file_type='info' AND f.ext='.srt'`).get();
+  assert.equal(path.basename(indexedSubtitle.file_path), "ABC-935 New Work-LTX.zh-CN.srt");
+  assert.equal(bytes(indexedSubtitle.file_path), fixtureChineseSubtitle);
+
+  const otherVersion = source(restoredName, "different byte size");
+  assert.equal((await service["subtitle-download-direct"]({ path: otherVersion, code: "ABC-943", automatic: true })).reason, "different-version");
+  const directIncoming = source(restoredName);
+  const directSidecar = path.join(incoming, "ABC-943_restored.zh-CN.srt");
+  let subtitleModeComparisons = 0;
+  const onCompare = (request) => {
+    if (request.url().endsWith("/intake/compare")) subtitleModeComparisons += 1;
+  };
+  await desk.locator("#reviewMode").getByRole("button", { name: "字幕", exact: true }).click();
+  desk.on("request", onCompare);
+  await desk.locator("#filePicker").setInputFiles(directIncoming);
+  await desk.locator("#queue").getByText(restoredName, { exact: true }).click();
+  const subtitlePane = desk.locator("#subtitlePane");
+  await subtitlePane.getByText(restoredName, { exact: true }).waitFor();
+  assert(await desk.locator("#compareBody").isHidden());
+  await subtitlePane.getByText(/已自动保存到视频旁.*ABC-943/).waitFor();
+  assert.equal(subtitleModeComparisons, 0);
+  desk.off("request", onCompare);
+  assert.deepEqual(subtitleRequests, [directSubtitle, directSubtitle]);
+  assert.equal(bytes(directSidecar), fixtureChineseSubtitle);
+  await desk.locator("#reviewMode").getByRole("button", { name: "洗版", exact: true }).click();
+  await desk.locator("#compareTable").getByText("ABC-943_restored.zh-CN.srt", { exact: true }).waitFor();
+  assert(await desk.locator(".compare-head").getByRole("button", { name: "丢弃源视频" }).isVisible());
+  await desk.getByRole("button", { name: "作为新番号入库" }).click();
+  await desk.getByRole("dialog").getByText(/ABC-943 New Work-LTX\.mp4$/).waitFor();
+  await desk.getByRole("button", { name: "确认提交" }).click();
+  await desk.locator("#notice").filter({ hasText: /新番号入库完成.*ABC-943/ }).waitFor();
+  assert(!fs.existsSync(directIncoming) && !fs.existsSync(directSidecar));
+  const directIndexed = db.prepare(`SELECT f.file_path FROM local_files f JOIN works w ON w.id=f.work_id
+    WHERE w.code_search='abc943' AND f.file_type='info' AND f.ext='.srt'`).get();
+  assert.equal(path.basename(directIndexed.file_path), "ABC-943 New Work-LTX.zh-CN.srt");
+  assert.equal(bytes(directIndexed.file_path), fixtureChineseSubtitle);
+
+  const wrongIncoming = source("ABC-944.mp4");
+  const wrongSubtitle = await fetch(`${address}/api/fanhao/file-workflows/intake/subtitle-download-direct`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: wrongIncoming, code: "ABC-944", url: directSubtitle })
+  });
+  assert.equal(wrongSubtitle.status, 422);
+  assert.match((await wrongSubtitle.json()).error, /番号、分段或版本/);
+  assert.deepEqual(subtitleRequests, [directSubtitle, directSubtitle, mismatchedSubtitle]);
+  assert(!fs.existsSync(path.join(incoming, "ABC-944.zh-CN.srt")));
+
+  const libraryVideo = directIndexed.file_path.replace(/\.zh-CN\.srt$/, ".mp4");
+  const foundLibrary = await service.scan({ files: [descriptor(libraryVideo)], subtitleMode: true });
+  assert.deepEqual(foundLibrary.items.map((item) => [item.path, item.library]), [[libraryVideo, true]]);
+  assert.deepEqual((await service.scan({ files: [descriptor(libraryVideo)] })).items, []);
+  const libraryInput = { path: libraryVideo, code: "ABC-943", subtitleMode: true };
+  const before = await service["subtitle-source"](libraryInput);
+  assert.deepEqual(before.source.subtitles, [path.basename(directIndexed.file_path)]);
+  const removedSubtitle = await service["subtitle-remove"]({ ...libraryInput, name: before.source.subtitles[0] });
+  assert.equal(bytes(removedSubtitle.backupPath), fixtureChineseSubtitle);
+  assert(!fs.existsSync(directIndexed.file_path));
+  const restoredSubtitle = await service["subtitle-download-direct"]({ ...libraryInput, automatic: true });
+  assert.equal(bytes(restoredSubtitle.path), fixtureChineseSubtitle);
+  assert.equal(db.prepare("SELECT file_type FROM local_files WHERE file_path=?").get(restoredSubtitle.path).file_type, "info");
+
+  const subtitleWindowContext = desk.context();
+  const catalogWork = { id: "subtitle-fixture", title: "ABC-943 Fixture", personId: "fixture-person", personName: "Fixture Person", videoCount: 2, localMarkers: ["A"],
+    cachedCover: { coverUrl: "/app-icon.svg" }, traits: { flags: { ltx: true, quality4k: true, subtitled: true } } };
+  const completedWorks = Array.from({ length: 36 }, (_, index) => ({ id: `completed-${index}`, title: `ABC-943 已完成 ${index}`, personId: "another-person",
+    videoCount: 1, traits: { flags: index % 2 ? { hasChineseSidecar: true } : { embeddedChinese: true } } }));
+  const vrWorks = [
+    { ...catalogWork, id: "vr-path", title: "ABC-943 Path", relativePath: "V:\\Fixture" },
+    { ...catalogWork, id: "vr-title", title: "ABC-943 [VR]" },
+    { ...catalogWork, id: "vr-tag", title: "ABC-943 Tag", traits: { ...catalogWork.traits, tags: ["VR"] } }
+  ];
+  const catalogQueries = [];
+  const discardCard = { ...catalogWork, id: discardWorkId, title: "ABC-987 Fixture" };
+  const sequenceWorks = [
+    ...Array.from({ length: 18 }, (_, index) => ({ ...catalogWork, id: `sequence-${index}`, title: `Sequence ${index}`, videoCount: 1 })),
+    completedWorks[0],
+    { ...catalogWork, id: "sequence-multiple", title: "Sequence Multiple" },
+    { ...catalogWork, id: "sequence-final", title: "Sequence Final", videoCount: 1 }
+  ];
+  let resumeWorks = Array.from({ length: 125 }, (_, index) => ({
+    ...catalogWork, id: `resume-${index}`, title: `Resume Fixture ${index}`, videoCount: 1
+  }));
+  let resumeGate = null;
+  let sequencePageAttempts = 0;
+  await subtitleWindowContext.route("**/app-icon.svg", (route) => route.fulfill({ path: path.resolve("public/app-icon.svg"), contentType: "image/svg+xml" }));
+  await subtitleWindowContext.route("**/api/library", (route) => route.fulfill({ json: { totals: { works: 37 }, people: [
+    { id: "fixture-person", name: "Fixture Person", workCount: 37, avatarUrl: "/app-icon.svg", actorProfile: { displayName: "  ", aliases: ["Alias One"] } },
+    { id: "another-person", name: "Another Person", workCount: 1 }
+  ] } }));
+  let personQuery, personReads = 0;
+  await subtitleWindowContext.route("**/api/people/fixture-person?*", (route) => {
+    personQuery = new URL(route.request().url()).searchParams;
+    personReads++;
+    const works = [catalogWork, ...vrWorks, discardCard, { ...catalogWork, id: "different-title", title: "Unrelated title" }];
+    return route.fulfill({ json: { works, total: works.length } });
+  });
+  await subtitleWindowContext.route("**/api/works?*", (route) => route.fulfill({ json: { works: [catalogWork], total: 1 } }));
+  await subtitleWindowContext.route("**/api/fanhao/search?*", async (route) => {
+    const query = new URL(route.request().url()).searchParams;
+    if (Number(query.get("limit")) < 1000) catalogQueries.push(Object.fromEntries(query));
+    const offset = Number(query.get("offset")), limit = Number(query.get("limit"));
+    const sequence = query.get("q") === "Sequence";
+    if (sequence && offset === 18 && limit < 1000 && ++sequencePageAttempts === 1) return route.fulfill({ status: 503 });
+    const matches = sequence ? sequenceWorks : query.get("q") === "Resume Fixture" ? resumeWorks : query.get("q")?.endsWith("ABC-987") ? [discardCard] : /ABC-943$/.test(query.get("q"))
+      ? (query.get("filter").includes("localMarkedA") ? [catalogWork, ...vrWorks] : [catalogWork, ...completedWorks]) : [];
+    if (resumeGate && query.get("q") === "Resume Fixture" && limit === 109) {
+      const { release, done } = resumeGate;
+      resumeGate = null;
+      await release.promise;
+      try { await route.fulfill({ json: { works: matches.slice(offset, offset + limit), total: matches.length } }); }
+      catch { /* A newer search may have canceled the response. */ }
+      finally { done.resolve(); }
+      return;
+    }
+    await route.fulfill({ json: { works: matches.slice(offset, offset + limit), total: matches.length } });
+  });
+  await subtitleWindowContext.route(/\/api\/works\/sequence-(17|multiple|final)$/, (route) => {
+    const id = route.request().url().split("/").at(-1);
+    const files = id === "sequence-multiple" ? [firstOld, libraryVideo] : [id === "sequence-final" ? retainedVideo : libraryVideo];
+    return route.fulfill({ json: { work: { videos: files.map((file, index) => ({ id: `part-${index + 1}`,
+      name: path.basename(file), sourcePath: file })) } } });
+  });
+  await subtitleWindowContext.route(/\/api\/works\/resume-(108|109|110)$/, (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-1);
+    const file = { "resume-108": firstOld, "resume-109": libraryVideo, "resume-110": retainedVideo }[id];
+    return route.fulfill({ json: { work: { id, videos: [{ id: "part-1", name: path.basename(file), sourcePath: file }] } } });
+  });
+  await subtitleWindowContext.route("**/api/works/subtitle-fixture", (route) => route.fulfill({ json: { work: { videos: [
+    { id: "part-1", name: path.basename(firstOld), sourcePath: firstOld }, { id: "part-2", name: path.basename(libraryVideo), sourcePath: libraryVideo }
+  ] } } }));
+  await subtitleWindowContext.route(`**/api/works/${discardWorkId}`, (route) => route.fulfill({ json: { work: {
+    videos: resolveIntakeWork(discardWorkId).videos.map((video) => ({ ...video, sourcePath: video.path }))
+  } } }));
+  await subtitleWindowContext.route("**/player.html?*", (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Fixture preview</title>" }));
+  await subtitleWindowContext.route("**/intake/subtitle-download-direct", (route) => route.fulfill({ json: { name: path.basename(restoredSubtitle.path) } }));
+  const [subtitleWindow] = await Promise.all([
+    desk.waitForEvent("popup"), desk.getByRole("link", { name: /独立字幕工作台/ }).click()
+  ]);
+  try {
+    const workbenchRequests = [];
+    subtitleWindow.on("request", (request) => {
+      if (request.method() === "POST") workbenchRequests.push(new URL(request.url()).pathname);
+    });
+    await subtitleWindow.getByRole("heading", { name: "字幕工作台", exact: true }).waitFor();
+    const card = subtitleWindow.locator(".library-search-results .work-card").filter({ hasText: "ABC-943 Fixture" });
+    await card.waitFor();
+    assert.equal(await card.locator("img").getAttribute("src"), "/app-icon.svg");
+    const catalogBounds = await subtitleWindow.locator("#librarySearch").boundingBox();
+    const peopleBounds = await subtitleWindow.locator("#libraryPeople").boundingBox();
+    const cardBounds = await card.boundingBox();
+    assert(peopleBounds.x + peopleBounds.width <= cardBounds.x, "the person filter belongs to the left of the work cards");
+    const drawer = subtitleWindow.locator("#reviewPane");
+    assert.equal(catalogBounds.width, 1280);
+    assert(await drawer.isHidden(), "the gallery should use the full width until a work is selected");
+    await subtitleWindow.setViewportSize({ width: 390, height: 750 });
+    assert(await subtitleWindow.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    assert(await subtitleWindow.locator("#reviewMode").isHidden());
+    const queryInput = subtitleWindow.getByRole("searchbox", { name: "搜索馆藏番号、标题或人物" });
+    await queryInput.fill("missing fixture");
+    await queryInput.press("Enter");
+    await subtitleWindow.getByRole("status").filter({ hasText: "没有匹配的馆藏视频" }).waitFor();
+    await queryInput.fill("ABC-943");
+    await queryInput.press("Enter");
+    await card.waitFor();
+    assert.equal(await card.locator(".cover-marker").filter({ hasText: /^A$/ }).count(), 1);
+    await card.evaluate((node) => { window.firstCatalogCard = node; });
+    await subtitleWindow.locator("#libraryLoadMore").scrollIntoViewIfNeeded();
+    await subtitleWindow.waitForFunction(() => document.querySelectorAll(".library-search-results .work-card").length > 18);
+    assert.equal(await card.evaluate((node) => node === window.firstCatalogCard), true, "scroll loading must append without replacing the first card");
+    assert.equal(await subtitleWindow.getByRole("button", { name: "下一页", exact: true }).count(), 0);
+    await subtitleWindow.getByRole("button", { name: "4K", exact: true }).click();
+    await card.waitFor();
+    await subtitleWindow.locator("#librarySort").selectOption("updated");
+    await card.waitFor();
+    assert.deepEqual([catalogQueries.at(-1).q, catalogQueries.at(-1).sort], ["class:4k ABC-943", "updated"]);
+    const exclude = subtitleWindow.getByRole("button", { name: "排除中字", exact: true });
+    await exclude.click();
+    await subtitleWindow.getByRole("status").filter({ hasText: "已显示 1 部" }).waitFor();
+    assert.equal(await exclude.getAttribute("aria-pressed"), "true");
+    assert.equal(await subtitleWindow.locator(".library-search-results .work-card").count(), 1);
+    assert.equal(catalogQueries.at(-1).offset, "36", "subtitle filtering must refill from subsequent source pages");
+    await subtitleWindow.locator("#libraryPeopleStatus").filter({ hasText: /^1 人$/ }).waitFor();
+    assert.equal(await subtitleWindow.getByRole("button", { name: /Another Person/ }).count(), 0);
+    const markedA = subtitleWindow.getByRole("button", { name: "只看 A", exact: true });
+    await markedA.click();
+    await card.waitFor();
+    assert.equal(catalogQueries.at(-1).filter, "localOnly,localMarkedA");
+    assert.equal(await subtitleWindow.locator(".library-search-results .work-card").count(), 4);
+    const excludeVr = subtitleWindow.getByRole("button", { name: "排除 VR", exact: true });
+    await excludeVr.click();
+    await subtitleWindow.getByRole("status").filter({ hasText: "已显示 1 部 · 已排除中字、VR" }).waitFor();
+    assert.equal(await excludeVr.getAttribute("aria-pressed"), "true");
+    await subtitleWindow.getByRole("searchbox", { name: "筛选人物" }).fill("Alias One");
+    assert.equal(await subtitleWindow.getByRole("button", { name: /Another Person/ }).count(), 0);
+    const person = subtitleWindow.locator(".library-person").filter({ hasText: "Fixture Person" });
+    assert.equal(await person.locator(".library-person-name").getAttribute("title"), "Fixture Person");
+    assert.equal(await person.locator(".library-person-count").textContent(), "1");
+    await person.click();
+    await card.waitFor();
+    assert.equal(personQuery.get("filter"), "localOnly,localMarkedA,quality4k");
+    assert.equal(await subtitleWindow.locator(".library-search-results .work-card").count(), 1);
+    await card.click();
+    assert.deepEqual(workbenchRequests, [], "search and work expansion must not write files or enqueue intake");
+    await subtitleWindow.locator("#libraryFileChoices button").filter({ hasText: path.basename(libraryVideo) }).click();
+    await subtitleWindow.locator("#subtitlePane").getByText(path.basename(restoredSubtitle.path), { exact: true }).waitFor();
+    assert.deepEqual(workbenchRequests, ["scan", "subtitle-source"].map((route) => `/api/fanhao/file-workflows/intake/${route}`));
+    assert.equal(await subtitleWindow.locator("#queueCount").textContent(), "1");
+    assert(await subtitleWindow.getByRole("button", { name: "查找中文字幕" }).isVisible());
+    assert.equal(await card.getAttribute("aria-pressed"), "true");
+    assert.equal(await drawer.evaluate((node) => getComputedStyle(node).position), "fixed");
+    assert.equal((await subtitleWindow.locator("#librarySearch").boundingBox()).width, 390);
+    await subtitleWindow.getByRole("button", { name: "播放确认", exact: true }).click();
+    const preview = subtitleWindow.locator("#subtitlePreview iframe");
+    assert.match(await preview.getAttribute("src"), /workId=subtitle-fixture&videoId=part-2&preview=1&t=0$/);
+    await subtitleWindow.getByRole("button", { name: "关闭字幕浮窗", exact: true }).click();
+    assert(await drawer.isHidden());
+    assert.equal(await preview.count(), 0, "closing the drawer must stop the embedded player");
+    assert(await card.evaluate((node) => node === document.activeElement), "closing the drawer must restore focus to the selected card");
+    await subtitleWindow.getByRole("button", { name: "仅看未核查", exact: true }).click();
+    await card.click();
+    await subtitleWindow.locator("#libraryFileChoices button").filter({ hasText: path.basename(libraryVideo) }).click();
+    const readsBeforeReview = [catalogQueries.length, personReads];
+    await subtitleWindow.getByRole("button", { name: "标记已查无中字", exact: true }).click();
+    assert(await card.isHidden(), "reviewed works leave the unreviewed filter immediately");
+    assert(await person.isHidden(), "reviewing the final matching work hides the person");
+    assert.deepEqual([catalogQueries.length, personReads], readsBeforeReview, "marking a review must not re-query the catalog");
+
+    const [checkWindow] = await Promise.all([
+      desk.waitForEvent("popup"), desk.getByRole("link", { name: /独立字幕工作台/ }).click()
+    ]);
+    try {
+      const checked = checkWindow.locator(".library-search-results .work-card").filter({ hasText: "ABC-943 Fixture" });
+      await checked.locator("[data-review-badge]").getByText("已查无中字", { exact: true }).waitFor();
+      await checked.click();
+      await checkWindow.locator("#libraryFileChoices button").filter({ hasText: path.basename(libraryVideo) }).click();
+      await checkWindow.getByRole("button", { name: "撤销已查无中字", exact: true }).click();
+      await checked.locator("[data-review-badge]").waitFor({ state: "detached" });
+    } finally { await checkWindow.close(); }
+    await card.waitFor({ state: "visible" });
+    await person.waitFor({ state: "visible" });
+    const readsBeforeSave = [catalogQueries.length, personReads];
+    await subtitleWindow.getByRole("button", { name: "一键下载字幕", exact: true }).click();
+    await subtitleWindow.locator("#sourceSubtitleStatus").filter({ hasText: "已保存到视频旁" }).waitFor();
+    assert(await card.isHidden(), "the saved Chinese subtitle must immediately hide its card");
+    assert(await person.isHidden(), "the last completed film must hide its person from the filtered list");
+    assert(await drawer.isVisible(), "the drawer stays open for playback confirmation");
+    assert.deepEqual([catalogQueries.length, personReads], readsBeforeSave, "saving a subtitle must not restart the catalog or person feed");
+    assert.equal(bytes(restoredSubtitle.path), fixtureChineseSubtitle);
+
+    await drawer.getByRole("button", { name: "关闭字幕浮窗", exact: true }).click();
+    await queryInput.fill("ABC-987");
+    await queryInput.press("Enter");
+    const videoCard = subtitleWindow.locator(".work-card").filter({ hasText: "ABC-987 Fixture" });
+    await videoCard.click();
+    const missingButton = drawer.getByRole("button", { name: `删除此文件：${path.basename(missingVideo)}`, exact: true });
+    const deleteConfirmation = subtitleWindow.locator("#confirm");
+    await missingButton.click();
+    await missingButton.waitFor({ state: "detached" });
+    assert(await deleteConfirmation.isHidden());
+    await videoCard.getByText(/2 份视频/).waitFor();
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM local_files WHERE id=192").get().count, 0);
+    assert.equal(bytes(discardVideo), "fixture video to delete");
+    assert.equal(bytes(retainedVideo), "fixture video to keep");
+    assert.equal(bytes(retainedSubtitle), fixtureChineseSubtitle);
+    const removeVideo = drawer.getByRole("button", { name: `删除此文件：${path.basename(discardVideo)}`, exact: true });
+    await removeVideo.click();
+    assert.equal(await deleteConfirmation.locator("#confirmPaths dd").textContent(), discardVideo);
+    await deleteConfirmation.locator("#confirmBack").click();
+    assert.equal(bytes(discardVideo), "fixture video to delete");
+    await removeVideo.click();
+    await deleteConfirmation.getByRole("button", { name: "永久删除" }).click();
+    await drawer.locator("#libraryFileChoices .queue-pick").filter({ hasText: path.basename(retainedVideo) }).waitFor();
+    await removeVideo.waitFor({ state: "detached" });
+    await videoCard.getByText(/1 份视频/).waitFor();
+    assert.equal(fs.existsSync(discardVideo), false);
+    assert.equal(bytes(retainedVideo), "fixture video to keep");
+    assert.equal(bytes(retainedSubtitle), fixtureChineseSubtitle);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM local_files WHERE id=190").get().count, 0);
+    assert.equal(resolveIntakeWork(discardWorkId).videos[0].id, retainedEntry.id);
+    await assert.rejects(service.prepare(discardRequest(retainedEntry)), /至少保留一份/);
+
+    await subtitleWindow.reload();
+    await subtitleWindow.locator("#librarySearchResults .work-card").filter({ hasText: "ABC-987 Fixture" }).waitFor();
+    assert.equal(await queryInput.inputValue(), "ABC-987");
+    assert.equal(await subtitleWindow.locator("#librarySort").inputValue(), "updated");
+    for (const id of ["excludeChineseSubtitles", "excludeLibraryVr", "libraryOnlyMarkedA", "libraryOnlyUnreviewed"]) {
+      assert.equal(await subtitleWindow.locator(`#${id}`).getAttribute("aria-pressed"), "true");
+    }
+    await subtitleWindow.locator("#libraryPeoplePanel > summary").click();
+    assert.equal(await person.getAttribute("aria-pressed"), "true");
+    await subtitleWindow.getByRole("button", { name: /全部人物/ }).click();
+    await subtitleWindow.locator('[data-classification=""]').click();
+    await queryInput.fill("Sequence");
+    await queryInput.press("Enter");
+    const anchor = subtitleWindow.locator('[data-work-id="sequence-17"]');
+    await anchor.evaluate((card) => card.click());
+    const next = drawer.getByRole("button", { name: "下一部作品", exact: true });
+    await drawer.getByRole("button", { name: "播放确认", exact: true }).click();
+    assert.equal(sequencePageAttempts, 0, "the later catalog page must still be unloaded");
+    await drawer.getByRole("button", { name: "标记无中字并继续", exact: true }).click();
+    await drawer.getByText("下一部作品读取失败，请重试。", { exact: true }).waitFor();
+    assert(await anchor.isHidden());
+    assert(await drawer.locator("#subtitlePreview iframe").isVisible(), "a failed advance keeps the current preview");
+    await next.click();
+    await drawer.getByRole("heading", { name: "Sequence Multiple", exact: true }).waitFor();
+    assert.equal(sequencePageAttempts, 2, "the failed page is retried without restarting the feed");
+    assert.equal(await drawer.locator("#subtitlePreview iframe").count(), 0);
+    assert.equal(await subtitleWindow.locator('[data-work-id="completed-0"]').count(), 0);
+    await next.click();
+    await drawer.getByRole("heading", { name: path.basename(retainedVideo), exact: true }).waitFor();
+    await next.click();
+    await drawer.getByText("已到当前筛选结果的最后一部。", { exact: true }).waitFor();
+    await drawer.getByRole("button", { name: "关闭字幕浮窗", exact: true }).click();
+    assert(await subtitleWindow.locator('[data-work-id="sequence-final"]').evaluate((card) => card === document.activeElement));
+
+    await queryInput.fill("Resume Fixture");
+    await queryInput.press("Enter");
+    const deep = subtitleWindow.locator('[data-work-id="resume-108"]');
+    for (let min = 18; min <= 126; min += 18) {
+      const size = Math.min(min, resumeWorks.length);
+      await subtitleWindow.waitForFunction(count => document.querySelectorAll('[data-work-id^="resume-"]').length >= count, size);
+      if (await deep.count()) break;
+      await subtitleWindow.locator("#libraryLoadMore").scrollIntoViewIfNeeded();
+    }
+    await deep.click();
+    await drawer.getByRole("button", { name: "标记已查无中字", exact: true }).click();
+    await drawer.getByRole("button", { name: "关闭字幕浮窗", exact: true }).click();
+    assert(await deep.isHidden());
+    resumeWorks = [{ ...resumeWorks[0], id: "resume-inserted", title: "Resume Fixture New" }, ...resumeWorks];
+
+    const reopenedWrites = [];
+    const recordReopenedWrite = request => { if (request.method() === "POST") reopenedWrites.push(request.url()); };
+    subtitleWindowContext.on("request", recordReopenedWrite);
+    const [reopened] = await Promise.all([
+      desk.waitForEvent("popup"), desk.getByRole("link", { name: /独立字幕工作台/ }).click()
+    ]);
+    try {
+      await reopened.setViewportSize({ width: 320, height: 750 });
+      const first = reopened.locator("#librarySearchResults .work-card").first();
+      const requestStart = catalogQueries.length;
+      const resumeButton = reopened.getByRole("button", { name: "继续上次", exact: true });
+      await resumeButton.click();
+      await reopened.locator("#libraryResumeStatus").getByText("已回到上次处理位置。", { exact: true }).waitFor();
+      assert.equal(await first.getAttribute("data-work-id"), "resume-109", "resume skips the reviewed anchor after confirming its moved identity");
+      assert(await first.evaluate(card => card === document.activeElement));
+      const resumeRequests = catalogQueries.slice(requestStart).filter(query => query.q === "Resume Fixture");
+      assert.deepEqual(resumeRequests.map(query => [query.offset, query.limit]), [["54", "109"]]);
+      assert.equal(await reopened.locator("#librarySearchForm input").inputValue(), "Resume Fixture");
+      assert.equal(await reopened.locator("#libraryOnlyUnreviewed").getAttribute("aria-pressed"), "true");
+      assert.deepEqual(reopenedWrites, [], "restoring the catalog position must not process a video automatically");
+      assert(await reopened.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+      await first.click();
+      await reopened.locator("#subtitleVideoName").getByText(path.basename(libraryVideo), { exact: true }).waitFor();
+      await reopened.getByRole("button", { name: "下一部作品", exact: true }).click();
+      await reopened.locator("#subtitleVideoName").getByText(path.basename(retainedVideo), { exact: true }).waitFor();
+      await reopened.getByRole("button", { name: "关闭字幕浮窗", exact: true }).click();
+
+      await reopened.getByRole("button", { name: "从头浏览", exact: true }).click();
+      await reopened.locator('[data-work-id="resume-inserted"]').waitFor();
+      assert.equal(await reopened.locator("#librarySearchForm input").inputValue(), "Resume Fixture");
+      const stale = resumeGate = { release: Promise.withResolvers(), done: Promise.withResolvers() };
+      try {
+        await Promise.all([resumeButton.click(), reopened.waitForRequest(request => {
+          const params = new URL(request.url()).searchParams;
+          return params.get("q") === "Resume Fixture" && params.get("limit") === "109";
+        })]);
+        const search = reopened.locator("#librarySearchForm input");
+        await search.fill("No matches");
+        await search.press("Enter");
+        await reopened.locator("#librarySearchStatus").getByText("没有匹配的馆藏视频。", { exact: true }).waitFor();
+      } finally { stale.release.resolve(); }
+      await stale.done.promise;
+      assert.equal(await first.count(), 0, "a later search owns the catalog after a delayed resume response");
+      assert(await reopened.locator("#libraryResumeTools").isHidden());
+      resumeWorks = resumeWorks.filter(work => work.id !== "resume-110");
+      const writes = reopenedWrites.length;
+      await resumeButton.click();
+      await reopened.locator("#libraryResumeStatus").getByText("上次处理位置已变化，已从头显示当前筛选。", { exact: true }).waitFor();
+      assert.equal(await first.getAttribute("data-work-id"), "resume-inserted");
+      assert.equal(reopenedWrites.length, writes, "a removed anchor must never select an adjacent video implicitly");
+    } finally {
+      subtitleWindowContext.off("request", recordReopenedWrite);
+      await reopened.close();
+    }
+  } finally {
+    await subtitleWindow.close();
+    await subtitleWindowContext.unrouteAll();
+  }
+
+  await desk.locator("#filePicker").setInputFiles(source("ABC-945.mp4"));
+  await desk.locator("#queue").getByText("ABC-945.mp4", { exact: true }).click();
+  await desk.locator("#compareTable").getByRole("button", { name: "字幕", exact: true }).click();
+  await subtitleDialog.getByRole("button", { name: "一键下载字幕" }).click();
+  await subtitleDialog.getByText("未找到此番号的字幕，可以继续洗版。").waitFor();
+  await subtitleDialog.getByRole("button", { name: "关闭" }).click();
+  assert(await desk.getByRole("button", { name: "作为新番号入库" }).isEnabled());
+
   const multipleTargets = source("ABC-936.mp4");
   const alternateActor = path.join(archive, path.basename(actor));
+  const unregisteredActor = path.join(archive, "Other Fixture Person");
   fs.mkdirSync(alternateActor, { recursive: true });
+  fs.mkdirSync(unregisteredActor);
   await desk.locator("#filePicker").setInputFiles(multipleTargets);
   await desk.locator("#queue").getByText("ABC-936.mp4", { exact: true }).click();
   await desk.locator("#compareTable").getByText("ABC-936.mp4", { exact: true }).waitFor();
-  await desk.getByRole("button", { name: "作为新番号入库" }).click();
-  await desk.getByText("资料已找到，请选择人物和归档目录。", { exact: true }).waitFor();
+  await desk.getByRole("button", { name: "用 115Chrome 查资料" }).click();
+  await desk.locator("#notice").filter({ hasText: "可以粘贴详情页网址读取" }).waitFor();
+  await desk.getByRole("textbox", { name: "JavDB 作品详情页网址" }).fill("javdb.com/v/Fixture936?from=search#title");
+  await desk.getByRole("button", { name: "从网址读取" }).click();
+  await desk.locator("#workMetadata").getByText("ABC-936 New Work", { exact: true }).waitFor();
   assert(await desk.getByRole("button", { name: "作为新番号入库" }).isDisabled());
   const choices = desk.locator("#actorTarget");
   assert((await choices.locator("option").allTextContents()).includes(`Fixture Person · ${actor}`));
+  assert((await choices.locator("option").allTextContents()).includes(`Other Fixture Person · ${unregisteredActor}`));
   await choices.selectOption({ label: `Fixture Person · ${alternateActor}` });
   await desk.getByRole("button", { name: "作为新番号入库" }).click();
   const alternateTarget = path.join(alternateActor, "ABC-936 New Work", "ABC-936 New Work-LTX.mp4");
@@ -754,6 +1490,7 @@ try {
   await desk.getByRole("button", { name: "确认提交" }).click();
   await desk.locator("#notice").filter({ hasText: /新番号入库完成.*ABC-936/ }).waitFor();
   assert.equal(bytes(alternateTarget), "fixture incoming 1080p");
+  assert.match(bytes(path.join(path.dirname(alternateTarget), "info.txt")), /detail_url: https:\/\/javdb\.com\/v\/Fixture936\r?\n/);
   await desk.close();
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   const discard = write(path.join(outside, "ABC-914.mp4"), "fixture outside download disk");

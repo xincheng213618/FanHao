@@ -1,6 +1,7 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 import { createPrefetchCache } from "./prefetch-cache.js?v=20261004-fanhao-requests-01";
 import { resolveWorkPage } from "./features/works/work-page-state.js";
+import { createPersonShortcutStore, resolvePersonShortcuts } from "./person-shortcuts.js?v=20261113-people-shortcuts-01";
 
 const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64;
 const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48;
@@ -24,12 +25,15 @@ export function createPeoplePage(deps) {
     els,
     formatLibraryPaths,
     formatNumber,
+    getAccountOwner = () => "",
     getWorkFilterMode,
+    showMissingLocalForPerson = () => state.showMissingLocalWorks,
     hidePersonProfile,
     onNavigationStarted,
     onWorkRead = () => null,
     preparePersonProfile,
     renderPersonProfile,
+    renderPersonWorkSearch,
     renderPersonWorkStats,
     renderWorks,
     resetProgressiveCoverLoading,
@@ -52,6 +56,7 @@ export function createPeoplePage(deps) {
   const personIndexRecords = new WeakMap();
   const personDetailPrefetches = createPrefetchCache({ limit: PERSON_DETAIL_PREFETCH_LIMIT, ttlMs: PERSON_DETAIL_PREFETCH_TTL_MS });
   const personDetailRequests = createLatestRequestGate();
+  const personShortcuts = createPersonShortcutStore(getAccountOwner);
   bindPeopleIndexInteractions();
 
 function cancelPendingSelection() {
@@ -71,6 +76,7 @@ function showPeopleIndex(options = {}) {
   state.activeView = "people";
   state.selectedPersonId = null;
   state.selectedPerson = null;
+  state.personWorkQuery = "";
   state.searchPeople = [];
   state.works = [];
   state.personWorksTotal = 0;
@@ -111,6 +117,87 @@ function renderPeopleIndexStats() {
     stat.innerHTML = `<strong>${formatNumber(value)}</strong><span>${label}</span>`;
     els.statsRow.append(stat);
   }
+  renderPersonShortcuts(people);
+}
+
+function renderPersonShortcuts(people) {
+  const scope = state.peopleScope || "main";
+  const { pinned, recent } = resolvePersonShortcuts(people, personShortcuts.list(scope));
+  if (!pinned.length && !recent.length) return;
+  const nav = document.createElement("nav");
+  nav.className = "person-shortcuts";
+  nav.setAttribute("aria-label", "人物快捷入口");
+  const isCurrent = () => nav.isConnected && state.activeView === "people" && !state.selectedPersonId
+    && (state.peopleScope || "main") === scope;
+  for (const [label, entries] of [["已固定", pinned], ["最近浏览", recent]]) {
+    if (!entries.length) continue;
+    const row = document.createElement("div");
+    row.className = "person-shortcut-row";
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", label);
+    const heading = document.createElement("span");
+    heading.textContent = label;
+    row.append(heading);
+    for (const person of entries) {
+      const shortcut = document.createElement("button");
+      shortcut.type = "button";
+      shortcut.className = "stat-filter-chip person-shortcut";
+      shortcut.textContent = displayPersonName(person);
+      shortcut.addEventListener("click", () => {
+        if (!isCurrent()) return;
+        clearWorkSearch();
+        void selectPerson(person.id).catch((error) => {
+          if (state.activeView !== "people" || String(state.selectedPersonId) !== String(person.id)
+            || error?.code === "ACCOUNT_CHANGED") return;
+          els.workGrid.innerHTML = "";
+          appendEmpty(error.message || "人物读取失败，请返回索引重试。");
+        });
+      });
+      row.append(shortcut);
+    }
+    if (label === "最近浏览") {
+      const clear = document.createElement("button");
+      clear.type = "button";
+      clear.className = "person-shortcuts-clear";
+      clear.textContent = "清除";
+      clear.setAttribute("aria-label", "清除最近浏览人物");
+      clear.addEventListener("click", () => {
+        if (!isCurrent()) return;
+        personShortcuts.clearRecent(scope);
+        renderPeopleIndexStats();
+        (els.statsRow.querySelector(".person-shortcut") || els.workGrid.querySelector(".person-index-card"))?.focus({ preventScroll: true });
+      });
+      row.append(clear);
+    }
+    nav.append(row);
+  }
+  els.statsRow.append(nav);
+}
+
+function createPinControl(person) {
+  const scope = state.peopleScope || "main";
+  const id = String(person?.id || "");
+  if (!id || person.detailPending || !personShortcuts.available(scope)
+    || !state.people.some((entry) => String(entry.id) === id && entry.actorProfile?.gender !== "male")) return null;
+  const pin = document.createElement("button");
+  pin.type = "button";
+  pin.className = "folder-button person-pin-control";
+  function sync() {
+    const pinned = personShortcuts.list(scope).pinned.includes(id);
+    pin.textContent = pinned ? "取消固定" : "固定人物";
+    pin.setAttribute("aria-pressed", String(pinned));
+  }
+  sync();
+  pin.addEventListener("click", () => {
+    if (!pin.isConnected || state.activeView !== "people" || String(state.selectedPersonId) !== id
+      || (state.peopleScope || "main") !== scope) return;
+    const visibleIds = new Set(filteredPeople().map((entry) => String(entry.id)));
+    if (!visibleIds.has(id)) return;
+    const message = personShortcuts.togglePin(scope, id, visibleIds);
+    if (message) toastInline(pin, message, pin.textContent);
+    else sync();
+  });
+  return pin;
 }
 
 function renderPeopleIndex() {
@@ -308,6 +395,12 @@ async function selectPerson(personId, options = {}) {
   if (state.activeView === "people" && !state.selectedPersonId && options.captureIndexScroll !== false) {
     state.peopleIndexScrollTop = currentPageScrollTop();
   }
+  const samePerson = state.activeView === "people" && state.selectedPersonId === personId;
+  const recordVisit = !samePerson || !state.selectedPerson || state.selectedPerson.detailPending;
+  const personWorkQuery = options.personWorkQuery
+    ?? (samePerson && options.resetFilter === false ? state.personWorkQuery || "" : "");
+  if (state.personWorkQuery !== personWorkQuery) state.personBulkDeleteSelectedIds?.clear();
+  state.personWorkQuery = personWorkQuery;
   state.selectedPersonId = personId;
   state.activeView = "people";
   state.searchPeople = [];
@@ -325,6 +418,7 @@ async function selectPerson(personId, options = {}) {
     && state.selectedPersonId === personId && personDetailRequestUrl(personId, 0) === query;
   els.workGrid.innerHTML = `<div class="empty-state">正在加载作品</div>`;
   state.personWorksTraitFacets = null;
+  renderPersonWorkSearch?.({ loading: true });
   if (indexedPerson) {
     state.selectedPerson = { ...indexedPerson, detailPending: true };
     setMainHeader(
@@ -344,6 +438,7 @@ async function selectPerson(personId, options = {}) {
     state.selectedPerson = mergeIndexedPerson(indexedPerson, data.person, data.works);
     const resolvedPersonId = state.selectedPerson?.id || personId;
     state.selectedPersonId = resolvedPersonId;
+    if (recordVisit) personShortcuts.visit(state.peopleScope || "main", String(resolvedPersonId));
     const page = resolveWorkPage(data);
     state.works = page.works;
     state.personWorksTotal = page.total;
@@ -438,16 +533,20 @@ function personWorkPageSize() {
 
 async function fetchPersonWorksPage(personId, offset = 0, options = {}) {
   const requestUrl = personDetailRequestUrl(personId, offset);
+  const query = state.personWorkQuery || "";
+  let data = null;
   if (options.reusePrefetch && offset === 0) {
     const cached = personDetailPrefetches.consume(requestUrl, options.signal);
     if (cached) {
       const result = await cached;
       if (options.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
       if (result.error) throw result.error;
-      if (result.data !== null) return result.data;
+      data = result.data;
     }
   }
-  return api(requestUrl, options.signal ? { signal: options.signal } : {});
+  data ??= await api(requestUrl, options.signal ? { signal: options.signal } : {});
+  if (query && data.query !== query) throw new Error("人物作品查找结果与当前条件不一致");
+  return data;
 }
 
 function personDetailRequestUrl(personId, offset = 0) {
@@ -456,10 +555,12 @@ function personDetailRequestUrl(personId, offset = 0) {
     offset: String(offset || 0),
     sort: state.sortMode || "releaseDesc",
     filter: typeof getWorkFilterMode === "function" ? getWorkFilterMode() : state.filterMode || "all",
-    includeMissingLocal: state.showMissingLocalWorks ? "1" : "0",
-    includeCompilation: state.showCompilationWorks ? "1" : "0"
+    includeMissingLocal: showMissingLocalForPerson(personId) ? "1" : "0",
+    includeCompilation: state.showCompilationWorks ? "1" : "0",
+    traitScope: "person"
   });
   if (state.peopleScope && state.peopleScope !== "main") params.set("scope", state.peopleScope);
+  if (state.personWorkQuery) params.set("q", state.personWorkQuery);
   return `/api/people/${encodeURIComponent(personId)}?${params}`;
 }
 
@@ -515,6 +616,7 @@ function personIndexPageSize() {
 
   return {
     cancelPendingSelection,
+    createPinControl,
     disconnectIndexAutoload: disconnectPeopleIndexAutoload,
     fetchPersonWorksPage,
     goToPerson,

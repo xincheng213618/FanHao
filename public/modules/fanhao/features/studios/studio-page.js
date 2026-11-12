@@ -1,6 +1,7 @@
 import { createLatestRequestGate } from "../../latest-request.js?v=20260717-fanhao-latest-request-01";
 import { createPrefetchCache } from "../../prefetch-cache.js?v=20261004-fanhao-requests-01";
 import { resolveWorkPage } from "../works/work-page-state.js";
+import { compareSeriesByLocalCount, createStudioSeriesPicker } from "./series-picker.js?v=20261113-studio-series-picker-01";
 
 const STUDIO_DESKTOP_PAGE_SIZE = 48;
 const STUDIO_MOBILE_PAGE_SIZE = 32;
@@ -9,17 +10,25 @@ const STUDIO_PREFETCH_LIMIT = 16;
 const STUDIO_INDEX_INITIAL_COUNT = 64;
 const STUDIO_INDEX_BATCH_SIZE = 64;
 const STUDIO_INDEX_BATCH_DELAY_MS = 16;
+const STUDIO_INDEX_SEARCH_DELAY_MS = 220;
+const STUDIO_INDEX_PATH = "/api/studios?limit=500&sort=localCount";
+const STUDIO_SERIES_QUICK_LIMIT = 6;
 
 export function createStudioPage(deps) {
   const { api, appendLoadedWorkPage, appendEmpty, els, formatNumber, getWorkFilterMode, hidePersonProfile, onNavigationStarted, onWorkRead = () => null, renderStatsForWorks, renderWorks, resetWorkPaging, setMainHeader, state } = deps;
   const studioRequests = createLatestRequestGate();
+  const studioIndexRequests = createLatestRequestGate();
   const studioPrefetches = createPrefetchCache({ limit: STUDIO_PREFETCH_LIMIT, ttlMs: STUDIO_PREFETCH_TTL_MS });
   let studioIndexRenderTimer = null;
   let studioIndexRenderSeq = 0;
   let studioIndexQuery = "";
   let studioIndexSort = "count";
   let studioIndexSummary = null;
+  let studioIndexTotal = 0;
+  let studioIndexSearchTimer = null;
+  let studioIndexSearch = null;
   let studioPageOwner = null;
+  let seriesPicker = null;
   bindStudioIntentSurface(els.workGrid, ".studio-card", (studioId) => {
     globalThis.scrollTo?.({ top: 0, left: 0, behavior: "auto" });
     loadStudioDetail(studioId);
@@ -29,11 +38,13 @@ export function createStudioPage(deps) {
   });
 
   function cancelPendingRequests() {
+    seriesPicker?.close();
     studioRequests.cancel();
     studioPageOwner = null;
     state.studioWorksLoadingMore = false;
     studioPrefetches.clear();
     cancelIndexRendering();
+    retireStudioIndex();
   }
 
   function invalidatePrefetches() {
@@ -48,19 +59,22 @@ export function createStudioPage(deps) {
   }
 
   async function loadStudios(options = {}) {
+    seriesPicker?.close();
     onNavigationStarted?.(options);
     studioPageOwner = null;
     state.studioWorksLoadingMore = false;
     state.studioWorksRawLoaded = null;
     state.studioWorksHasMore = null;
     cancelIndexRendering();
+    retireStudioIndex();
     const request = studioRequests.begin();
     els.workGrid.innerHTML = `<div class="empty-state">正在加载片商</div>`;
     try {
-      const data = await api("/api/studios?limit=500", { signal: request.signal });
+      const data = await api(STUDIO_INDEX_PATH, { signal: request.signal });
       if (!request.isCurrent() || state.activeView !== "studios") return;
       resetSelection();
       state.studios = data.makers || [];
+      studioIndexTotal = data.total ?? state.studios.length;
       setMainHeader("片商", "按片商浏览本地作品");
       renderIndex();
     } catch (error) {
@@ -75,11 +89,13 @@ export function createStudioPage(deps) {
 
   async function loadStudioDetail(studioId, seriesId = "all", options = {}) {
     if (!options.append) {
+      seriesPicker?.close();
       onNavigationStarted?.(options);
       studioPageOwner = null;
       state.studioWorksLoadingMore = false;
       state.studioWorksRawLoaded = null;
       state.studioWorksHasMore = null;
+      retireStudioIndex();
     }
     cancelIndexRendering();
     const append = Boolean(options.append);
@@ -104,10 +120,12 @@ export function createStudioPage(deps) {
       state.studioWorksTraitFacets = data.traitFacets || (append ? state.studioWorksTraitFacets : null) || null;
       if (!append) resetWorkPaging();
       const studio = state.selectedStudio;
-      const selectedSeries = (studio?.series || []).find((item) => item.id === state.selectedStudioSeriesId);
+      const selectedSeries = (studio?.series || []).find((item) => String(item.id) === String(state.selectedStudioSeriesId));
       setMainHeader(studio?.name || "片商", selectedSeries ? `${selectedSeries.name} · ${formatNumber(state.studioWorksTotal)} 部` : `${formatNumber(state.studioWorksTotal)} 部本地作品`);
+      const restoreSeriesFocus = options.focusOwner && document.activeElement === options.focusOwner;
       renderStatsForWorks(state.works);
-      renderSeriesControls(studio);
+      const seriesControls = renderSeriesControls(studio);
+      if (restoreSeriesFocus) seriesControls?.querySelector(".studio-series-chip.active")?.focus({ preventScroll: true });
       if (append) appendLoadedWorkPage();
       else renderWorks("这个片商暂无本地作品。");
     } catch (error) {
@@ -218,53 +236,120 @@ export function createStudioPage(deps) {
     searchCaption.textContent = "搜索片商";
     const search = document.createElement("input");
     search.type = "search";
+    search.autocomplete = "off";
+    search.maxLength = 120;
     search.placeholder = "输入片商名称";
     search.value = studioIndexQuery;
-    search.setAttribute("aria-label", "搜索已加载的片商");
-    search.addEventListener("input", () => {
+    search.setAttribute("aria-label", "搜索片商");
+    const summary = document.createElement("span");
+    const current = () => studioIndexSummary === summary && controls.isConnected;
+    let composing = false;
+    const submit = (delay) => {
+      if (!current()) return;
       studioIndexQuery = search.value;
-      renderIndexMatches();
+      searchStudioIndex(delay);
+    };
+    search.addEventListener("compositionstart", () => { composing = true; if (current()) cancelIndexSearch(); });
+    search.addEventListener("compositionend", () => { composing = false; submit(); });
+    search.addEventListener("input", (event) => { if (!composing && !event.isComposing) submit(); });
+    search.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || composing || event.isComposing) return;
+      event.preventDefault();
+      submit(0);
     });
     searchLabel.append(searchCaption, search);
     const sortLabel = document.createElement("label");
     sortLabel.className = "studio-index-sort";
-    sortLabel.textContent = "排序";
+    sortLabel.textContent = "结果排序";
     const sort = document.createElement("select");
     sort.setAttribute("aria-label", "片商排序");
     sort.append(new Option("馆藏数量", "count"), new Option("名称", "name"));
     sort.value = studioIndexSort;
     sort.addEventListener("change", () => {
+      if (!current()) return;
       studioIndexSort = sort.value === "name" ? "name" : "count";
       renderIndexMatches();
     });
     sortLabel.append(sort);
-    studioIndexSummary = document.createElement("span");
-    studioIndexSummary.className = "studio-index-summary";
-    studioIndexSummary.setAttribute("role", "status");
-    controls.append(searchLabel, sortLabel, studioIndexSummary);
+    summary.className = "studio-index-summary";
+    summary.setAttribute("role", "status");
+    studioIndexSummary = summary;
+    controls.append(searchLabel, sortLabel, summary);
     els.statsRow.append(controls);
+    searchStudioIndex(0);
+  }
+
+  function cancelIndexSearch() {
+    globalThis.clearTimeout(studioIndexSearchTimer);
+    studioIndexSearchTimer = null;
+    studioIndexRequests.cancel();
+    studioIndexSearch = null;
+  }
+
+  function retireStudioIndex() {
+    studioIndexSummary?.parentElement?.remove();
+    studioIndexSummary = null;
+    cancelIndexSearch();
+  }
+
+  function searchStudioIndex(delay = STUDIO_INDEX_SEARCH_DELAY_MS) {
+    cancelIndexSearch();
     renderIndexMatches();
+    const query = studioIndexQuery.trim();
+    if (!query) return;
+    const request = studioIndexRequests.begin();
+    studioIndexSearchTimer = globalThis.setTimeout(async () => {
+      studioIndexSearchTimer = null;
+      try {
+        const data = await api(`${STUDIO_INDEX_PATH}&${new URLSearchParams({ q: query })}`, { signal: request.signal });
+        if (request.isCurrent()) studioIndexSearch = { data };
+      } catch {
+        if (request.isCurrent()) studioIndexSearch = { failed: true };
+      } finally {
+        if (request.isCurrent()) renderIndexMatches();
+        request.finish();
+      }
+    }, delay);
   }
 
   function renderIndexMatches() {
     cancelIndexRendering();
+    const focusId = els.workGrid.contains(document.activeElement) ? document.activeElement?.dataset.studioId : null;
     els.workGrid.innerHTML = "";
     const query = studioIndexQuery.trim().toLocaleLowerCase();
-    const studios = state.studios.filter((studio) => String(studio.name || "").toLocaleLowerCase().includes(query));
+    const searched = studioIndexSearch?.data;
+    const studios = searched ? [...(searched.makers || [])]
+      : state.studios.filter((studio) => String(studio.name || "").toLocaleLowerCase().includes(query));
     studios.sort((a, b) => {
       const name = String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans", { numeric: true, sensitivity: "base" });
       return studioIndexSort === "name" ? name : localStudioCount(b) - localStudioCount(a) || name;
     });
-    if (studioIndexSummary) studioIndexSummary.textContent = `${formatNumber(studios.length)} / ${formatNumber(state.studios.length)} 家片商`;
-    if (!state.studios.length) {
+    const total = searched ? searched.total ?? studios.length : studioIndexTotal;
+    if (studioIndexSummary) {
+      studioIndexSummary.textContent = !query || searched ? `${formatNumber(studios.length)} / ${formatNumber(total)} 家片商`
+        : studioIndexSearch?.failed ? "全库搜索失败，显示已加载片商中的匹配。" : "正在搜索全部片商…";
+      if (query && studioIndexSearch?.failed) {
+        const summary = studioIndexSummary;
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "stat-filter-chip";
+        retry.textContent = "重试";
+        retry.addEventListener("click", () => {
+          if (summary !== studioIndexSummary || !summary.isConnected) return;
+          els.statsRow.querySelector(".studio-index-search input")?.focus();
+          searchStudioIndex(0);
+        });
+        studioIndexSummary.append(" ", retry);
+      }
+    }
+    if (!query && !state.studios.length) {
       appendEmpty("还没有片商数据。");
-      return;
+    } else if (studios.length) appendIndexBatch(studios, 0, studioIndexRenderSeq);
+    else if (searched) appendEmpty("没有匹配的片商，试试其他名称。");
+    if (focusId) {
+      const card = els.workGrid.querySelector(`.studio-card[data-studio-id="${CSS.escape(focusId)}"]`);
+      (card || els.statsRow.querySelector(".studio-index-search input"))?.focus({ preventScroll: true });
     }
-    if (!studios.length) {
-      appendEmpty("没有匹配的片商，试试其他名称。");
-      return;
-    }
-    appendIndexBatch(studios, 0, studioIndexRenderSeq);
   }
 
   function appendIndexBatch(studios, start, renderSeq) {
@@ -336,7 +421,11 @@ export function createStudioPage(deps) {
 
   function renderSeriesControls(studio) {
     if (state.activeView !== "studios" || !studio) return;
-    const series = (studio.series || []).filter((item) => Number(item.localWorkCount || 0) > 0);
+    const series = (studio.series || []).filter((item) => Number(item.localWorkCount || 0) > 0).sort(compareSeriesByLocalCount);
+    const selectedId = String(state.selectedStudioSeriesId);
+    const quick = series.slice(0, STUDIO_SERIES_QUICK_LIMIT);
+    const selected = series.find(({ id }) => String(id) === selectedId);
+    if (selected && !quick.includes(selected)) quick.push(selected);
     const wrap = document.createElement("div");
     wrap.className = "stat-quick-filters studio-series-controls";
     const group = document.createElement("div");
@@ -345,15 +434,38 @@ export function createStudioPage(deps) {
     heading.className = "stat-filter-label";
     heading.textContent = "系列";
     group.append(heading, createSeriesButton(studio, "all", "全部", studio.localWorkCount || 0));
-    for (const item of series) group.append(createSeriesButton(studio, item.id, item.name, item.localWorkCount || 0));
+    for (const item of quick) group.append(createSeriesButton(studio, item.id, item.name, item.localWorkCount));
+    if (series.length > 1) {
+      const launch = document.createElement("button");
+      launch.type = "button";
+      launch.className = "stat-filter-chip studio-series-launch";
+      launch.textContent = `查找系列 · ${formatNumber(series.length)}`;
+      launch.setAttribute("aria-haspopup", "dialog");
+      launch.addEventListener("click", () => {
+        if (!launch.isConnected || state.activeView !== "studios" || String(state.selectedStudio?.id) !== String(studio.id)) return;
+        seriesPicker ??= createStudioSeriesPicker({
+          formatNumber,
+          selectSeries(studioId, seriesId, focusOwner) {
+            if (state.activeView !== "studios" || String(state.selectedStudio?.id) !== studioId
+              || String(state.selectedStudioSeriesId) === seriesId) return;
+            void loadStudioDetail(studioId, seriesId, { focusOwner });
+          }
+        });
+        seriesPicker.open(studio, series, selectedId, launch);
+      });
+      group.append(launch);
+    }
     wrap.append(group);
     els.statsRow.append(wrap);
+    return wrap;
   }
 
   function createSeriesButton(studio, seriesId, name, count) {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = `stat-filter-chip studio-series-chip${state.selectedStudioSeriesId === seriesId ? " active" : ""}`;
+    const selected = String(state.selectedStudioSeriesId) === String(seriesId);
+    button.className = `stat-filter-chip studio-series-chip${selected ? " active" : ""}`;
+    button.setAttribute("aria-pressed", String(selected));
     button.textContent = `${name} ${formatNumber(count)}`;
     button.dataset.studioId = studio.id;
     button.dataset.seriesId = seriesId;

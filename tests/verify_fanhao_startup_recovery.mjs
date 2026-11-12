@@ -251,7 +251,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   if (!negativeOnly) await runStartupRecovery({ casePattern: caseOption?.slice(7) || "" });
   if (!caseOption) {
     for (const negative of [
-      { name: "cold FanHao core download overlap", file: "index.html", url: "/fanhao", marker: 'preloadEntryModule("/app.js?v=20261106-card-cover-01");', replacement: "", pattern: "FanHao cold entry overlaps", failure: /both FanHao scripts must begin downloading during style delivery/ },
+      { name: "cold FanHao core download overlap", file: "index.html", url: "/fanhao", marker: /preloadEntryModule\("\/app\.js\?v=[^"\s]+"\);/g, replacement: "", pattern: "FanHao cold entry overlaps", failure: /both FanHao scripts must begin downloading during style delivery/ },
       { name: "scoped cold western read", file: "app.js", marker: 'if (next.view !== "people" && next.view !== "search") {', replacement: 'if (next.view !== "search") {', pattern: "western cold entry", failure: /western cold entry must read only its requested library scope/ },
       { name: "initial recovery action", file: "app.js", marker: "if (isCurrent()) renderLibraryReadError(next, error, navigationIntent);", replacement: "if (isCurrent()) renderEmpty(error.message);", pattern: "/fanhao startup failure retries", failure: /a failed initial library read must provide a reachable retry action/ },
       { name: "history after initial failure", file: "app.js", marker: "initializeRouteHistory({ preserveUrl: !applied });", replacement: "if (applied) initializeRouteHistory();", pattern: "failed startup keeps", failure: /navigation after a failed startup must update the URL/ },

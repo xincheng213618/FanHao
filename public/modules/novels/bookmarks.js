@@ -1,6 +1,48 @@
 import { captureWebAccount } from "../../platform/accounts/session-context.js";
 
 const NOVEL_BOOKMARK_LIMIT = 50;
+const BOOKMARK_PREFIX = "fanhao.novel.bookmarks.v1:";
+
+export function localBookmarkBooks(account, sourceRealm) {
+  const prefix = `${BOOKMARK_PREFIX}${JSON.stringify([account.owner || "guest", sourceRealm]).slice(0, -1)},`;
+  const books = [];
+  let unreadable = false;
+  for (let index = 0; index < localStorage.length; index++) {
+    const key = localStorage.key(index);
+    if (!key?.startsWith(prefix)) continue;
+    try {
+      const fields = JSON.parse(key.slice(BOOKMARK_PREFIX.length));
+      const id = fields[2];
+      if (fields.length !== 3 || typeof id !== "string" || !id || id.length > 200) continue;
+      const items = readStoredBookmarks(key);
+      if (items.length) books.push({ id, key, items });
+    } catch { unreadable = true; }
+  }
+  return { books, unreadable };
+}
+
+export function readStoredBookmarks(key) {
+  const raw = localStorage.getItem(key);
+  if (!raw) return [];
+  const data = JSON.parse(raw);
+  if (data.version !== 1 || !Array.isArray(data.items)) throw new Error("无法读取本机书签，请检查浏览器存储后重试。");
+  const items = [], seen = new Set();
+  for (const item of data.items) {
+    if (!item || typeof item.id !== "string" || !item.id.trim() || item.id.length > 80 || seen.has(item.id)
+      || typeof item.chapterId !== "string" || !item.chapterId || item.chapterId.length > 200
+      || typeof item.catalogRevision !== "string" || !item.catalogRevision || item.catalogRevision.length > 200
+      || !Number.isSafeInteger(item.chapterIndex) || item.chapterIndex <= 0 || !Number.isFinite(item.ratio) || item.ratio < 0 || item.ratio > 1
+      || typeof item.title !== "string") continue;
+    seen.add(item.id);
+    items.push({ id: item.id, chapterId: item.chapterId, catalogRevision: item.catalogRevision, chapterIndex: item.chapterIndex, title: item.title.slice(0, 160), ratio: item.ratio });
+    if (items.length >= NOVEL_BOOKMARK_LIMIT) break;
+  }
+  return items;
+}
+
+export function writeStoredBookmarks(key, items) {
+  localStorage.setItem(key, JSON.stringify({ version: 1, items }));
+}
 
 export function createNovelBookmarksPanel({ book, chapter, isCurrent, getRatio, openBookmark }) {
   const panel = document.createElement("section");
@@ -32,32 +74,15 @@ export function createNovelBookmarksPanel({ book, chapter, isCurrent, getRatio, 
     if (save) save.disabled = true;
     return panel;
   }
-  const key = `fanhao.novel.bookmarks.v1:${JSON.stringify([account.owner || "guest", book.sourceRealm, String(book.id)])}`;
+  const key = `${BOOKMARK_PREFIX}${JSON.stringify([account.owner || "guest", book.sourceRealm, String(book.id)])}`;
   const current = () => {
     try {
       const latest = captureWebAccount();
       return panel.isConnected && isCurrent() && latest.owner === account.owner && latest.revision === account.revision;
     } catch { return false; }
   };
-  const read = () => {
-    const raw = localStorage.getItem(key);
-    if (!raw) return [];
-    const data = JSON.parse(raw);
-    if (data.version !== 1 || !Array.isArray(data.items)) throw new Error("无法读取本机书签，请检查浏览器存储后重试。");
-    const items = [], seen = new Set();
-    for (const item of data.items) {
-      if (!item || typeof item.id !== "string" || !item.id.trim() || item.id.length > 80 || seen.has(item.id)
-        || typeof item.chapterId !== "string" || !item.chapterId || item.chapterId.length > 200
-        || typeof item.catalogRevision !== "string" || !item.catalogRevision || item.catalogRevision.length > 200
-        || !Number.isSafeInteger(item.chapterIndex) || item.chapterIndex <= 0 || !Number.isFinite(item.ratio) || item.ratio < 0 || item.ratio > 1
-        || typeof item.title !== "string") continue;
-      seen.add(item.id);
-      items.push({ id: item.id, chapterId: item.chapterId, catalogRevision: item.catalogRevision, chapterIndex: item.chapterIndex, title: item.title.slice(0, 160), ratio: item.ratio });
-      if (items.length >= NOVEL_BOOKMARK_LIMIT) break;
-    }
-    return items;
-  };
-  const write = items => localStorage.setItem(key, JSON.stringify({ version: 1, items }));
+  const read = () => readStoredBookmarks(key);
+  const write = items => writeStoredBookmarks(key, items);
   const fail = () => { message.textContent = "无法保存或读取本机书签，请检查浏览器存储空间与权限后重试。"; };
   const render = items => {
     summary.textContent = `本机书签（${items.length}）`;

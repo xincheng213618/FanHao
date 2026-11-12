@@ -10,7 +10,7 @@ import { build } from "esbuild";
 import { chromium } from "playwright-core";
 
 // Actual index, entry, API client, page composition, cards and complete CSS.
-// Only the three complete owners vary. Instrumentation counts their actual
+// The entry and its three complete owners vary. Instrumentation counts their actual
 // renderer/createElement calls; it never assigns image src or loaded classes.
 const args = process.argv.slice(2);
 assert(args.every(value => value === "--legacy-author-rendering"), "known arguments");
@@ -19,13 +19,14 @@ const project = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const publicRoot = path.join(project, "public");
 const commit = "63c5fab243233e142cfd62c4eaf13812feb92405";
 const hashes = {
+  "short-video-app.js": "61c0cc0e639fe47ee026dc009206ea7f2ff06347cb402ee01b837d1cfb791bcb",
   "author-pages.js": "dc9ec9acb1a42818f66f2371e90b0e55e9590e2bf9810560e16faad9d51b0c79",
   "short-video-page.js": "3197e10d5ea766087cc5ef0f34dace8a815549728e113a88e8048c678643740f",
   "list-cards.js": "ff14b18a8b4648f3f6347ed534d8eb65461b6875cef4dad7dc1ab1c0cc2e9ec3"
 };
 const before = {}, current = {};
 for (const [name, hash] of Object.entries(hashes)) {
-  const relative = `public/modules/short-videos/${name}`;
+  const relative = name === "short-video-app.js" ? `public/${name}` : `public/modules/short-videos/${name}`;
   before[name] = execFileSync("git", ["show", `${commit}:${relative}`], { cwd: project, encoding: "utf8" }).replace(/\r\n/g, "\n");
   assert.equal(crypto.createHash("sha256").update(before[name]).digest("hex"), hash, `fixed complete old ${name}`);
   current[name] = fs.readFileSync(path.join(project, relative), "utf8").replace(/\r\n/g, "\n");

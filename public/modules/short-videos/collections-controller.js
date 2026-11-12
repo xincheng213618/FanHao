@@ -45,11 +45,13 @@ export function createShortVideoCollectionsController(dependencies) {
   let collectionFeedReturnWindow = null;
   let collectionsReadController = null;
   let collectionVideoRequest = null;
+  let dismissPicker = null;
   const collectionApi = (path, options = {}) => options.method && options.method.toUpperCase() !== "GET"
     ? retryShortVideoCollectionRequest(() => api(path, options))
     : runShortVideoRead(signal => retryShortVideoCollectionRequest(() => api(path, { ...options, signal }), { signal }), { signal: options.signal });
 
   function cancelReads() {
+    dismissPicker?.({ restoreFocus: false });
     collectionRequestId += 1;
     collectionVideoRequestId += 1;
     collectionPageRequest?.controller.abort();
@@ -276,19 +278,22 @@ export function createShortVideoCollectionsController(dependencies) {
     dialog.setAttribute("aria-modal", "true");
     dialog.setAttribute("aria-label", video ? "加入清单" : "新建清单");
     dialog.tabIndex = -1;
-    const closePicker = () => {
+    const closePicker = ({ restoreFocus = true } = {}) => {
+      if (dismissPicker === closePicker) dismissPicker = null;
       if (!overlay.isConnected) return;
       overlay.remove();
-      if (!ownsView(owner)) return;
+      if (!restoreFocus || !ownsView(owner)) return;
       const fallback = document.querySelector(".short-video-rail-button.is-collection")
         || document.querySelector(".short-video-collection-create");
       (returnFocus?.isConnected ? returnFocus : fallback)?.focus?.({ preventScroll: true });
     };
     overlay._closeCollectionPicker = closePicker;
+    dismissPicker = closePicker;
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) closePicker();
     });
     overlay.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.keyCode === 229 || composing) return;
       if (event.key === "Escape") {
         event.preventDefault();
         closePicker();
@@ -296,7 +301,7 @@ export function createShortVideoCollectionsController(dependencies) {
       }
       if (event.key !== "Tab") return;
       const focusable = [...dialog.querySelectorAll("button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex='-1'])")]
-        .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+        .filter((element) => !element.closest("[hidden], [aria-hidden='true']"));
       if (!focusable.length) {
         event.preventDefault();
         dialog.focus({ preventScroll: true });
@@ -334,95 +339,252 @@ export function createShortVideoCollectionsController(dependencies) {
     submit.type = "submit";
     submit.textContent = video ? "创建并加入" : "创建";
     form.append(input, submit);
+
+    const showChoices = Boolean(video && !options.createOnly);
+    const controls = document.createElement("div");
+    controls.className = "short-video-collection-picker-tools";
+    controls.hidden = true;
+    const filter = document.createElement("input");
+    filter.type = "search";
+    filter.autocomplete = "off";
+    filter.maxLength = 40;
+    filter.placeholder = "搜索清单名称";
+    filter.setAttribute("aria-label", "搜索清单名称");
+    const toggleMultiple = document.createElement("button");
+    toggleMultiple.type = "button";
+    toggleMultiple.textContent = "多选";
+    toggleMultiple.setAttribute("aria-pressed", "false");
+    const addSelected = document.createElement("button");
+    addSelected.type = "button";
+    addSelected.className = "short-video-collection-picker-apply";
+    addSelected.hidden = true;
+    controls.append(filter, toggleMultiple, addSelected);
+
     const status = document.createElement("div");
     status.className = "short-video-collection-picker-status";
     status.setAttribute("role", "status");
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "short-video-collection-picker-retry";
+    retry.textContent = "重试读取清单";
+    retry.hidden = true;
+    const empty = document.createElement("p");
+    empty.className = "short-video-collection-picker-status";
+    empty.setAttribute("role", "status");
+    empty.hidden = true;
     const list = document.createElement("div");
     list.className = "short-video-collection-picker-list";
-    if (!options.createOnly) dialog.append(header, form, status, list);
+    list.setAttribute("aria-label", "清单选项");
+    list.hidden = true;
+    if (showChoices) dialog.append(header, controls, status, retry, empty, list, form);
     else dialog.append(header, form, status);
+    let composing = false;
+    let query = "";
+    let multiple = false;
+    let writing = false;
+    let reading = false;
+    let createdCollection = null;
+    const selected = new Set();
+    const completed = new Set();
+    const rows = new Map();
     overlay.append(dialog);
     document.body.append(overlay);
     const ownsPicker = () => ownsView(owner) && overlay.isConnected;
 
-    const busy = (enabled) => {
-      input.disabled = enabled;
-      submit.disabled = enabled;
-      dialog.setAttribute("aria-busy", String(enabled));
-    };
-    const addToCollection = async (collection) => {
-      if (!video?.id) return;
-      const result = await collectionApi(`/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, {
-        method: "PUT"
-      });
-      invalidateCollection(collection.id);
-      if (result.added) collection.itemCount = Math.max(0, Number(collection.itemCount || 0)) + 1;
-      syncCollectionSummary(collection);
-      if (ownsPicker()) showToast(result.added ? `已加入“${collection.name}”` : `已经在“${collection.name}”中`);
-    };
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      if (!ownsPicker() || dialog.getAttribute("aria-busy") === "true") return;
-      busy(true);
+    function syncChoices() {
+      controls.hidden = rows.size === 0;
+      filter.disabled = writing;
+      toggleMultiple.disabled = writing || rows.size < 2;
+      toggleMultiple.setAttribute("aria-pressed", String(multiple));
+      addSelected.hidden = !multiple;
+      addSelected.disabled = writing || selected.size === 0;
+      addSelected.textContent = selected.size ? `加入 ${selected.size} 个清单` : "加入所选清单";
+      let visible = 0;
+      for (const [id, row] of rows) {
+        row.button.hidden = !row.searchName.includes(query);
+        if (!row.button.hidden) visible += 1;
+        row.button.disabled = writing || completed.has(id);
+        if (multiple) row.button.setAttribute("aria-pressed", String(selected.has(id)));
+        else row.button.removeAttribute("aria-pressed");
+        row.count.textContent = completed.has(id) ? "已在清单" : `${Math.max(0, Number(row.collection.itemCount || 0))} 条`;
+      }
+      empty.hidden = Boolean(visible || !rows.size);
+      empty.textContent = empty.hidden ? "" : "没有匹配的清单";
+      list.hidden = !visible;
+    }
+
+    function updateFilter() {
+      if (composing || writing || !ownsPicker()) return;
+      query = normalizeCollectionPickerName(filter.value);
+      syncChoices();
+      list.scrollTop = 0;
+    }
+
+    async function write(run, failureMessage, failureFocus) {
+      if (!ownsPicker() || writing) return;
+      writing = true;
+      input.disabled = submit.disabled = retry.disabled = true;
+      dialog.setAttribute("aria-busy", "true");
       status.textContent = "";
+      syncChoices();
+      let failed = false;
       try {
-        const result = await collectionApi("/api/short-videos/collections", {
-          method: "POST",
-          body: { name: input.value }
-        });
-        const collection = result.collection;
-        collectionsRevision += 1;
-        syncCollectionSummary(collection);
-        state.shortVideo.collectionsLoaded = true;
-        if (video) await addToCollection(collection);
-        if (!ownsPicker()) return;
-        closePicker();
-        render();
-        if (!video) openCollection(collection.id).catch((error) => showToast(error?.message || "清单读取失败"));
+        await run();
       } catch (error) {
         if (!ownsPicker()) return;
-        status.textContent = error?.message || "清单创建失败";
-        busy(false);
-        input.focus();
+        failed = true;
+        status.textContent = error?.message || failureMessage;
+      } finally {
+        if (ownsPicker()) {
+          writing = false;
+          input.disabled = Boolean(createdCollection);
+          submit.disabled = retry.disabled = false;
+          dialog.removeAttribute("aria-busy");
+          syncChoices();
+          if (failed) failureFocus().focus({ preventScroll: true });
+        }
       }
-    });
+    }
 
-    if (video && !options.createOnly) {
+    async function addToCollection(collection) {
+      const result = await collectionApi(`/api/short-videos/collections/${encodeURIComponent(collection.id)}/videos/${encodeURIComponent(video.id)}`, { method: "PUT" });
+      invalidateCollection(collection.id);
+      const latest = state.shortVideo.collections.find(item => item.id === collection.id) || collection;
+      syncCollectionSummary({ ...latest, itemCount: Math.max(0, Number(latest.itemCount || 0)) + Number(Boolean(result.added)) });
+      return Boolean(result.added);
+    }
+
+    function finishPicker(message) {
+      if (!ownsPicker()) return false;
+      closePicker();
+      render();
+      if (message) showToast(message);
+      return true;
+    }
+
+    function mountChoice(collection) {
+      const id = collection?.id;
+      if (!id || rows.has(id)) return;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "short-video-collection-picker-item";
+      button.dataset.collectionId = id;
+      const name = document.createElement("span"), count = document.createElement("small");
+      name.textContent = collection.name;
+      button.append(name, count);
+      rows.set(id, { collection, button, count, searchName: normalizeCollectionPickerName(collection.name) });
+      button.addEventListener("click", () => {
+        if (!ownsPicker() || writing || button.hidden || button.disabled) return;
+        if (multiple) {
+          if (selected.has(id)) selected.delete(id);
+          else selected.add(id);
+          syncChoices();
+          return;
+        }
+        void write(async () => {
+          const added = await addToCollection(collection);
+          finishPicker(added ? `已加入“${collection.name}”` : `已经在“${collection.name}”中`);
+        }, "加入清单失败", () => button);
+      });
+      list.append(button);
+    }
+
+    async function readChoices() {
+      if (!ownsPicker() || reading || writing) return;
+      reading = true;
+      if (document.activeElement === retry) dialog.focus({ preventScroll: true });
+      retry.hidden = true;
       status.textContent = "正在读取清单…";
       try {
         const collections = await loadCollections();
         if (!ownsPicker()) return;
-        status.textContent = collections.length ? "选择一个清单" : "先快速创建一个清单";
-        for (const collection of collections) {
-          const button = document.createElement("button");
-          button.type = "button";
-          button.className = "short-video-collection-picker-item";
-          button.dataset.collectionId = collection.id;
-          button.innerHTML = `<span></span><small></small>`;
-          button.querySelector("span").textContent = collection.name;
-          button.querySelector("small").textContent = `${Math.max(0, Number(collection.itemCount || 0))} 条`;
-          button.addEventListener("click", async () => {
-            if (!ownsPicker() || !button.isConnected) return;
-            button.disabled = true;
-            try {
-              await addToCollection(collection);
-              if (!ownsPicker()) return;
-              closePicker();
-              render();
-            } catch (error) {
-              if (!ownsPicker() || !button.isConnected) return;
-              status.textContent = error?.message || "加入清单失败";
-              button.disabled = false;
-            }
-          });
-          list.append(button);
+        for (const collection of collections) mountChoice(collection);
+        syncChoices();
+        if (!writing) {
+          status.textContent = rows.size ? "" : "先创建一个清单";
+          if (document.activeElement === dialog || document.activeElement === document.body) {
+            (rows.size ? filter : input).focus({ preventScroll: true });
+          }
         }
       } catch (error) {
         if (!ownsPicker()) return;
-        status.textContent = error?.message || "清单读取失败";
+        if (!writing) status.textContent = error?.message || "清单读取失败";
+        retry.hidden = false;
+      } finally {
+        reading = false;
       }
     }
-    if (ownsPicker()) input.focus({ preventScroll: true });
+
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void write(async () => {
+        if (!createdCollection) {
+          const result = await collectionApi("/api/short-videos/collections", { method: "POST", body: { name: input.value } });
+          createdCollection = result.collection;
+          if (!createdCollection?.id) throw new Error("清单创建失败");
+          collectionsRevision += 1;
+          syncCollectionSummary(createdCollection);
+          state.shortVideo.collectionsLoaded = true;
+        }
+        if (!ownsPicker()) return;
+        if (!video) {
+          if (finishPicker()) openCollection(createdCollection.id).catch((error) => showToast(error?.message || "清单读取失败"));
+          return;
+        }
+        mountChoice(createdCollection);
+        submit.textContent = "重试加入";
+        const added = await addToCollection(createdCollection);
+        finishPicker(added ? `已加入“${createdCollection.name}”` : `已经在“${createdCollection.name}”中`);
+      }, createdCollection ? "加入清单失败" : "清单创建失败", () => createdCollection ? submit : input);
+    });
+
+    filter.addEventListener("compositionstart", () => { composing = true; });
+    filter.addEventListener("compositionend", () => { composing = false; updateFilter(); });
+    filter.addEventListener("input", (event) => { if (!event.isComposing) updateFilter(); });
+    filter.addEventListener("search", updateFilter);
+    filter.addEventListener("keydown", (event) => {
+      if (composing || event.isComposing || event.keyCode === 229 || (event.key !== "ArrowDown" && event.key !== "Enter")) return;
+      event.preventDefault();
+      list.querySelector("button:not([hidden]):not([disabled])")?.focus();
+    });
+    toggleMultiple.addEventListener("click", () => {
+      if (!ownsPicker() || writing) return;
+      multiple = !multiple;
+      if (!multiple) selected.clear();
+      status.textContent = "";
+      syncChoices();
+    });
+    addSelected.addEventListener("click", () => {
+      if (!multiple || !selected.size) return;
+      void write(async () => {
+        const destinations = [...rows].filter(([id]) => selected.has(id));
+        let failure = null;
+        for (const [id, row] of destinations) {
+          if (!ownsPicker()) return;
+          try {
+            await addToCollection(row.collection);
+            completed.add(id);
+            selected.delete(id);
+          } catch (error) {
+            failure ||= error;
+          }
+        }
+        if (!ownsPicker()) return;
+        if (failure) {
+          const reason = failure.message || "可重试所选清单。";
+          throw new Error(`已确认 ${completed.size} 个清单，${selected.size} 个未完成。 ${reason}`);
+        }
+        finishPicker(`已确认在 ${completed.size} 个清单中`);
+      }, "加入清单失败", () => addSelected);
+    });
+    retry.addEventListener("click", () => { void readChoices(); });
+
+    if (showChoices) {
+      dialog.focus({ preventScroll: true });
+      await readChoices();
+    } else {
+      input.focus({ preventScroll: true });
+    }
   }
 
   function renderCollectionPage() {
@@ -998,6 +1160,10 @@ export function createShortVideoCollectionsController(dependencies) {
     returnToFeed,
     showPicker
   });
+}
+
+function normalizeCollectionPickerName(value) {
+  return String(value || "").normalize("NFKC").trim().toLowerCase();
 }
 
 function mergeUniqueVideos(previous = [], incoming = []) {

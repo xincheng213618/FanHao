@@ -10,7 +10,7 @@ const source = fs.readFileSync(new URL("../public/modules/photos/manga-page.js",
 for (const negative of [
   {
     name: "reader navigation refresh",
-    marker: "if (state.manga.chapter) refreshReaderChapterNavigation();",
+    marker: "if (state.manga.chapter) syncChapterReadFeedback();",
     replacement: "if (state.manga.chapter) return;",
     failure: /completed downloads must make the next chapter reachable without leaving the current reader/
   },

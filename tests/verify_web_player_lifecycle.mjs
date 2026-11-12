@@ -167,6 +167,35 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
     return page;
   }
   const sourceIs = (page, id) => page.waitForFunction(id => document.querySelector("#playerVideo").src.endsWith(`/synthetic/${id}`), id);
+  async function installEpisodeCatalog(page, fixture) {
+    await page.route(/\/api\/gallery-media\/episode-\d+$/, route => {
+      const id = new URL(route.request().url()).pathname.split("/").at(-1);
+      const item = fixture.episodes.find(entry => entry.id === id);
+      return route.fulfill({ json: { item: { ...item, category: "Synthetic region", seriesName: "Synthetic series", playable: true } } });
+    });
+    await page.route(/\/api\/playinfo\/episode-\d+\?source=gallery$/, route => {
+      const id = new URL(route.request().url()).pathname.split("/").at(-1);
+      return route.fulfill({ json: info(id) });
+    });
+    await page.route(/\/api\/image-library\/items\?/, async route => {
+      const params = new URL(route.request().url()).searchParams;
+      const offset = Number(params.get("offset")), limit = Number(params.get("limit"));
+      const query = params.get("q") || "";
+      const call = { offset, limit, query, mode: params.get("mode"), kind: params.get("kind"), category: params.get("category"), seriesKey: params.get("seriesKey"), sort: params.get("sort") };
+      fixture.calls.push(call);
+      const matching = query ? fixture.episodes.filter(item => item.title.toLowerCase().includes(query.toLowerCase())) : fixture.episodes;
+      const items = matching.slice(offset, offset + limit);
+      const revision = await fixture.revisionFor?.(call);
+      const data = { offset, query, total: matching.length, seriesKey: "series-fixture", listRevision: revision || "revision-one",
+        scannedAt: "fixture-snapshot", items };
+      return route.fulfill(await fixture.responseFor?.(call, data) || { json: data });
+    });
+  }
+  function episodeFixture(mediaKind) {
+    return { calls: [], episodes: Array.from({ length: 242 }, (_, index) => ({ id: `episode-${index + 1}`,
+      title: `Synthetic episode ${index + 1}`, mediaKind, seriesKey: "series-fixture",
+      progress: { videoId: `episode-${index + 1}`, position: 39, duration: 600 } })) };
+  }
   const choose = (page, id) => page.locator(".player-file-button").filter({ hasText: `Video ${id}` }).click();
   const tick = page => page.evaluate(() => new Promise(resolve => setTimeout(resolve, 20)));
   async function probeFileList(page) {
@@ -206,6 +235,49 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
     });
   }
   try {
+    if (realPlyr) await run("real Plyr details float over the video at desktop and mobile widths", async () => {
+      const page = await open();
+      try {
+        const stage = page.locator(".player-stage");
+        const sidebar = page.locator("#playerSidebar");
+        const toggle = page.locator("#toggleSidebarButton");
+        const video = page.locator("#playerVideo");
+        const subtitleButton = page.locator(".subtitle-controls > summary");
+        assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+        assert.equal(await sidebar.evaluate(node => node.offsetParent === node.closest(".player-stage")), true);
+        assert.equal(await stage.evaluate(node => node.clientWidth), 1264);
+        const videoBounds = await video.boundingBox();
+        await subtitleButton.click();
+        assert.equal(await subtitleButton.evaluate(node => node.parentElement.open), true);
+        await page.waitForFunction(() => document.getElementById("playerSidebar").inert);
+        await toggle.click();
+        assert.equal(await subtitleButton.evaluate(node => node.parentElement.open), false);
+        await page.locator("#playerFiles button").first().focus();
+        await page.keyboard.press("Escape");
+        assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+        assert.equal(await toggle.evaluate(node => node === document.activeElement), true);
+        assert.equal(await sidebar.evaluate(node => node.inert), true);
+        assert.deepEqual(await video.boundingBox(), videoBounds, "closing details must keep the video geometry");
+
+        await page.keyboard.press("f");
+        await page.waitForFunction(() => document.fullscreenElement?.matches(".player-stage"));
+        await page.keyboard.press("i");
+        await sidebar.waitFor({ state: "visible" });
+        assert.equal(await sidebar.evaluate(node => document.fullscreenElement.contains(node) && !node.inert), true);
+        await toggle.click();
+        await page.evaluate(() => document.exitFullscreen());
+
+        await page.setViewportSize({ width: 320, height: 390 });
+        await toggle.click();
+        await page.waitForFunction(() => {
+          const panel = document.getElementById("playerSidebar");
+          const bounds = panel.getBoundingClientRect();
+          return bounds.right <= innerWidth && bounds.bottom <= innerHeight && panel.scrollHeight > panel.clientHeight;
+        });
+        await page.locator("#playerShortcutsButton").click();
+        await page.getByRole("dialog", { name: "播放快捷键" }).waitFor({ state: "visible" });
+      } finally { await page.close(); }
+    });
     if (realPlyr) await run("real Plyr startup overlaps the host module download", async () => {
       const starts = { controls: [], module: [] };
       let controlsReleasedAt = 0;
@@ -233,6 +305,260 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
       } finally { await page.close(); }
     });
 
+    await run("episode picker jumps across pages at phone width and keeps playback until selection", async () => {
+      const fixture = episodeFixture("tv");
+      const returnTo = "/tv?seriesKey=series-fixture&category=Synthetic%20region";
+      const page = await open(true, `&mediaId=episode-240&episodePosition=240&returnTo=${encodeURIComponent(returnTo)}`, { waitForSource: false,
+        beforeNavigate: async page => { await page.setViewportSize({ width: 320, height: 720 }); await installEpisodeCatalog(page, fixture); }
+      });
+      const nav = page.getByRole("group", { name: "剧集切换" });
+      const trigger = nav.getByRole("button", { name: "选集", exact: true });
+      const dialog = page.getByRole("dialog", { name: "选集", exact: true });
+      const input = dialog.getByRole("searchbox");
+      try {
+        await sourceIs(page, "episode-240");
+        await page.waitForFunction(() => document.querySelector("[data-episode-status]")?.textContent === "第 240 / 242 集");
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        await page.waitForFunction(() => !document.querySelector("#playerVideo").paused);
+        assert.equal(fixture.calls.filter(call => call.limit === 30).length, 0, "the picker must load only on demand");
+        const historySize = await page.evaluate(() => history.length);
+        await trigger.click();
+        await dialog.getByRole("button", { name: /episode 240 正在播放/ }).waitFor();
+        const box = await dialog.boundingBox();
+        assert(box.x >= 0 && box.x + box.width <= 320);
+        assert.equal(await dialog.locator('[aria-current="true"]').count(), 1);
+        assert(await dialog.locator('[aria-current="true"]').evaluate(button => {
+          const row = button.getBoundingClientRect(), viewport = button.closest("ul").getBoundingClientRect();
+          return row.top >= viewport.top && row.bottom <= viewport.bottom;
+        }));
+        assert.equal(await dialog.getByRole("status").textContent(), "第 211–240 / 242 集");
+        await dialog.getByRole("button", { name: /episode 240 正在播放/ }).click();
+        assert.equal(await dialog.count(), 0);
+        assert(await trigger.evaluate(button => button === document.activeElement));
+        assert.equal(new URL(page.url()).searchParams.get("mediaId"), "episode-240");
+
+        await trigger.click();
+        await dialog.getByRole("button", { name: /episode 240 正在播放/ }).waitFor();
+        await dialog.getByRole("button", { name: "下一页" }).press("Enter");
+        await dialog.getByRole("button", { name: "241. Synthetic episode 241", exact: true }).waitFor();
+        await dialog.getByRole("button", { name: "上一页" }).press("Enter");
+        await dialog.getByRole("button", { name: /episode 240 正在播放/ }).waitFor();
+        await input.fill("第 ２４２ 集");
+        await input.press("Enter");
+        const target = dialog.getByRole("button", { name: "242. Synthetic episode 242", exact: true });
+        await target.waitFor();
+        await page.waitForFunction(() => document.activeElement?.textContent === "242. Synthetic episode 242");
+        assert.equal(await dialog.getByRole("status").textContent(), "第 241–242 / 242 集");
+        assert.equal(await dialog.getByRole("button", { name: "下一页" }).isDisabled(), true);
+        assert.deepEqual(fixture.calls.filter(call => call.limit === 30).map(call => [call.offset, call.query]),
+          [[210, ""], [210, ""], [240, ""], [210, ""], [240, ""]]);
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.paused), false);
+        await target.press("Enter");
+        await page.waitForURL(url => url.searchParams.get("mediaId") === "episode-242");
+        await sourceIs(page, "episode-242");
+        assert.equal(new URL(page.url()).searchParams.get("episodePosition"), "242");
+        assert.equal(new URL(page.url()).searchParams.get("returnTo"), returnTo);
+        assert.equal(await page.evaluate(() => history.length), historySize);
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.currentTime), 39);
+      } finally { await page.close(); }
+    });
+
+    await run("episode picker searches anime titles, rejects wrong responses and preserves the latest query", async () => {
+      const fixture = episodeFixture("anime");
+      fixture.episodes[4].title = "Obsolete Special";
+      fixture.episodes[204].title = "S02E17 The Ark";
+      for (let index = 40; index < 75; index++) fixture.episodes[index].title = `Bonus episode ${index + 1}`;
+      const pending = Promise.withResolvers(), release = Promise.withResolvers();
+      const pendingClose = Promise.withResolvers(), releaseClose = Promise.withResolvers();
+      fixture.revisionFor = async ({ query }) => {
+        if (query === "Obsolete") { pending.resolve(); await release.promise; }
+        if (query === "Close now") { pendingClose.resolve(); await releaseClose.promise; }
+      };
+      let freshCount = 0;
+      fixture.responseFor = (call, data) => call.query === "S02E17" && ++freshCount === 1 ? { json: { ...data, query: "ignored" } } : null;
+      const page = await open(true, "&mediaId=episode-10&episodePosition=10", { waitForSource: false,
+        beforeNavigate: async page => {
+          await installEpisodeCatalog(page, fixture);
+          await page.addInitScript(() => {
+            const fetch = window.fetch.bind(window);
+            window.__pickerQueries = [];
+            window.fetch = (url, init = {}) => {
+              if (!String(url).startsWith("/api/image-library/items?") || !String(url).includes("q=")) return fetch(url, init);
+              const { signal, ...options } = init;
+              return fetch(url, options).then(async response => {
+                await response.clone().arrayBuffer();
+                __pickerQueries.push({ query: new URL(url, location.href).searchParams.get("q"), aborted: signal.aborted });
+                return response;
+              });
+            };
+          });
+        }
+      });
+      const trigger = page.getByRole("button", { name: "选集", exact: true });
+      const dialog = page.getByRole("dialog", { name: "选集", exact: true });
+      const input = dialog.getByRole("searchbox");
+      try {
+        await sourceIs(page, "episode-10");
+        await trigger.click();
+        await input.dispatchEvent("compositionstart");
+        await input.fill("Bonus"); await input.press("Enter");
+        assert.equal(fixture.calls.filter(call => call.query === "Bonus").length, 0);
+        await input.dispatchEvent("compositionend"); await input.press("Enter");
+        await dialog.getByRole("button", { name: "Bonus episode 41", exact: true }).waitFor();
+        assert.equal(await dialog.getByRole("status").textContent(), "匹配 35 集 · 第 1–30 条");
+        await dialog.getByRole("button", { name: "下一页" }).press("Enter");
+        await dialog.getByRole("button", { name: "Bonus episode 75", exact: true }).waitFor();
+        assert.equal(await dialog.getByRole("status").textContent(), "匹配 35 集 · 第 31–35 条");
+        assert.deepEqual(fixture.calls.filter(call => call.query === "Bonus").map(call => call.offset), [0, 30]);
+        await input.fill("Obsolete"); await input.press("Enter"); await pending.promise;
+        await input.fill("S02E17"); await input.press("Enter");
+        await dialog.getByRole("button", { name: "重试" }).waitFor();
+        assert.equal(await dialog.getByRole("listitem").count(), 0);
+        await dialog.getByRole("button", { name: "重试" }).press("Enter");
+        const target = dialog.getByRole("button", { name: "S02E17 The Ark", exact: true });
+        await target.waitFor();
+        release.resolve();
+        await page.waitForFunction(() => __pickerQueries.some(entry => entry.query === "Obsolete" && entry.aborted));
+        assert.equal(await dialog.getByRole("status").textContent(), "匹配 1 集");
+        assert.equal(await dialog.getByText("Obsolete Special", { exact: true }).count(), 0);
+        assert(fixture.calls.every(call => call.kind === "anime" && call.seriesKey === "series-fixture" && call.category === "Synthetic region"));
+        await input.fill("Close now"); await input.press("Enter"); await pendingClose.promise;
+        await input.press("Escape");
+        releaseClose.resolve();
+        await page.waitForFunction(() => __pickerQueries.some(entry => entry.query === "Close now" && entry.aborted));
+        assert.equal(await dialog.count(), 0);
+        assert(await trigger.evaluate(button => button === document.activeElement));
+        await trigger.click();
+        await input.fill("S02E17"); await input.press("Enter"); await target.waitFor();
+        await target.click();
+        await page.waitForURL(url => url.searchParams.get("mediaId") === "episode-205");
+        assert.equal(new URL(page.url()).searchParams.has("episodePosition"), false, "a filtered row must not be used as a directory ordinal");
+        await sourceIs(page, "episode-205");
+      } finally { release.resolve(); releaseClose.resolve(); await page.close(); }
+    });
+
+    await run("series episodes load independently, cross a directory boundary and keep one Back route", async () => {
+      const fixture = episodeFixture("tv");
+      const first = Promise.withResolvers(), release = Promise.withResolvers();
+      fixture.revisionFor = async () => { if (fixture.calls.length === 1) { first.resolve(); await release.promise; } };
+      const returnTo = "/tv?seriesKey=series-fixture&category=Synthetic%20region";
+      const page = await open(true, `&mediaId=episode-240&returnTo=${encodeURIComponent(returnTo)}`, { waitForSource: false,
+        beforeNavigate: async page => {
+          await page.setViewportSize({ width: 320, height: 720 });
+          await installEpisodeCatalog(page, fixture);
+          await page.route(/\/tv\?/, route => route.fulfill({ contentType: "text/html", body: "<title>Synthetic series list</title>" }));
+        }
+      });
+      const nav = page.getByRole("group", { name: "剧集切换" });
+      const status = nav.getByRole("status");
+      const previous = nav.getByRole("button", { name: "上一集" });
+      const next = nav.getByRole("button", { name: "下一集" });
+      try {
+        await first.promise;
+        await sourceIs(page, "episode-240");
+        assert.equal(await next.isDisabled(), true);
+        assert.equal(await status.textContent(), "正在读取集数…");
+        release.resolve();
+        await page.waitForFunction(() => document.querySelector("[data-episode-status]")?.textContent === "第 240 / 242 集");
+        assert.deepEqual(fixture.calls.map(({ offset, limit }) => [offset, limit]), [[0, 240], [240, 1]]);
+        assert(fixture.calls.every(call => call.mode === "tv" && call.category === "Synthetic region" && call.sort === "title"));
+        assert.match(await previous.getAttribute("title"), /episode 239/);
+        assert.match(await next.getAttribute("title"), /episode 241/);
+        const rect = await nav.boundingBox();
+        assert(rect.x >= 0 && rect.x + rect.width <= 320);
+        const historySize = await page.evaluate(() => history.length);
+        await next.click();
+        await page.waitForURL(url => url.searchParams.get("mediaId") === "episode-241");
+        await sourceIs(page, "episode-241");
+        await page.waitForFunction(() => document.querySelector("[data-episode-status]")?.textContent === "第 241 / 242 集");
+        assert.equal(new URL(page.url()).searchParams.get("returnTo"), returnTo);
+        assert.equal(new URL(page.url()).searchParams.get("episodePosition"), "241");
+        assert.equal(await page.evaluate(() => history.length), historySize);
+        assert.deepEqual(fixture.calls.map(({ offset, limit }) => [offset, limit]), [[0, 240], [240, 1], [239, 3]]);
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.currentTime), 39);
+        await next.click();
+        await page.waitForURL(url => url.searchParams.get("mediaId") === "episode-242");
+        await page.waitForFunction(() => document.querySelector("[data-episode-status]")?.textContent === "第 242 / 242 集");
+        assert.equal(await next.isDisabled(), true);
+        await page.locator("#backButton").evaluate(button => button.click());
+        await page.waitForURL(url => url.pathname === "/tv" && url.searchParams.get("category") === "Synthetic region");
+      } finally { release.resolve(); await page.close(); }
+    });
+    await run("series episodes retry an inconsistent anime directory and recover from a stale position", async () => {
+      const fixture = episodeFixture("anime");
+      fixture.revisionFor = ({ offset }) => offset === 240 || fixture.calls.length >= 4 ? "revision-two" : "revision-one";
+      const page = await open(true, "&mediaId=episode-240&episodePosition=237", { waitForSource: false,
+        beforeNavigate: async page => {
+          await installEpisodeCatalog(page, fixture);
+          await page.route(/\/media\?/, route => route.fulfill({ contentType: "text/html", body: "<title>Synthetic anime list</title>" }));
+        }
+      });
+      const nav = page.getByRole("group", { name: "剧集切换" });
+      const retry = nav.getByRole("button", { name: "重试" });
+      try {
+        await sourceIs(page, "episode-240");
+        await retry.waitFor();
+        assert.equal(await nav.getByRole("status").textContent(), "剧集目录已变化，请重试。");
+        assert.equal(await nav.getByRole("button", { name: "下一集" }).isDisabled(), true);
+        assert.deepEqual(fixture.calls.map(({ offset, limit }) => [offset, limit]), [[235, 3], [0, 240], [240, 1]]);
+        await retry.press("Enter");
+        await page.waitForFunction(() => document.querySelector("[data-episode-status]")?.textContent === "第 240 / 242 集");
+        assert(fixture.calls.every(call => call.mode === "media" && call.kind === "anime" && call.seriesKey === "series-fixture"));
+        await page.waitForFunction(() => document.activeElement?.dataset.episodeStep === "next");
+        await page.locator("#backButton").evaluate(button => button.click());
+        await page.waitForURL(url => url.pathname === "/media" && url.searchParams.get("kind") === "anime"
+          && url.searchParams.get("seriesKey") === "series-fixture");
+      } finally { await page.close(); }
+    });
+    await run("series episodes ignore a directory response retired by pagehide", async () => {
+      const fixture = episodeFixture("tv");
+      const first = Promise.withResolvers(), release = Promise.withResolvers();
+      fixture.revisionFor = async () => {
+        if (fixture.calls.length !== 1) return "revision-two";
+        first.resolve();
+        await release.promise;
+        return "revision-one";
+      };
+      const page = await open(true, "&mediaId=episode-10", { waitForSource: false,
+        beforeNavigate: async page => {
+          await installEpisodeCatalog(page, fixture);
+          await page.addInitScript(() => {
+            const fetch = window.fetch.bind(window);
+            window.__episodeSignals = [];
+            window.__episodeReceipts = 0;
+            window.fetch = (url, options = {}) => {
+              if (!String(url).startsWith("/api/image-library/items?")) return fetch(url, options);
+              const { signal, ...rest } = options;
+              __episodeSignals.push(signal);
+              return fetch(url, rest).then(async response => {
+                await response.clone().arrayBuffer();
+                __episodeReceipts += 1;
+                return response;
+              });
+            };
+          });
+        }
+      });
+      const next = page.getByRole("button", { name: "下一集" });
+      try {
+        await first.promise;
+        await sourceIs(page, "episode-10");
+        fixture.episodes[10] = { ...fixture.episodes[10], title: "Current snapshot episode" };
+        await page.evaluate(() => {
+          window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+          window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+        });
+        await page.waitForFunction(() => document.querySelector("[data-episode-step='next']")?.title.includes("Current snapshot episode"));
+        assert.equal(await page.evaluate(() => __episodeSignals[0].aborted && !__episodeSignals[1].aborted), true);
+        release.resolve();
+        await page.waitForFunction(() => __episodeReceipts === 2);
+        await tick(page);
+        assert.match(await next.getAttribute("title"), /Current snapshot episode/);
+        assert.equal(fixture.calls.length, 2);
+      } finally { release.resolve(); await page.close(); }
+    });
     await run("adjacent files navigate from the collapsed player with bounded native controls", async () => {
       const page = await open();
       try {
@@ -292,6 +618,95 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         assert.equal(await page.locator("#playerFilePosition").textContent(), "2 / 2", "removed files must not remain in adjacent navigation");
       } finally { await page.close(); }
     });
+    await run("adjacent files autoplay is opt-in and skips duplicate identities without resetting earlier progress", async () => {
+      const original = work.videos;
+      work.videos = [original[0], { ...original[0], name: "Alternate A" }, ...original.slice(1)];
+      const page = await open();
+      try {
+        await page.setViewportSize({ width: 320, height: 740 });
+        const option = page.getByRole("checkbox", { name: "播完自动播放下一个文件" });
+        assert.equal(await option.evaluate(input => {
+          const rect = input.closest("label").getBoundingClientRect();
+          return rect.height >= 44 && rect.left >= 0 && rect.right <= innerWidth;
+        }), true, "the autoplay toggle has a reachable narrow-screen touch target");
+        const end = async (seek = false) => page.evaluate(seek => {
+          const video = document.querySelector("#playerVideo");
+          video.currentTime = video.duration;
+          if (seek) __emitMedia("seeking");
+          __emitMedia("ended");
+        }, seek);
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.equal(await option.isChecked(), false);
+        await end();
+        assert.equal(await page.evaluate(() => __readSignals.length), 1, "default playback stops at the end of the selected file");
+        await page.evaluate(() => {
+          const video = document.querySelector("#playerVideo");
+          video.currentTime = 500;
+          video.muted = true;
+          video.dataset.autoplayMuted = "1";
+        });
+        const plays = await page.evaluate(() => __media.plays.length);
+        await option.check();
+        await page.getByRole("checkbox", { name: "按当前时间切换" }).check();
+        assert.equal(await page.evaluate(() => __media.plays.length), plays, "setting autoplay does not start or unmute the current video");
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.muted), true);
+        await end(true);
+        assert.equal(await page.evaluate(() => __readSignals.length), 1, "seeking to the end must not autoplay the next file");
+        await page.evaluate(() => {
+          document.querySelector("#playerVideo").currentTime = 590;
+          __emitMedia("seeking");
+        });
+        await end();
+        await sourceIs(page, "B");
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.currentTime), 0, "the following file starts from its beginning");
+        assert.equal(await page.locator("#playerFilePosition").textContent(), "3 / 4");
+        assert.equal(await page.evaluate(() => __progressSends.some(write => write.path.endsWith("/A") && write.body.position === 600)), true);
+        await end();
+        await sourceIs(page, "C");
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        await end();
+        assert.equal(await page.evaluate(() => __readSignals.length), 3, "autoplay stops at the end of the file list");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading"));
+        const sidebar = page.locator("#toggleSidebarButton");
+        if (await sidebar.getAttribute("aria-expanded") === "false") await sidebar.click();
+        await option.waitFor();
+        assert.equal(await option.isChecked(), true, "the opt-in setting persists in this browser");
+      } finally { work.videos = original; await page.close(); }
+    });
+    await run("adjacent files autoplay rejects a truncated stream and a duplicate ended event while the next file loads", async () => {
+      const remux = hold("B", info("B", { mode: "remux" }));
+      const page = await open(true, "", { waitForSource: true });
+      let next;
+      try {
+        await page.getByRole("checkbox", { name: "播完自动播放下一个文件" }).check();
+        await choose(page, "B");
+        await remux.requested;
+        remux.release();
+        await page.waitForFunction(() => document.querySelector("#playerVideo")?.src.endsWith("/synthetic/B?t=73"));
+        await page.evaluate(() => {
+          __media.duration = 80;
+          __emitMedia("loadedmetadata");
+          document.querySelector("#playerVideo").currentTime = 80;
+          __emitMedia("ended");
+        });
+        assert.equal(await page.evaluate(() => __readSignals.length), 2, "a stream ending far before the reported full duration must stay on that file");
+        next = hold("C", info("C"));
+        const nextRequest = page.waitForRequest(request => new URL(request.url()).pathname === "/api/playinfo/C", { timeout: 5000 });
+        await page.evaluate(() => {
+          __media.duration = 527;
+          document.querySelector("#playerVideo").currentTime = 527;
+          __emitMedia("ended");
+        });
+        await nextRequest;
+        await next.requested;
+        await page.evaluate(() => __emitMedia("ended"));
+        assert.equal(await page.evaluate(() => __readSignals.length), 3, "the retiring file cannot start a second read");
+        next.release();
+        await sourceIs(page, "C");
+      } finally { remux.release(); next?.release(); await page.close(); }
+    });
     await run("file list switching retains 1000 native rows and keyboard focus", async () => {
       const original = work.videos;
       work.videos = [...original, ...Array.from({ length: 997 }, (_, index) => ({ id: `extra-${index}`, name: `Extra file ${index}`, ext: ".mp4", playable: true }))];
@@ -313,6 +728,74 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         await page.keyboard.press("Enter"); await sourceIs(page, "C");
         assert.equal(await button.getAttribute("aria-current"), null);
         assert.equal(await page.locator(".player-file-button[aria-current='true']").textContent(), "Video C");
+      } finally { work.videos = original; await page.close(); }
+    });
+    await run("file list search finds late paths without disturbing playback and locates the current row", async () => {
+      const original = work.videos;
+      const target = { ...original[1], name: "VOL-600 第 18 话.mkv", relativePath: "档案\\Series\\S2\\VOL-600.mkv" };
+      work.videos = [original[0], ...Array.from({ length: 997 }, (_, index) => ({ id: `extra-${index}`, name: `Extra file ${index}` })), target, original[2]];
+      const page = await open();
+      try {
+        await page.setViewportSize({ width: 320, height: 740 });
+        await probeFileList(page);
+        const input = page.getByRole("searchbox", { name: "搜索视频文件" });
+        assert.equal(await input.evaluate(node => {
+          const box = node.getBoundingClientRect();
+          return box.height >= 44 && box.left >= 0 && box.right <= innerWidth;
+        }), true, "the file search remains reachable on a narrow player");
+        const status = page.locator("#playerFileSearchCount");
+        const visible = page.locator("#playerFiles .player-file-button:visible");
+        const snapshot = () => page.evaluate(() => {
+          const video = document.querySelector("#playerVideo");
+          return { src: video.src, time: video.currentTime, muted: video.muted, paused: video.paused, reads: __readSignals.length, plays: __media.plays.length };
+        });
+        await page.evaluate(() => {
+          __emitMedia("loadedmetadata");
+          const video = document.querySelector("#playerVideo");
+          video.pause();
+          video.currentTime = 58;
+          video.muted = true;
+          video.dataset.autoplayMuted = "1";
+        });
+        const before = await snapshot();
+        await input.fill("s2 ６００");
+        assert.equal(await status.textContent(), "1 / 1000 个文件");
+        assert.deepEqual(await visible.locator("strong").allTextContents(), [target.name]);
+        await input.evaluate(node => {
+          node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+          node.value = "拼音候选";
+          node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+        });
+        assert.equal(await visible.count(), 1, "an uncommitted IME draft leaves the previous match visible");
+        await input.evaluate(node => {
+          node.value = "SERIES\\S2 600";
+          node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+        });
+        await input.press("ArrowDown");
+        assert.equal(await visible.first().evaluate(node => node === document.activeElement), true);
+        assert.deepEqual(await snapshot(), before, "typing and focusing a search match keep the active video, time and mute intent");
+        await page.keyboard.press("Enter");
+        await sourceIs(page, "B");
+        assert.equal(await page.locator("#playerFilePosition").textContent(), "999 / 1000");
+        assert.equal(await page.evaluate(() => __fileRows.every(row => row.isConnected) && __fileAddedElements === 0), true);
+        await page.locator("#playerFileNext").click();
+        await sourceIs(page, "C");
+        assert.equal(await visible.first().locator("strong").textContent(), target.name, "adjacent playback still follows the full list");
+        await page.evaluate(() => __refreshPlayerFilesForFixture({ remove: "B", replaceOwner: true }));
+        assert.equal(await input.inputValue(), "SERIES\\S2 600");
+        assert.equal(await status.textContent(), "没有匹配的文件");
+        const reads = await page.evaluate(() => __readSignals.length);
+        await page.getByRole("button", { name: "定位当前" }).click();
+        assert.equal(await input.inputValue(), "");
+        const current = page.locator("#playerFiles [aria-current='true']");
+        assert.equal(await current.locator("strong").textContent(), "Video C");
+        assert.equal(await current.evaluate(row => {
+          const box = row.getBoundingClientRect();
+          const tool = document.querySelector("#playerFilesTools").getBoundingClientRect();
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          return row === document.activeElement && box.top >= tool.bottom && row.contains(hit);
+        }), true, "the located file is focused and visible below the sticky toolbar");
+        assert.equal(await page.evaluate(() => __readSignals.length), reads, "locating the current file does not restart playback");
       } finally { work.videos = original; await page.close(); }
     });
     await run("file list duplicate IDs keep their shared selection and first position", async () => {
@@ -340,6 +823,92 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         assert.equal(await page.evaluate(() => document.querySelector("#playerVideo").src.endsWith("/synthetic/C")), true);
         assert.equal(await page.locator(".player-file-button").filter({ hasText: "Video C" }).getAttribute("aria-current"), "true");
       } finally { pending.release(); await page.close(); }
+    });
+    await run("file list synchronized switching preserves the time, playback intent and unwatched progress", async () => {
+      const page = await open();
+      try {
+        const option = page.getByRole("checkbox", { name: "按当前时间切换" });
+        const video = page.locator("#playerVideo");
+        const snapshot = () => video.evaluate(node => [node.currentTime, node.paused]);
+        const ready = () => page.evaluate(() => __emitMedia("loadedmetadata"));
+        await page.setViewportSize({ width: 320, height: 740 });
+        assert.equal(await option.evaluate(input => {
+          const rect = input.closest("label").getBoundingClientRect();
+          return rect.height >= 44 && rect.left >= 0 && rect.right <= innerWidth;
+        }), true, "synchronized switching has a reachable phone-width touch target");
+        assert.equal(await option.isChecked(), false);
+        await ready();
+        await choose(page, "B"); await sourceIs(page, "B"); await ready();
+        assert.deepEqual(await snapshot(), [73, false], "normal file switching still uses the target resume position");
+        await video.evaluate(node => { node.currentTime = 137.25; });
+        await option.check();
+        await page.locator("#playerFilePrevious").click(); await sourceIs(page, "A"); await ready();
+        assert.deepEqual(await snapshot(), [137.25, false], "adjacent synchronized switching keeps the playing timestamp");
+        await video.evaluate(node => {
+          node.pause();
+          node.currentTime = 178.5;
+          node.muted = true;
+          node.dataset.autoplayMuted = "1";
+        });
+        await page.locator(".player-file-button").filter({ hasText: "Video B" }).press("Enter");
+        await sourceIs(page, "B"); await ready();
+        assert.deepEqual(await snapshot(), [178.5, true], "a manual file-row switch preserves a paused comparison");
+        assert.equal(await video.evaluate(node => node.muted), true, "a paused comparison preserves its audio intent");
+        const reads = await page.evaluate(() => __readSignals.length);
+        await choose(page, "B");
+        assert.equal(await page.evaluate(() => __readSignals.length), reads, "the active file does not restart in synchronized mode");
+        await choose(page, "C"); await sourceIs(page, "C");
+        await page.evaluate(() => { __media.duration = 102; __emitMedia("loadedmetadata"); });
+        assert.deepEqual(await snapshot(), [102, true], "a shorter target is bounded by decoded duration");
+        assert.equal(await page.evaluate(() => __progressSends.some(write =>
+          (write.path.endsWith("/B") && write.body.position === 178.5)
+          || (write.path.endsWith("/C") && write.body.position === 102))), false, "opening or leaving an unwatched comparison must not record target progress");
+        await video.evaluate(async node => { node.currentTime = 90; await node.play(); __emitMedia("canplay"); __emitMedia("playing"); });
+        await option.uncheck();
+        await choose(page, "B"); await sourceIs(page, "B");
+        assert.equal(await page.evaluate(() => __progressSends.some(write => write.path.endsWith("/C") && write.body.position === 90)),
+          true, "playing a comparison target restores normal progress reporting");
+      } finally { await page.close(); }
+    });
+    await run("file list synchronized switching retains a pending paused timestamp through a late source response", async () => {
+      const page = await open();
+      const old = hold("B", info("B"));
+      const transcode = hold("C", info("C", { mode: "remux" }));
+      try {
+        await page.evaluate(() => {
+          __emitMedia("loadedmetadata");
+          const video = document.querySelector("#playerVideo");
+          video.pause();
+          video.currentTime = 211.75;
+        });
+        const plays = await page.evaluate(() => __media.plays.length);
+        await page.getByRole("checkbox", { name: "按当前时间切换" }).check();
+        await choose(page, "B"); await old.requested;
+        await choose(page, "C"); await transcode.requested;
+        transcode.release();
+        await page.waitForFunction(() => document.querySelector("#playerVideo").src.endsWith("/synthetic/C?t=211"));
+        old.release();
+        await page.waitForFunction(() => __readFinished.some(url => url.endsWith("/B")));
+        assert.deepEqual(await page.locator("#playerVideo").evaluate(node => [node.src.endsWith("/synthetic/C?t=211"), node.paused, __media.plays.length]),
+          [true, true, plays], "a superseded play-info response cannot lose the paused comparison or activate its generated stream");
+        await page.locator("#playerStreamStart").click();
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.equal(await page.locator("#playerVideo").evaluate(node => node.currentTime), 0.75, "generated sources retain the fractional offset once activated");
+      } finally { old.release(); transcode.release(); await page.close(); }
+    });
+    await run("file list synchronized switching is available only for multi-file FanHao works", async () => {
+      for (const query of ["&preview=1&videoId=B", "&mediaId=media-fixture", "&diskDrive=fixture&diskPath=fixture%2FA.mp4"]) {
+        const page = await open(true, query);
+        try { assert.equal(await page.locator("#playerFileSwitchTime").isVisible(), false); }
+        finally { await page.close(); }
+      }
+      const original = work.videos;
+      work.videos = [original[0]];
+      let page;
+      try {
+        page = await open();
+        assert.equal(await page.locator("#playerFileSwitchTime").isVisible(), false);
+      } finally { work.videos = original; await page?.close(); }
     });
     await run("file list snapshot metadata refreshes descriptors and retires removed controls", async () => {
       const page = await open();
@@ -769,12 +1338,171 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         assert.equal(new URL(await page.evaluate(() => __copiedLinks.at(-1))).searchParams.get("t"), "101.25");
       } finally { remux.release(); await page.close(); }
     });
+    await run("playback bookmarks capture exact positions, preserve playback intent and persist notes", async () => {
+      const page = await open();
+      const dialog = page.getByRole("dialog", { name: "播放书签", exact: true });
+      const input = dialog.getByRole("textbox", { name: "备注（可选）" });
+      const save = dialog.getByRole("button", { name: "保存书签", exact: true });
+      const video = page.locator("#playerVideo");
+      const state = () => video.evaluate(node => ({ src: node.src, paused: node.paused, muted: node.muted, plays: __media.plays.length }));
+      try {
+        await page.setViewportSize({ width: 320, height: 700 });
+        await page.evaluate(() => {
+          __emitMedia("loadedmetadata");
+          const video = document.querySelector("#playerVideo");
+          video.pause(); video.currentTime = 42.25; video.muted = true; video.dataset.autoplayMuted = "1";
+        });
+        const before = await state();
+        await page.keyboard.press("b");
+        await dialog.waitFor();
+        assert.equal(await input.evaluate(node => node === document.activeElement), true);
+        assert.equal(await dialog.evaluate(node => {
+          const rect = node.getBoundingClientRect();
+          return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
+        }), true, "bookmarks must fit at 320px");
+        await video.evaluate(node => { node.currentTime = 95.75; });
+        await input.fill("开场 <检查>"); await save.click();
+        await dialog.getByRole("status").getByText("已保存 0:42.25 的书签").waitFor();
+        assert.equal(await dialog.locator("ul li").count(), 1);
+        await input.fill("开场 <检查>"); await save.click();
+        await dialog.getByRole("status").getByText("这个时间和备注已保存").waitFor();
+        assert.equal(await dialog.locator("ul li").count(), 1);
+        await dialog.getByRole("button", { name: "使用当前时间" }).click();
+        await input.fill("对照段"); await save.click();
+        assert.deepEqual(await dialog.locator("li button:first-child").allTextContents(), ["0:42.25 · 开场 <检查>", "1:35.75 · 对照段"]);
+        assert.deepEqual(await state(), before, "opening and saving bookmarks cannot restart paused or muted media");
+        await dialog.getByRole("button", { name: "跳到 0:42.25 · 开场 <检查>", exact: true }).click();
+        await dialog.waitFor({ state: "hidden" });
+        assert.equal(await video.evaluate(node => node.currentTime), 42.25);
+        assert.deepEqual(await state(), before, "direct bookmark jumps must seek in place and retain pause/mute");
+
+        await page.reload({ waitUntil: "domcontentloaded" }); await sourceIs(page, "A");
+        await page.keyboard.press("b"); await dialog.waitFor();
+        assert.deepEqual(await dialog.locator("li button:first-child").allTextContents(), ["0:42.25 · 开场 <检查>", "1:35.75 · 对照段"]);
+        await dialog.getByRole("button", { name: "删除 0:42.25 · 开场 <检查> 书签", exact: true }).click();
+        assert.deepEqual(await dialog.locator("li button:first-child").allTextContents(), ["1:35.75 · 对照段"]);
+        await page.evaluate(() => { __media.duration = 20; __emitMedia("loadedmetadata"); });
+        const seeks = await page.evaluate(() => __media.seeks.length);
+        await dialog.getByRole("button", { name: "跳到 1:35.75 · 对照段", exact: true }).click();
+        await dialog.getByRole("status").getByText("书签超出当前视频时长").waitFor();
+        assert.equal(await page.evaluate(() => __media.seeks.length), seeks, "a shorter replacement file cannot turn an old bookmark into a different seek");
+      } finally { await page.close(); }
+    });
+    await run("playback bookmarks are scoped to the selected file and account", async () => {
+      let account = "fixture-one";
+      const page = await open(true, "", { beforeNavigate: page => page.route(url => url.pathname.startsWith("/api/"), async route => {
+        const response = await route.fetch();
+        await route.fulfill({ response, headers: { ...response.headers(), "x-fanhao-account-owner": account } });
+      }) });
+      const dialog = page.getByRole("dialog", { name: "播放书签", exact: true });
+      try {
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        await page.locator("#playerBookmarksButton").click();
+        await dialog.getByRole("button", { name: "保存书签", exact: true }).click();
+        await dialog.locator("li button:first-child").evaluate(node => { window.__oldBookmark = node; });
+        await page.locator(".player-file-button").filter({ hasText: "Video B" }).evaluate(node => node.click());
+        await sourceIs(page, "B"); await dialog.waitFor({ state: "hidden" });
+        const seeks = await page.evaluate(() => __media.seeks.length);
+        await page.evaluate(() => __oldBookmark.click());
+        assert.equal(await page.evaluate(() => __media.seeks.length), seeks, "retired bookmark controls cannot seek another file");
+        await page.keyboard.press("b"); await dialog.waitFor();
+        assert.equal(await dialog.locator("li").count(), 0);
+        await page.keyboard.press("Escape");
+        account = "fixture-two";
+        await page.reload({ waitUntil: "domcontentloaded" }); await sourceIs(page, "A");
+        await page.keyboard.press("b"); await dialog.waitFor();
+        assert.equal(await dialog.locator("li").count(), 0, "a different account on the same browser must have an independent bookmark list");
+        account = "fixture-one";
+        await page.reload({ waitUntil: "domcontentloaded" }); await sourceIs(page, "A");
+        await page.keyboard.press("b"); await dialog.waitFor();
+        assert.equal(await dialog.locator("li").count(), 1);
+        const galleryUrl = new URL(page.url());
+        galleryUrl.searchParams.set("mediaId", "media-fixture");
+        await page.goto(galleryUrl.href, { waitUntil: "domcontentloaded" }); await sourceIs(page, "A");
+        await page.keyboard.press("b"); await dialog.waitFor();
+        assert.equal(await dialog.locator("li").count(), 0, "matching video IDs from different sources must keep separate bookmarks");
+      } finally { await page.close(); }
+    });
+    await run("playback bookmarks seek the fractional position of a paused compatibility stream", async () => {
+      const remux = hold("B", info("B", { mode: "remux" }));
+      const page = await open();
+      const dialog = page.getByRole("dialog", { name: "播放书签", exact: true });
+      try {
+        await choose(page, "B"); await remux.requested; remux.release();
+        const video = page.locator("#playerVideo");
+        await page.waitForFunction(() => document.querySelector("#playerVideo").src.endsWith("/synthetic/B?t=73"));
+        await page.evaluate(() => {
+          __emitMedia("loadedmetadata");
+          const video = document.querySelector("#playerVideo");
+          video.pause(); video.currentTime = 3.25;
+        });
+        await page.keyboard.press("b");
+        await dialog.getByRole("button", { name: "保存书签", exact: true }).click();
+        await video.evaluate(node => { node.currentTime = 25; });
+        const plays = await page.evaluate(() => __media.plays.length);
+        await dialog.getByRole("button", { name: "跳到 1:16.25", exact: true }).click();
+        await page.waitForFunction(() => document.querySelector("#playerVideo").src.endsWith("/synthetic/B?t=76"));
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.deepEqual(await video.evaluate(node => ({ time: node.currentTime, paused: node.paused, plays: __media.plays.length })),
+          { time: 0.25, paused: true, plays });
+      } finally { remux.release(); await page.close(); }
+    });
+    await run("playback rate changes in place and survives compatibility stream reload and page return", async () => {
+      const page = await open(), remux = hold("B", info("B", { mode: "remux" }));
+      const rate = page.getByRole("combobox", { name: "播放倍速" });
+      try {
+        await page.evaluate(() => {
+          const load = HTMLMediaElement.prototype.load;
+          HTMLMediaElement.prototype.load = function () {
+            this.playbackRate = this.defaultPlaybackRate;
+            load.call(this);
+          };
+          __emitMedia("loadedmetadata");
+          const video = document.querySelector("#playerVideo");
+          video.pause();
+          video.currentTime = 99.5;
+        });
+        const snapshot = () => page.locator("#playerVideo").evaluate(video => ({
+          src: video.src, time: video.currentTime, paused: video.paused, plays: __media.plays.length
+        }));
+        const before = await snapshot();
+        await rate.selectOption("1.5");
+        assert.deepEqual(await snapshot(), before, "speed changes must not seek, reload or resume the video");
+        assert.deepEqual(await page.locator("#playerVideo").evaluate(video => [video.defaultPlaybackRate, video.playbackRate]), [1.5, 1.5]);
+        await page.locator("#playerFileSearch").press("BracketRight");
+        assert.equal(await rate.inputValue(), "1.5", "typing in file search must leave the speed alone");
+        await page.locator("#playerFileSearch").fill("");
+        await page.evaluate(() => document.activeElement.blur());
+        await page.keyboard.press("BracketRight");
+        assert.equal(await rate.inputValue(), "1.75");
+        await page.keyboard.press("BracketLeft");
+        assert.equal(await rate.inputValue(), "1.5");
+        await choose(page, "B"); await remux.requested;
+        await rate.waitFor({ state: "hidden" });
+        remux.release();
+        await page.waitForFunction(() => document.querySelector("#playerVideo").src.endsWith("/synthetic/B?t=73"));
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.equal(await rate.inputValue(), "1.5");
+        await rate.selectOption("2");
+        await page.locator("#reloadStreamButton").click();
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.deepEqual(await page.locator("#playerVideo").evaluate(video => [video.defaultPlaybackRate, video.playbackRate]), [2, 2]);
+        await page.setViewportSize({ width: 320, height: 700 });
+        const bounds = await rate.boundingBox();
+        assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 320, "rate control must fit the narrow player header");
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await sourceIs(page, "A");
+        assert.equal(await rate.inputValue(), "2", "returning to the player must restore the saved speed");
+        assert.deepEqual(await page.locator("#playerVideo").evaluate(video => [video.defaultPlaybackRate, video.playbackRate]), [2, 2]);
+      } finally { remux.release(); await page.close(); }
+    });
     if (realPlyr) {
       await run("real Plyr mode changes preserve the visible owned video", async () => {
         const page = await open(), remux = hold("B", info("B", { mode: "remux" }));
         try {
           await page.locator('#playerVideo track[data-subtitle-id="sub-A"]').waitFor({ state: "attached" });
           await page.evaluate(() => { window.__originalVideo = document.querySelector("#playerVideo"); __originalVideo.muted = true; __originalVideo.volume = 0.37; __originalVideo.playbackRate = 1.5; });
+          await page.waitForFunction(() => document.querySelector("#playerPlaybackRate").value === "1.5");
           await choose(page, "B"); await remux.requested; remux.release();
           await page.waitForFunction(() => __readFinished.some(url => url.includes("/api/playinfo/B"))); await tick(page);
           assert.equal(await page.evaluate(() => __playerHostVideo().isConnected && document.querySelector("#playerVideo") === __playerHostVideo() && __playerHostVideo().plyr.media === __playerHostVideo()), true, "Plyr mode changes must keep the host's owned video connected and visible");
@@ -784,6 +1512,7 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
           assert.equal(await page.locator('.plyr__controls #playerSeekControl').count(), 1, "the custom timeline must be attached exactly once to the current controls");
           await page.evaluate(() => { window.__compatVideo = document.querySelector("#playerVideo"); });
           await page.evaluate(() => __emitMedia("loadedmetadata"));
+          await page.getByRole("combobox", { name: "播放倍速" }).selectOption("1.75");
           await choose(page, "C"); await sourceIs(page, "C");
           assert.equal(await page.evaluate(() => document.querySelector("#playerVideo") === __playerHostVideo() && __playerHostVideo().plyr.media === __playerHostVideo()), true, "switching back to direct must retain the current video and its real Plyr instance");
           await page.evaluate(() => __emitMedia("loadedmetadata"));
@@ -791,7 +1520,7 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
           assert.equal(await page.locator(".player-stage video").count(), 1);
           assert.equal(await page.locator(".player-stage .plyr").count(), 1);
           assert.equal(await page.locator(".player-stage > #playerSeekControl").count(), 1, "direct mode must return the single custom timeline to its host");
-          assert.deepEqual(await page.locator("#playerVideo").evaluate(video => ({ muted: video.muted, volume: video.volume, rate: video.playbackRate })), { muted: true, volume: 0.37, rate: 1.5 });
+          assert.deepEqual(await page.locator("#playerVideo").evaluate(video => ({ muted: video.muted, volume: video.volume, rate: video.playbackRate, defaultRate: video.defaultPlaybackRate })), { muted: true, volume: 0.37, rate: 1.75, defaultRate: 1.75 });
           await page.locator('#playerVideo track[data-subtitle-id="sub-C"]').waitFor({ state: "attached" });
           assert.match(await page.locator('#playerVideo track[data-subtitle-id="sub-C"]').getAttribute("src"), /offsetSeconds=0/);
           const source = await page.locator("#playerVideo").evaluate(video => video.src);

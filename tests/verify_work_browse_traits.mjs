@@ -24,7 +24,7 @@ function editionCount(payload, key) {
   return payload.traitFacets.editions.find((item) => item.key === key)?.count || 0;
 }
 
-function fixture(count = 50) {
+function fixture(count = 50, workHasCoreCover = () => true) {
   const rows = new Map();
   const works = Array.from({ length: count }, (_, index) => {
     const code = `AB-${100 + index}`;
@@ -57,7 +57,7 @@ function fixture(count = 50) {
   const common = {
     favoriteStateService, playbackProgressService: { getWorkProgress: () => null },
     publicWorkAvailability: (work) => ({ hasMagnet: work.infoSummary?.hasMagnet }), isVrWork: () => false,
-    workHasCoreCover: () => true, workHasLocalMarker: () => false, workInfoFacetRow
+    workHasCoreCover, workHasLocalMarker: () => false, workInfoFacetRow
   };
   const service = createWorkQueryService({
     ...common,
@@ -88,7 +88,7 @@ function collectionFor(env) {
   env.collection = createCollectionQueryService({
     clampInteger: (value, fallback, min, max) => value === null || value === "" || !Number.isFinite(Number(value)) ? fallback : Math.max(min, Math.min(max, Math.trunc(Number(value)))),
     favoriteStateService: {
-      favoriteWorks: () => env.works,
+      favoriteWorks: (folderId) => env.favoriteFolders?.get(folderId) || env.works,
       normalizeFavoriteFolderId: (value) => value,
       publicFavoriteFolders: () => [{ id: "all", count: env.works.length }]
     },
@@ -117,6 +117,35 @@ const modes = {
   history: (env, url) => collectionFor(env).historyPayload(url)
 };
 
+check("favorite title/code search intersects the folder and filters before pagination", () => {
+  const env = fixture(130);
+  for (const index of [10, 57, 87, 122]) env.works[index].title += " 合成线索";
+  env.favoriteFolders = new Map([["later", [env.works[1], env.works[57], env.works[87], env.works[122]]]]);
+  env.rows.set("work-122", { ...env.rows.get("work-122"), code: "QZ-987" });
+  const read = (q, offset = 0, filter = "all", folder = "later") => collectionFor(env).favoritesPayload(request(filter, { q, offset, limit: 1, folder }));
+  assert.deepEqual([0, 1, 2].map(offset => read("合成线索", offset).works[0].id), ["work-57", "work-87", "work-122"]);
+  assert.equal(read("合成线索").total, 3);
+  assert.equal(read("合成线索", 3).count, 0);
+  assert.equal(read("合成线索", 0, "all", "").total, 4);
+  assert.deepEqual(read(" ｑｚ_９８７ ").works.map(work => work.id), ["work-122"]);
+  assert.equal(read("ｑｚ_９８７").query, "ｑｚ_９８７");
+  assert.equal(read("合成线索", 0, tagFilter("眼镜")).total, 1);
+  assert.equal(read("不存在的标题").total, 0);
+  assert.equal(read("合成线索").total, 3, "cached results must remain separate for different keywords");
+  assert.equal(Object.hasOwn(read(""), "query"), false, "unfiltered payloads retain the prior shape");
+});
+
+check("sidecar cover excludes a local work from missing cover filters", () => {
+  const env = fixture(3, () => false);
+  env.works[0].infoSummary.imageUrl = "https://c0.jdbstatic.com/covers/fixture/AB-100.jpg";
+  env.works[2].missingLocal = true;
+  for (const [name, mode] of Object.entries(modes)) {
+    const payload = mode(env, request("missingCover"));
+    assert.deepEqual(payload.works.map(({ id }) => id), ["work-1"], name);
+    assert.equal(payload.facets.missingCover, 1, name);
+  }
+});
+
 check("bulk filtering, sorting and facet reads reuse the work revision within each pass", () => {
   const env = fixture(2_000);
   const tag = tagFilter("眼镜");
@@ -140,6 +169,7 @@ check("classification search is paginated, local-only, and intersects with text 
   const env = fixture(8);
   env.works[0].videos = [{ name: "AB-100-LTXC.mkv", width: 3840, height: 2160 }];
   env.works[1].videos = [{ name: "AB-101-LTX.wmv", width: 1920, height: 1080 }];
+  env.works[1].infos = [{ name: "AB-101-LTX.zh-CN.srt" }];
   env.works[1].title += " text fixture";
   env.works[2].videos = [{ name: "AB-102-LTX-4K.mp4", width: 1280, height: 720 }];
   env.works[3].videos = [{ name: "AB-103-4K.mp4", width: 3840, height: 2160 }];
@@ -147,6 +177,11 @@ check("classification search is paginated, local-only, and intersects with text 
   env.works[4].videos = [{ name: "AB-104-LTX.mp4" }];
   env.works[4].missingLocal = true;
   const search = (q, filter = "all", offset = 0) => env.service.searchPayload(request(filter, { q, offset }));
+  assert.equal(search("class:all").total, 7);
+  assert.deepEqual(search("class:all AB-103").works.map(({ id }) => id), ["work-3"]);
+  const subtitledLtx = search("class:all", "ltx,subtitled");
+  assert.deepEqual(subtitledLtx.works.map(({ id }) => id), ["work-0", "work-1"]);
+  assert.equal(editionCount(subtitledLtx, "subtitled"), 2);
   assert.equal(search("LTX").total, 3);
   assert.deepEqual(search("class:ltx", "all", 2).works.map(({ id }) => id), ["work-2"]);
   assert.deepEqual(search("class:ltx", "formatWmv,quality1080p").works.map(({ id }) => id), ["work-1"]);
@@ -167,7 +202,7 @@ check("library hydration preserves natural person order and reads only version-m
       CREATE TABLE people(id, name, display_name, folder_path);
       CREATE TABLE work_people(work_id, person_id, role, sort_order);
       CREATE TABLE works(id, code, title, release_date, duration_minutes, rating, rating_count,
-        has_magnet, is_streamable, has_subtitles, javdb_tags_json, director, updated_at);
+        has_magnet, is_streamable, has_subtitles, javdb_tags_json, director, raw_text, updated_at);
       CREATE TABLE local_works(id, work_id, local_path, source_mtime);
       CREATE TABLE local_files(local_work_id, file_id, file_type, file_path, name, title, ext,
         relative_path, size INTEGER, modified_at, playable, sort_order);

@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createServer } from "node:http";
+import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { createTxtFormatToolService } from "../src/modules/tools/server/txt-format-service.js";
@@ -32,7 +34,7 @@ async function runFixture({ sourceOverride = "", pattern = "" } = {}) {
       const handled = await routeToolsApi(req, res, url, {
         requireLocalAdmin: (_, response) => { if (!denied) return true; sendJson(response, 403, { error: "此操作需要本机管理员权限" }); return false; },
         readJsonBody: async request => { bodyReads++; let data = ""; for await (const chunk of request) data += chunk; return JSON.parse(data); }, sendJson,
-        txtFormatToolService: { maxBodyBytes: service.maxBodyBytes, serveDownload: service.serveDownload, createDownload: body => {
+        txtFormatToolService: { maxBodyBytes: service.maxBodyBytes, serveDownload: service.serveDownload, serveBatchDownload: service.serveBatchDownload, createDownload: body => {
           const pending = (async () => {
           requests.push(body);
           const gate = gates.find(item => !item.used);
@@ -132,6 +134,162 @@ async function runFixture({ sourceOverride = "", pattern = "" } = {}) {
         assert.deepEqual(requests.at(-1).options, { indent: false, cleanJunk: false });
         assert.equal(await page.locator(".txt-format-result pre").textContent(), "中文。\n");
         assert((await page.locator(".txt-format-result").textContent()).includes("gb18030"));
+      } finally { await page.close(); }
+    });
+    await run("TXT batch formats remaining files after failure and retries only unfinished files", async () => {
+      const page = await newPage(), first = hold(), second = hold({ error: "合成单文件失败" });
+      const archive = page.locator(".txt-format-archive");
+      const rows = page.locator(".txt-format-batch li");
+      try {
+        await page.setViewportSize({ width: 320, height: 740 });
+        await expand(page);
+        await choose(page, [file("同名.txt"), file("重试.txt"), file("同名.TXT"), file("invalid.pdf")]);
+        const offset = requests.length;
+        await submit(page); await started(first);
+        assert.equal(requests.length, offset + 1);
+        assert.equal(await page.evaluate(() => __txtFileReads), 1, "a batch owns at most one file read before the previous request settles");
+        first.release(); await started(second); second.release();
+        await page.getByText("已完成 2 / 4 份 · 2 份需处理", { exact: true }).waitFor();
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["同名.txt", "重试.txt", "同名.TXT"]);
+        assert.equal(await rows.count(), 4);
+        assert.equal(await rows.getByText("合成单文件失败", { exact: true }).count(), 1);
+        assert(await rows.getByText("只支持 .txt 文档，请重新选择", { exact: true }).isVisible());
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        const href = await archive.getAttribute("href");
+        assert.equal(new URL(href, base).searchParams.getAll("id").length, 2);
+        denied = true;
+        const unauthorized = await fetch(new URL(href, base));
+        assert.equal(unauthorized.status, 403);
+        await unauthorized.text();
+        denied = false;
+        await assertZip(page, archive, ["同名_格式化.txt", "同名_格式化 (2).txt"]);
+        await page.getByRole("button", { name: "重试未完成", exact: true }).click();
+        await page.getByText("已完成 3 / 4 份 · 1 份需处理", { exact: true }).waitFor();
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["同名.txt", "重试.txt", "同名.TXT", "重试.txt"]);
+        assert.equal(await page.evaluate(() => __txtFileReads), 4);
+        await assertZip(page, archive, ["同名_格式化.txt", "重试_格式化.txt", "同名_格式化 (2).txt"]);
+        const id = new URL(href, base).searchParams.get("id");
+        for (const [ids, code] of [[[id, id], 400], [[id, "unknown"], 410]]) {
+          const response = await fetch(`${base}/api/tools/txt-format/batch-download?${new URLSearchParams(ids.map(value => ["id", value]))}`);
+          assert.equal(response.status, code);
+          await response.text();
+        }
+      } finally { denied = false; first.release(); second.release(); await page.close(); }
+    });
+    await run("TXT replacement stops the remaining batch and oversized selections stay local", async () => {
+      const page = await newPage(), gate = hold();
+      try {
+        await expand(page);
+        const offset = requests.length;
+        await choose(page, Array.from({ length: 17 }, (_, index) => file(`blocked-${index}.txt`)));
+        await page.getByText("每次最多选择 16 个 TXT 文件", { exact: true }).waitFor();
+        assert.equal(await page.locator(".txt-format-submit").isDisabled(), true);
+        assert.equal(await page.evaluate(() => __txtFileReads), 0);
+        await choose(page, [file("old-batch-first.txt"), file("old-batch-second.txt")]);
+        await submit(page); await started(gate);
+        await choose(page, file("replacement.txt")); await submit(page); await finished(page);
+        await settle(page, gate);
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["old-batch-first.txt", "replacement.txt"]);
+        assert.equal(await page.locator(".txt-format-result h4").first().textContent(), "replacement_格式化.txt");
+      } finally { gate.release(); await page.close(); }
+    });
+    await run("TXT stopping a batch retains finished receipts and makes remaining files retryable", async () => {
+      const page = await newPage(), first = hold(), second = hold();
+      try {
+        await expand(page);
+        await choose(page, [file("completed.txt"), file("waiting.txt"), file("queued.txt")]);
+        const offset = requests.length;
+        await submit(page); await started(first); first.release(); await started(second);
+        const kept = await page.locator('.txt-format-batch .txt-format-download[href]').getAttribute("href");
+        await page.getByRole("button", { name: "停止批量整理", exact: true }).click();
+        await settle(page, second);
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["completed.txt", "waiting.txt"]);
+        assert.equal(await page.locator('.txt-format-batch .txt-format-download[href]').getAttribute("href"), kept);
+        await page.getByRole("button", { name: "重试未完成", exact: true }).click();
+        await page.getByText("已完成 3 / 3 份", { exact: true }).waitFor();
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["completed.txt", "waiting.txt", "waiting.txt", "queued.txt"]);
+        assert.equal(await page.locator('.txt-format-batch .txt-format-download[href]').first().getAttribute("href"), kept);
+      } finally { first.release(); second.release(); await page.close(); }
+    });
+    await run("TXT can append through the picker while one file is already being formatted", async () => {
+      const page = await newPage(), gate = hold();
+      try {
+        await expand(page);
+        const offset = requests.length;
+        const firstChooser = page.waitForEvent("filechooser");
+        await page.getByRole("button", { name: "选择 TXT 文件", exact: true }).click();
+        await (await firstChooser).setFiles(file("working.txt"));
+        await submit(page); await started(gate);
+        const addedChooser = page.waitForEvent("filechooser");
+        await page.getByRole("button", { name: "追加文件", exact: true }).click();
+        await (await addedChooser).setFiles([file("later.txt"), file("skip.txt")]);
+        const rows = page.locator(".txt-format-batch li");
+        assert.equal(await rows.count(), 3);
+        assert.equal(await rows.filter({ hasText: "working.txt" }).getByText("正在整理…", { exact: true }).count(), 1);
+        assert.equal(await page.getByRole("button", { name: "移除 skip.txt", exact: true }).isDisabled(), true);
+        await settle(page, gate);
+        await page.getByText("已完成 1 / 3 份", { exact: true }).waitFor();
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["working.txt"]);
+        const done = rows.filter({ has: page.getByRole("button", { name: "移除 working.txt", exact: true }) });
+        const receipt = done.locator("a.txt-format-download");
+        const kept = await receipt.getAttribute("href");
+        await done.locator("summary").click();
+        await receipt.evaluate(node => { window.__keptTxtLink = node; });
+        await page.getByRole("button", { name: "移除 skip.txt", exact: true }).click();
+        assert.equal(await done.locator("details").getAttribute("open"), "");
+        assert.equal(await receipt.evaluate(node => node === __keptTxtLink), true);
+        await page.getByRole("button", { name: "重试未完成", exact: true }).click();
+        await page.getByText("已完成 2 / 2 份", { exact: true }).waitFor();
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["working.txt", "later.txt"]);
+        assert.equal(await receipt.getAttribute("href"), kept);
+        await assertZip(page, page.locator(".txt-format-archive"), ["working_格式化.txt", "later_格式化.txt"]);
+      } finally { gate.release(); await page.close(); }
+    });
+    await run("TXT file drops preserve receipts on overflow and can reduce a batch to one result", async () => {
+      const page = await newPage();
+      const drop = names => page.locator(".txt-format-selection").evaluate((zone, { names, text }) => {
+        const data = new DataTransfer();
+        for (const name of names) data.items.add(new File([text], name, { type: "text/plain" }));
+        const over = new DragEvent("dragover", { dataTransfer: data, bubbles: true, cancelable: true });
+        zone.dispatchEvent(over);
+        const highlighted = zone.classList.contains("is-dragging");
+        const event = new DragEvent("drop", { dataTransfer: data, bubbles: true, cancelable: true });
+        zone.dispatchEvent(event);
+        return over.defaultPrevented && highlighted && event.defaultPrevented && !zone.classList.contains("is-dragging");
+      }, { names, text });
+      try {
+        await page.setViewportSize({ width: 320, height: 740 }); await expand(page);
+        const offset = requests.length;
+        assert(await drop(["keep.txt", "remove.txt"]));
+        assert.equal(requests.length, offset, "dropping files must only change the selection");
+        await submit(page);
+        await page.getByText("已完成 2 / 2 份", { exact: true }).waitFor();
+        const kept = await page.locator(".txt-format-batch .txt-format-download").first().getAttribute("href");
+        const archive = await page.locator(".txt-format-archive").getAttribute("href");
+        assert(await drop(Array.from({ length: 15 }, (_, index) => `overflow-${index}.txt`)));
+        await page.getByText("本次追加后将超过 16 份，请先移除不需要的文件。", { exact: true }).waitFor();
+        assert.equal(await page.locator(".txt-format-archive").getAttribute("href"), archive);
+        assert.equal(await page.locator(".txt-format-batch li").count(), 2);
+        await choose(page, Array.from({ length: 17 }, (_, index) => file(`replacement-${index}.txt`)));
+        await page.getByText("每次最多选择 16 个 TXT 文件", { exact: true }).waitFor();
+        assert.equal(await page.locator(".txt-format-archive").getAttribute("href"), archive, "an invalid replacement must preserve the current batch");
+        await page.getByRole("button", { name: "移除 remove.txt", exact: true }).press("Enter");
+        assert.equal(await page.locator(".txt-format-result h4").first().textContent(), "keep_格式化.txt");
+        assert.equal(await page.locator(".txt-format-result .txt-format-download").getAttribute("href"), kept);
+        assert.equal(await page.locator(".txt-format-archive").count(), 0);
+        assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+        await page.getByRole("button", { name: "清空选择", exact: true }).click();
+        assert.equal(await page.locator(".txt-format-result").isVisible(), false);
+        assert.equal(await page.locator(".txt-format-submit").isDisabled(), true);
+        assert.equal(await page.getByRole("button", { name: "选择 TXT 文件", exact: true }).evaluate(node => node === document.activeElement), true);
+        assert(await drop(["one.txt", "two.txt"]));
+        await page.evaluate(() => {
+          window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+          window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+        });
+        assert.equal(await page.locator(".txt-format-batch li").count(), 2, "the selected files remain editable after a cached page return");
+        assert.equal(await page.getByRole("button", { name: "移除 two.txt", exact: true }).isEnabled(), true);
+        assert.deepEqual(requests.slice(offset).map(body => body.fileName), ["keep.txt", "remove.txt"]);
       } finally { await page.close(); }
     });
     await run("TXT invalid files are rejected before read or upload and recover at 320px", async () => {
@@ -249,7 +407,53 @@ async function runFixture({ sourceOverride = "", pattern = "" } = {}) {
 }
 async function tick(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
 
-assert.equal(await runFixture(), 11);
+async function assertZip(page, link, names) {
+  const waiting = page.waitForEvent("download");
+  await link.click();
+  const download = await waiting;
+  assert.equal(download.suggestedFilename(), "TXT_整理结果.zip");
+  const read = spawnSync("python", ["-c", "import json,sys,zipfile\nwith zipfile.ZipFile(sys.argv[1]) as z: print(json.dumps([z.namelist(), z.testzip(), [z.read(n).decode('utf-8') for n in z.namelist()]]))", await download.path()], { encoding: "utf8", windowsHide: true });
+  assert.equal(read.status, 0, read.stderr);
+  const [actual, corrupt, contents] = JSON.parse(read.stdout);
+  assert.deepEqual(actual, names);
+  assert.equal(corrupt, null);
+  assert(contents.every(content => content.includes("　　这是第一行接着下一行。") && !content.includes("下一页")));
+}
+
+async function verifyArchiveReceiptLifetime() {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-txt-archive-lifetime-"));
+  const downloads = path.join(parent, "downloads");
+  const service = createTxtFormatToolService({ cwd: root, toolDownloadDir: downloads, maxFileBytes: 4096, ttlMs: 700, previewBytes: 256, sendJson });
+  class Response extends EventEmitter {
+    writeHead(status) { this.status = status; }
+    write() { if (this.held) return true; this.held = true; return false; }
+    end() { this.writableEnded = true; }
+    destroy() { this.destroyed = true; this.emit("close"); }
+  }
+  let response, download;
+  try {
+    const receipts = await Promise.all(["one.txt", "two.txt"].map(fileName => service.createDownload({ fileName, text })));
+    const ids = receipts.map(receipt => receipt.id);
+    response = new Response();
+    download = service.serveBatchDownload(response, ids);
+    assert.equal(response.status, 200);
+    await new Promise(resolve => setTimeout(resolve, Math.max(...receipts.map(receipt => Date.parse(receipt.expiresAt))) - Date.now() + 40));
+    const expired = new Response();
+    await service.serveBatchDownload(expired, ids);
+    assert.equal(expired.status, 410);
+    assert.deepEqual(fs.readdirSync(downloads).sort(), [...ids].sort(), "accepted archives retain their files until streaming finishes");
+    response.emit("drain"); await download;
+    assert.equal(response.writableEnded, true);
+    assert.deepEqual(fs.readdirSync(downloads), []);
+  } finally {
+    response?.destroy(); await download?.catch(() => {});
+    service.cleanup(); fs.rmdirSync(downloads); fs.rmdirSync(parent);
+  }
+}
+
+assert.equal(await runFixture(), 16);
+await verifyArchiveReceiptLifetime();
+console.log("PASS TXT archive accepted before expiry pins its files through response completion");
 const source = fs.readFileSync(path.join(publicRoot, sourcePath), "utf8");
 for (const control of [
   { name: "TXT response ownership", marker: "return operation === owner &&", replacement: "return true || operation === owner &&", pattern: "TXT new file owns results after late success", failure: /an old TXT response must not overwrite/ },
@@ -259,4 +463,4 @@ for (const control of [
   await assert.rejects(() => runFixture({ sourceOverride: source.replace(control.marker, control.replacement), pattern: control.pattern }), { name: "AssertionError", message: control.failure });
   console.log(`PASS negative control detects missing ${control.name}`);
 }
-console.log("Tools TXT passed (11 actual-host Chromium cases, actual formatter/routes with private temporary files, and 2 behavior negative controls)");
+console.log("Tools TXT passed (16 actual-host Chromium cases, archive lifetime, actual formatter/routes with private temporary files, and 2 behavior negative controls)");

@@ -8,22 +8,22 @@ export function createSearchRequestService({ api, filter, pageSize, sort, onWork
   const requests = createLatestRequestGate();
   const prefetchCache = createPrefetchCache({ limit: PREFETCH_LIMIT, ttlMs: PREFETCH_TTL_MS });
 
-  function requestFor(query, offset = 0) {
+  function requestFor(query, offset = 0, overrides = {}) {
     const params = new URLSearchParams({
       q: String(query || "").trim(),
       limit: String(pageSize()),
       offset: String(offset || 0),
-      sort: sort(),
-      filter: filter()
+      sort: overrides.sort ?? sort(),
+      filter: overrides.filter ?? filter()
     });
     const path = `/api/search?${params}`;
     return { key: path, path };
   }
 
-  function prefetch(query) {
+  function prefetch(query, overrides) {
     const normalized = String(query || "").trim();
     if (!normalized) return Promise.resolve(null);
-    const request = requestFor(normalized, 0);
+    const request = requestFor(normalized, 0, overrides);
     return prefetchCache.prefetch(request.key, (signal) => api(request.path, { signal }))
       .then((result) => result.data);
   }

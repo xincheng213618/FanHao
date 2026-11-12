@@ -6,6 +6,17 @@ const source = fs.readFileSync(new URL("../public/modules/novels/novel-page.js",
 const writerSource = fs.readFileSync(new URL("../public/modules/novels/progress-writer.js", import.meta.url), "utf8");
 const fullscreenSource = fs.readFileSync(new URL("../public/modules/novels/reader-fullscreen.js", import.meta.url), "utf8");
 const bookmarksSource = fs.readFileSync(new URL("../public/modules/novels/bookmarks.js", import.meta.url), "utf8");
+const chapterSearchSource = fs.readFileSync(new URL("../public/modules/novels/chapter-search.js", import.meta.url), "utf8");
+const readerFeatures = [
+  ["read-later.js", "createNovelReadLater, readingLaterBookKey"],
+  ["bookmark-shelf.js", "createNovelBookmarkShelf"],
+  ["book-text-search.js", "createNovelBookTextSearch"],
+  ["reader-auto-scroll.js", "createNovelAutoScroll, NOVEL_AUTO_SCROLL_SPEEDS"]
+].map(([file, bindings]) => {
+  const source = fs.readFileSync(new URL(`../public/modules/novels/${file}`, import.meta.url), "utf8")
+    .replace(/^import .*\r?\n/gm, "").replace(/^export /gm, "");
+  return [file, `Object.assign(globalThis, (() => {\n${source}\nreturn { ${bindings} };\n})());`];
+});
 const deferred = () => { let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject}; };
 const settle = async () => {for(let i=0;i<24;i++)await Promise.resolve();};
 class Element {
@@ -48,7 +59,9 @@ function harness({production=source,initial=detail(),respond}={}){
     localStorage:{getItem(){return null;},setItem(){}},createNovelCollectionAdmin:()=>({ensureState(){},stopPolling(){}})});
   vm.runInContext(writerSource.replace("export function createNovelProgressWriter", "function createNovelProgressWriter"), context, { filename: "production-progress-writer.js" });
   vm.runInContext(fullscreenSource.replace("export function createNovelReaderFullscreen", "function createNovelReaderFullscreen"), context, { filename: "production-reader-fullscreen.js" });
-  vm.runInContext(bookmarksSource.replace(/^import .*\r?\n/gm, "").replace("export function createNovelBookmarksPanel", "function createNovelBookmarksPanel"), context, { filename: "production-bookmarks.js" });
+  vm.runInContext(bookmarksSource.replace(/^import .*\r?\n/gm, "").replace(/^export /gm, ""), context, { filename: "production-bookmarks.js" });
+  vm.runInContext(chapterSearchSource.replace("export function createNovelChapterSearch", "function createNovelChapterSearch"), context, { filename: "production-chapter-search.js" });
+  for (const [file, feature] of readerFeatures) vm.runInContext(feature, context, { filename: `production-${file}` });
   vm.runInContext(production.replace(/^import .*\r?\n/gm,"").replace("export function createNovelPage","function createNovelPage")+"\nglobalThis.createPage=createNovelPage;",context,{filename:"production-novel-page.js"});
   const noop=()=>{};const page=context.createPage({api,state,els:{workGrid:grid},formatBytes:String,formatDateTime:String,formatNumber:String,
     cancelScheduledWorkRendering:noop,disconnectPeopleIndexAutoload:noop,hidePersonProfile:noop,openAdminScript:noop,pushRoute:noop,replaceRoute:noop,resetProgressiveCoverLoading:noop,setMainHeader:noop,syncRouteAfterNavigation:noop});

@@ -77,6 +77,82 @@ body.people-index-view .toolbar { padding: 20px 0 18px; }
 .stat-quick-filters .stat-sort-group { padding-top: 1px; margin-left: auto; }
 .stat-sort-select { min-height: 34px; font-weight: 500; background: var(--panel); }
 .browse-select-works { min-height: 34px; font-weight: 500; }
+.browse-advanced-toggle {
+  min-height: 34px;
+  gap: 7px;
+  border-color: var(--line);
+  background: var(--panel);
+  font-weight: 500;
+}
+.browse-advanced-toggle::after {
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  content: "";
+  transform: translateY(-2px) rotate(45deg);
+}
+.browse-advanced-toggle[aria-expanded="true"]::after { transform: translateY(1px) rotate(225deg); }
+.browse-advanced-toggle:is(.active, [aria-expanded="true"]) {
+  border-color: var(--accent);
+  background: var(--panel-soft);
+}
+.browse-advanced-filters {
+  display: grid;
+  flex: 1 0 100%;
+  min-width: 0;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.browse-advanced-filters[hidden] { display: none; }
+.browse-advanced-filters > .browse-traits { border: 0; padding: 0; }
+.person-work-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  padding: 3px;
+}
+.person-sort-option, .person-sort-more {
+  position: relative;
+  display: inline-flex;
+  min-width: 34px;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  padding: 0 7px;
+  cursor: pointer;
+}
+.person-sort-option svg { width: 17px; height: 17px; }
+.person-sort-direction { font-size: 12px; font-weight: 700; }
+.person-sort-direction:empty { display: none; }
+.person-sort-option:hover, .person-sort-more:hover { background: var(--panel-soft); color: var(--accent-strong); }
+.person-sort-option[aria-pressed="true"], .person-sort-more.active {
+  background: var(--panel-soft);
+  color: var(--accent-strong);
+}
+.person-sort-option:focus-visible, .person-sort-more:has(select:focus-visible),
+.browse-advanced-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.person-sort-more .stat-sort-select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  opacity: 0;
+  padding: 0;
+  cursor: pointer;
+}
 .stat-quick-filters .bulk-delete-controls { flex-basis: 100%; }
 .browse-traits { flex: 1 0 100%; min-width: 0; display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
 .browse-traits-note { color: var(--muted); font-size: 11px; line-height: 1.5; }

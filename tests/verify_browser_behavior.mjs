@@ -39,6 +39,7 @@ try {
       await verifyAndroidMangaReadingProgress(browser);
     } else if (process.argv.includes("--android-person-first")) {
       await verifyAndroidPersonFirstLibraries(browser);
+      await verifyAndroidPersonWorkSearch(browser);
     } else if (process.argv.includes("--short-video-controls")) {
       assert(!suppliedBaseUrl, "short-video control checks require their own private fixture server");
       await verifyShortVideoControls(browser);
@@ -49,6 +50,10 @@ try {
       assert(!suppliedBaseUrl, "short-video search checks require their own private fixture server");
       await verifyShortVideoSearchHints(browser);
       await verifyShortVideoSearchOverlap(browser);
+    } else if (process.argv.includes("--short-video-collections")) {
+      assert(!suppliedBaseUrl, "short-video collection checks require their own private fixture server");
+      await verifyShortVideoCollectionPickerBatch(browser);
+      await verifyShortVideoCollections(browser);
     } else if (process.argv.includes("--fanhao-rankings-entry")) {
       assert(!suppliedBaseUrl, "rankings entry checks require their own private fixture server");
       await verifyFanhaoRankingsEntry(browser);
@@ -62,10 +67,14 @@ try {
       await verifyShortVideoControls(browser);
       await verifyShortVideoSearchHints(browser);
       await verifyAndroidRestartActionConvergence(browser);
+    } else if (process.argv.includes("--fanhao-search-suggestions")) {
+      await verifyFanhaoSearchSuggestions(browser);
     } else if (process.argv.includes("--web-only")) {
+      await verifyFanhaoSearchSuggestions(browser);
       await verifyFanhaoRequestLifecycle(browser);
       await verifyWebSurfaceBehavior(browser);
     } else {
+    await verifyFanhaoSearchSuggestions(browser);
     await verifyFanhaoRequestLifecycle(browser);
     if (process.argv.includes("--fanhao-requests") && !suppliedBaseUrl) {
       await verifyFanhaoRankingsEntry(browser);
@@ -83,6 +92,7 @@ try {
     await verifyAndroidUpdateLifecycle(browser);
     await verifyAndroidAppConfirmation(browser);
     await verifyAndroidPersonFirstLibraries(browser);
+    await verifyAndroidPersonWorkSearch(browser);
     await verifyAndroidPhotoCatalog(browser);
     await verifyAuthorIndexReturn(browser);
     await verifyAuthorReturnDiscardsDelayedDetail(browser);
@@ -98,6 +108,7 @@ try {
     await verifyAndroidFavoriteFolders(browser);
     await verifyAndroidFavoriteRoute(browser);
     await verifyAndroidFavoriteServerSwitch(browser);
+    if (!suppliedBaseUrl) await verifyShortVideoCollectionPickerBatch(browser);
     await verifyShortVideoCollections(browser);
     }
     }
@@ -242,15 +253,28 @@ async function verifyFanhaoRankingsEntry(browser, { appSource } = {}) {
   page.on("pageerror", error => errors.push(error.message));
   try {
     if (appSource) await page.route(url => url.pathname === "/app.js", route => route.fulfill({ contentType: "text/javascript", body: appSource }));
+    await page.route("**/media/image/rank-marker-cover", route => route.fulfill({
+      contentType: "image/svg+xml",
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="100"><rect width="100%" height="100%" fill="#527ba3"/></svg>'
+    }));
     await page.route(url => paths.includes(url.pathname), async route => {
       const url = new URL(route.request().url());
       const read = { url, start: performance.now() };
       reads.push(read);
       if (url.pathname !== "/api/rankings") await new Promise(resolve => setTimeout(resolve, 250));
       const offset = Number(url.searchParams.get("offset") || 0), limit = Number(url.searchParams.get("limit") || 0);
+      const coverTraits = [
+        { ltx: true, ltxLocal: true, embeddedChinese: true, uncensored: true, hasSidecar: true, hasChineseSidecar: true, quality4k: true },
+        { ltx: true, hasSidecar: true, quality1080p: true },
+        { hasChineseSidecar: true, quality720p: true }
+      ];
       const rows = Array.from({ length: Math.min(limit, 130 - offset) }, (_, index) => ({
         id: `cold-rank-${offset + index}`, title: `Synthetic ranked work ${offset + index}`, videoCount: 1, playableCount: 1,
-        ranking: { rankNo: offset + index + 1 }
+        ranking: offset + index === 1 ? null : { rankNo: offset + index + 1 },
+        traits: { flags: coverTraits[offset + index] },
+        localMarkers: offset + index === 0 ? ["A"] : [],
+        coverId: offset + index === 0 ? "rank-marker-cover" : "",
+        infoSummary: { rating: 4.56, ratingCount: 1250 }
       }));
       const data = url.pathname === "/api/library"
         ? { scope: "main", access: { mode: "remote", hints: { workPageSize: 40 } }, people: [], works: [], totals: {}, user: {} }
@@ -280,6 +304,73 @@ async function verifyFanhaoRankingsEntry(browser, { appSource } = {}) {
     assert.equal(nextPage()?.url.searchParams.get("offset"), "40", "the first continuation must start after the accepted library page-size hint");
     assert.equal(nextPage()?.url.searchParams.get("limit"), "40");
     await page.locator('.work-card[data-work-id="cold-rank-40"]').waitFor();
+    const markedCover = page.locator('.work-card[data-work-id="cold-rank-0"] .work-cover');
+    await markedCover.locator("img.loaded").waitFor();
+    assert.deepEqual(await markedCover.locator(".work-cover-top .cover-marker").allTextContents(), ["本机LTX", "C", "U", "中字"]);
+    assert.equal(await markedCover.locator(".work-cover-bottom .cover-marker").count(), 0);
+    assert.equal(await markedCover.locator(".local-marker-button.active").textContent(), "A");
+    assert.equal(await markedCover.locator(".cover-quality").textContent(), "4K");
+    assert.deepEqual(await page.locator('.work-card[data-work-id="cold-rank-1"] .cover-marker').allTextContents(), ["LTX", "外挂字幕"]);
+    assert.deepEqual(await page.locator('.work-card[data-work-id="cold-rank-2"] .cover-marker').allTextContents(), ["中字"]);
+    assert.equal(await page.locator('[data-work-id="cold-rank-1"] .cover-quality, [data-work-id="cold-rank-2"] .cover-quality').count(), 0);
+
+    await page.setViewportSize({ width: 2560, height: 1000 });
+    await markedCover.scrollIntoViewIfNeeded();
+    const { gridWidth, gap, columns } = await page.locator("#workGrid").evaluate((grid) => {
+      const style = getComputedStyle(grid);
+      return { gridWidth: grid.clientWidth, gap: parseFloat(style.columnGap), columns: style.gridTemplateColumns.split(" ").length };
+    });
+    assert(columns < Math.floor((gridWidth + gap) / (248 + gap)), "wide screens must fit fewer standard cards than before");
+    const unrankedCover = page.locator('.work-card[data-work-id="cold-rank-1"] .work-cover');
+    await page.mouse.move(0, 0);
+    const desktopCover = await unrankedCover.boundingBox();
+    const firstBadge = await unrankedCover.locator(".cover-marker").first().boundingBox();
+    assert(firstBadge && desktopCover && Math.abs(firstBadge.x - desktopCover.x - 8) < 1,
+      "hidden actions must leave no gap before the visible badges");
+    const inactiveMarker = unrankedCover.locator(".local-marker-button");
+    const inactiveFavorite = unrankedCover.locator(".favorite-button");
+    assert.equal(await inactiveMarker.evaluate((button) => getComputedStyle(button).opacity), "0");
+    assert.equal(await inactiveFavorite.evaluate((button) => getComputedStyle(button).opacity), "0");
+    await unrankedCover.hover();
+    assert.equal(await inactiveMarker.evaluate((button) => getComputedStyle(button).opacity), "1");
+    assert.equal(await inactiveFavorite.evaluate((button) => getComputedStyle(button).opacity), "1");
+    const [hoveredCover, rightMarker, rightFavorite, hoveredBadge] = await unrankedCover.evaluate((cover) => [
+      cover, cover.querySelector(".local-marker-button"), cover.querySelector(".favorite-button"), cover.querySelector(".cover-marker")
+    ].map((element) => element.getBoundingClientRect().toJSON()));
+    assert(Math.abs(hoveredCover.right - rightMarker.right - 8) < 1 && Math.abs(rightFavorite.right + 4 - rightMarker.left) < 1,
+      `inactive actions must share the top-right corner on hover: ${JSON.stringify({ hoveredCover, rightMarker, rightFavorite })}`);
+    assert.equal(hoveredBadge.left - hoveredCover.left, firstBadge.x - desktopCover.x);
+    await page.mouse.move(0, 0);
+    await unrankedCover.locator(".work-card-main").focus();
+    assert.equal(await inactiveMarker.evaluate((button) => getComputedStyle(button).opacity), "1", "keyboard focus must reveal the actions");
+    await unrankedCover.locator(".work-card-main").blur();
+    assert.equal(await markedCover.locator(".work-cover-top > :first-child").textContent(), "TOP 1");
+    const rankingCover = await markedCover.boundingBox();
+    const qualityBadge = await markedCover.locator(".cover-quality").boundingBox();
+    assert(qualityBadge && rankingCover && Math.abs(rankingCover.x + rankingCover.width - qualityBadge.x - qualityBadge.width - 8) < 1
+      && Math.abs(qualityBadge.y - rankingCover.y - 8) < 1, "4K must occupy the top-right corner");
+    const ratingColor = await markedCover.locator(".cover-rating").evaluate((badge) => getComputedStyle(badge).color);
+    assert.equal(ratingColor, "rgb(255, 208, 99)");
+    const badgeColors = await markedCover.locator(".cover-marker, .cover-quality, .local-marker-button").evaluateAll((badges) =>
+      badges.map((badge) => getComputedStyle(badge).color));
+    assert(badgeColors.every((color) => color === ratingColor), "upper badge text must match the rating yellow");
+    const activeMarker = markedCover.locator(".local-marker-button.active");
+    const markerBackground = await markedCover.locator(".cover-marker").first().evaluate((badge) => getComputedStyle(badge).backgroundColor);
+    assert.equal(await activeMarker.evaluate((badge) => getComputedStyle(badge).backgroundColor), markerBackground);
+    await activeMarker.hover();
+    assert.equal(await activeMarker.evaluate((badge) => getComputedStyle(badge).backgroundColor), markerBackground);
+    const favoriteNextToQuality = await markedCover.locator(".favorite-button").boundingBox();
+    assert(favoriteNextToQuality && Math.abs(favoriteNextToQuality.x + favoriteNextToQuality.width + 4 - qualityBadge.x) < 1,
+      "hover actions must sit beside the 4K badge");
+
+    await page.setViewportSize({ width: 320, height: 800 });
+    await page.locator("#workCardSize").selectOption("compact");
+    await markedCover.scrollIntoViewIfNeeded();
+    const [image, topOverlay, bottomOverlay] = await markedCover.evaluate(cover => (
+      ["img", ".work-cover-top", ".work-cover-bottom"].map(selector => cover.querySelector(selector).getBoundingClientRect().toJSON())
+    ));
+    assert(image.top <= topOverlay.top && topOverlay.bottom <= bottomOverlay.top && bottomOverlay.bottom <= image.bottom,
+      `compact cards must leave room for the markers, ranking, controls and rating: ${JSON.stringify({ image, topOverlay, bottomOverlay })}`);
     assert.deepEqual(errors, []);
   } finally { await page.close(); }
 }
@@ -659,6 +750,106 @@ async function verifyShortVideoControlsNegative(browser) {
   console.log('short-video-controls: in-memory production retention negative rejected by the control-ancestry assertion');
 }
 
+async function verifyFanhaoSearchSuggestions(browser) {
+  const person = { id: "suggested-person", name: "候选测试人物", workCount: 1, sourceCount: 1 };
+  const indexPerson = { id: "index-person", name: "索引测试人物", workCount: 1, sourceCount: 1 };
+  const work = { id: "suggested-work", title: "候选测试作品", infoSummary: { code: "TEST-001" }, videoCount: 1, playableCount: 1 };
+  const hiddenWork = { id: "missing-work", title: "隐藏未下载作品", missingLocal: true, javdbUrl: "https://example.invalid/fixture" };
+  for (const mobile of [false, true]) {
+    const targetScope = mobile ? "western" : "main";
+    const payload = { people: [mobile ? { ...person, searchScopes: [targetScope] } : person], works: [work, hiddenWork], total: 2, offset: 0 };
+    const page = await browser.newPage({
+      viewport: { width: mobile ? 320 : 1280, height: 720 }, isMobile: mobile, hasTouch: mobile
+    });
+    const calls = [];
+    const personReads = [];
+    const errors = [];
+    page.on("pageerror", (error) => errors.push(String(error)));
+    let releaseOld, oldArrived;
+    const held = new Promise(resolve => { releaseOld = resolve; });
+    const oldRequested = new Promise(resolve => { oldArrived = resolve; });
+    try {
+      await page.addInitScript(() => localStorage.setItem("fanhao.showMissingLocalWorks", "0"));
+      await page.route(`${baseUrl}/api/**`, async (route) => {
+        const url = new URL(route.request().url());
+        const { pathname, searchParams } = url;
+        const scope = searchParams.get("scope") || "main";
+        let data = {}, status = 200;
+        if (pathname === "/api/library") data = { scope, people: [scope === "western" ? person : indexPerson], works: [], access: { mode: "local" }, totals: {}, user: {} };
+        if (pathname === "/api/people/suggested-person") {
+          personReads.push(scope);
+          if (scope === targetScope) data = { person, ...payload, facets: { all: 1 } };
+          else { data = { error: "人物属于另一馆藏分支" }; status = 404; }
+        }
+        if (pathname === "/api/search") {
+          calls.push(searchParams.get("q"));
+          if (searchParams.get("q") === "old") {
+            oldArrived();
+            await held;
+            data = { ...payload, people: [{ ...person, name: "迟到候选" }] };
+          } else data = payload;
+        }
+        await route.fulfill({ json: data, status });
+      });
+      await page.goto(`${baseUrl}/fanhao`);
+      await page.locator(".person-index-card").filter({ hasText: indexPerson.name }).waitFor();
+      const search = page.getByRole("combobox", { name: "全库搜索番号、标题、人物、类别或片商" });
+      const list = page.getByRole("listbox", { name: "搜索候选" });
+      const personOption = list.getByRole("option", { name: /候选测试人物/ });
+      const workOption = list.getByRole("option", { name: /TEST-001 · 候选测试作品/ });
+      if (mobile) {
+        await search.fill("测试人物");
+        await personOption.waitFor();
+        const box = await list.boundingBox();
+        assert(box && box.x >= 0 && box.x + box.width <= 320, "suggestions must fit a 320px viewport");
+        await personOption.tap();
+        await page.waitForURL(url => url.pathname === "/western" && url.searchParams.get("personId") === person.id);
+        await page.locator(`[data-work-id="${work.id}"]`).waitFor();
+        assert.deepEqual(calls, ["测试人物"], "touch selection must open the person without a second search");
+      } else {
+        await search.fill("old");
+        await oldRequested;
+        await search.fill("current");
+        await personOption.waitFor();
+        assert.equal(await list.getByRole("option", { name: /隐藏未下载作品/ }).count(), 0, "suggestions must respect the work list visibility preference");
+        const lateResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("q") === "old");
+        releaseOld();
+        await lateResponse;
+        await search.press("ArrowDown");
+        assert.equal(await personOption.getAttribute("aria-selected"), "true");
+        assert.equal(await search.getAttribute("aria-activedescendant"), await personOption.getAttribute("id"));
+        assert.equal(await list.getByRole("option", { name: /迟到候选/ }).count(), 0);
+        await search.press("Escape");
+        await list.waitFor({ state: "hidden" });
+        assert.equal(await search.inputValue(), "current", "closing suggestions must retain the draft");
+        await search.press("Enter");
+        await page.waitForURL(url => url.searchParams.get("q") === "current");
+        assert.deepEqual(calls, ["old", "current"], "full search must consume the same read that provided suggestions");
+        await search.fill("测试作品");
+        await workOption.waitFor();
+        await search.press("ArrowDown");
+        await search.press("ArrowDown");
+        assert.equal(await workOption.getAttribute("aria-selected"), "true");
+        const [player] = await Promise.all([page.waitForEvent("popup"), search.press("Enter")]);
+        await player.waitForURL(url => url.pathname === "/player.html" && url.searchParams.get("workId") === work.id);
+        await player.close();
+        await search.fill("全部");
+        await list.getByRole("option", { name: "查看全部搜索结果" }).click();
+        await page.waitForURL(url => url.searchParams.get("q") === "全部");
+        assert.deepEqual(calls, ["old", "current", "测试作品", "全部"], "direct work and full results must reuse candidate data");
+        await page.getByRole("button", { name: /候选测试人物/ }).click();
+        await page.waitForURL(url => url.pathname === "/fanhao" && url.searchParams.get("personId") === person.id);
+      }
+      assert.deepEqual(personReads, [targetScope], "search person links must read the actual branch without a failed request");
+      assert.deepEqual(errors, []);
+    } finally {
+      releaseOld();
+      await page.close();
+    }
+  }
+  console.log("PASS FanHao search suggestions share the search read, fence late responses, and open works by keyboard or cross-branch people by touch");
+}
+
 async function verifyFanhaoRequestLifecycle(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const pageErrors = [];
@@ -965,7 +1156,8 @@ async function verifyFanhaoRequestLifecycle(browser) {
     await page.locator('.work-card[data-work-id="paging-rankings-A"]').waitFor();
     await page.waitForFunction(() => !document.querySelector("#workGrid .load-more-row"));
     assert.equal(await page.locator("#workGrid .work-card").count(), 2);
-    assert((await page.locator(".ranking-toolbar-summary").textContent()).includes("9,999 榜单"), "the ranking summary must retain its independent full-board total");
+    assert.equal(await page.locator('.ranking-scope-chip[data-scope="all"] strong').textContent(), "9,999", "the ranking scope must retain its independent full-board total");
+    assert.equal(await page.locator(".ranking-toolbar-summary").textContent(), "显示 2 部", "the ranking summary counts the visible unique cards");
     await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)); await page.waitForTimeout(150);
     assert.deepEqual(appendOffsets(pagingScenario), [], "ranking data.total=3 must stop after three raw rows despite rankingTotal=9999 and two unique cards");
     console.log("PASS FanHao ranking page total is independent of full-board total");
@@ -1117,6 +1309,12 @@ async function verifyWorkSearchShortcut(page) {
   const search = page.locator("#workSearch");
   assert.equal(await search.getAttribute("aria-keyshortcuts"), "/");
   assert.equal(await page.locator(".work-search .search-shortcut-hint").textContent(), "/");
+  assert(await search.evaluate((input) => {
+    const field = input.getBoundingClientRect();
+    const hint = input.nextElementSibling.getBoundingClientRect();
+    return hint.width > 0 && hint.left >= field.right
+      && Math.abs((field.top + field.bottom) - (hint.top + hint.bottom)) < 2;
+  }), "the search shortcut hint sits to the right of the input on the same row");
   await page.evaluate(() => {
     const panel = document.createElement("section"); panel.id = "shortcutFixture";
     panel.innerHTML = '<button id="shortcutAway">Other action</button><textarea id="shortcutText"></textarea><div id="shortcutEditable" contenteditable="true">Editable</div><div id="shortcutModal" role="dialog" hidden><button id="shortcutModalAction">Modal action</button></div><dialog id="shortcutNative"><button id="shortcutNativeAction">Dialog action</button></dialog>';
@@ -2092,6 +2290,132 @@ async function verifyAndroidPersonFirstLibraries(browser) {
     assert.deepEqual(pageErrors, [], "person-first category gestures must not produce script errors");
   } finally {
     await touchSession.detach();
+    await page.close();
+  }
+}
+
+async function verifyAndroidPersonWorkSearch(browser) {
+  const page = await browser.newPage({ viewport: { width: 320, height: 740 }, hasTouch: true, isMobile: true });
+  const pageErrors = [], requests = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+  const person = { id: "main-person", name: "测试女优", workCount: 160 };
+  const works = Array.from({ length: 160 }, (_, index) => ({
+    id: `person-search-${index + 1}`, personId: person.id, personName: person.name,
+    title: `ABC-${String(index + 1).padStart(3, "0")} ${index === 159 ? "深处标题" : "Synthetic work"}`,
+    videos: [], infoSummary: { releaseDate: "2024-01-01" }, updatedAt: "2024-01-01"
+  }));
+  let retryCount = 0, failCachedRead = false, releasePending, pendingStarted;
+  const pending = new Promise(resolve => { releasePending = resolve; });
+  const started = new Promise(resolve => { pendingStarted = resolve; });
+  try {
+    await page.addInitScript(() => {
+      localStorage.clear();
+      localStorage.setItem("fanhao.serverUrl", location.origin);
+    });
+    await page.route(url => url.pathname === `/api/people/${person.id}`, async route => {
+      const params = new URL(route.request().url()).searchParams;
+      const query = params.get("q") || "";
+      requests.push(params);
+      if (query === "过期关键词") { pendingStarted(); await pending; }
+      if (query === "ABC-160" && (++retryCount === 1 || failCachedRead)) {
+        await route.fulfill({ status: 503, json: { error: "合成请求暂时中断" } });
+        return;
+      }
+      const matches = query && query !== "旧服务" ? works.filter(work => work.title.includes(query)) : works;
+      await route.fulfill({ json: {
+        person, works: matches.slice(0, Number(params.get("limit"))), total: matches.length, filmographyCount: works.length,
+        facets: { all: matches.length, localOnly: matches.length }, year: params.get("year"),
+        years: [{ value: "all", label: "全部年份", count: works.length }, { value: "2024", label: "2024 年", count: works.length }],
+        ...(query && query !== "旧服务" ? { query } : {})
+      } }).catch(() => {});
+    });
+    await page.route(url => url.pathname === "/api/works/person-search-160", route => route.fulfill({ json: { work: works.at(-1), person } }));
+    await page.goto(`${baseUrl}/android-client/index.html#personDetail?personId=main-person&scope=main`, { waitUntil: "domcontentloaded" });
+    const toolbar = page.locator(".person-detail-work-toolbar");
+    const form = page.locator(".person-detail-work-search");
+    const input = form.getByRole("searchbox");
+    const target = page.locator('[data-work-detail-id="person-search-160"]');
+    await toolbar.waitFor();
+    assert.equal(await target.count(), 0, "the target starts beyond the first loaded page");
+    assert.equal(await form.evaluate(node => node.scrollWidth <= node.clientWidth
+      && [...node.children].every(control => control.getBoundingClientRect().height >= 44)), true);
+    await toolbar.getByRole("button", { name: /年份/ }).click();
+    await page.getByRole("dialog", { name: "发行年份" }).getByRole("button", { name: /2024 年/ }).click();
+    await toolbar.getByRole("button", { name: /年份，当前2024 年/ }).waitFor();
+    await toolbar.getByRole("button", { name: /排序/ }).click();
+    await page.getByRole("dialog", { name: "作品排序" }).getByRole("button", { name: "标题", exact: true }).click();
+    await toolbar.getByRole("button", { name: /排序，当前标题/ }).waitFor();
+    await toolbar.getByRole("button", { name: /筛选/ }).click();
+    await page.getByRole("dialog", { name: "作品筛选" }).getByRole("button", { name: /本地/ }).click();
+    await toolbar.getByRole("button", { name: /筛选，当前本地/ }).waitFor();
+
+    await input.evaluate(node => {
+      node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      node.value = "ABC-160";
+      node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
+      node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      node.form.requestSubmit();
+    });
+    assert.equal(requests.some(params => params.has("q")), false, "confirming a composition candidate must not start a search");
+    await input.press("Enter");
+    const error = page.locator(".person-detail-work-error");
+    await error.getByText("合成请求暂时中断").waitFor();
+    assert.equal(await input.inputValue(), "ABC-160");
+    assert.match(new URL(page.url()).hash, /query=ABC-160/);
+    await error.getByRole("button", { name: "重试" }).click();
+    await target.waitFor();
+    assert.equal(await page.locator(".person-detail-work-results .work-card").count(), 1);
+    assert.deepEqual(["q", "limit", "offset", "scope", "year", "sort", "filter"].map(key => requests.at(-1).get(key)),
+      ["ABC-160", "48", "0", "main", "2024", "title", "localOnly"]);
+
+    await target.click();
+    await page.locator(".work-detail-hero").waitFor();
+    failCachedRead = true;
+    await page.locator(".fanhao-detail-chrome-back").click();
+    await target.waitFor();
+    await error.getByText(/当前显示本地缓存/).waitFor();
+    assert.equal(await input.inputValue(), "ABC-160");
+    assert.match(new URL(page.url()).hash, /query=ABC-160/);
+    failCachedRead = false;
+    await error.getByRole("button", { name: "重试" }).click();
+    await error.waitFor({ state: "hidden" });
+    await target.waitFor();
+
+    await input.fill("过期关键词");
+    await input.press("Enter");
+    await started;
+    await input.fill("深处标题");
+    await input.press("Enter");
+    await target.waitFor();
+    releasePending();
+    await page.waitForFunction(() => new URLSearchParams(location.hash.split("?")[1]).get("query") === "深处标题");
+    assert.equal(await input.inputValue(), "深处标题");
+    assert.equal(await target.count(), 1);
+
+    await input.fill("Synthetic work");
+    await input.press("Enter");
+    const continuation = page.locator(".person-detail-work-results .load-more button");
+    await continuation.waitFor();
+    const moreRequested = page.waitForRequest(request => {
+      const params = new URL(request.url()).searchParams;
+      return params.get("q") === "Synthetic work" && params.get("limit") === "96";
+    });
+    await continuation.click();
+    await moreRequested;
+    await page.locator('[data-work-detail-id="person-search-90"]').waitFor();
+    assert.equal(await input.inputValue(), "Synthetic work");
+
+    await input.fill("旧服务");
+    await input.press("Enter");
+    await error.getByText(/请更新电脑端/).waitFor();
+    assert.equal(await page.locator(".person-detail-work-results .work-card").count(), 0);
+    await form.getByRole("button", { name: "清除作品搜索" }).click();
+    await toolbar.waitFor();
+    assert.equal(await input.inputValue(), "");
+    assert.equal(requests.at(-1).has("q"), false);
+    assert.deepEqual(pageErrors, []);
+  } finally {
+    releasePending();
     await page.close();
   }
 }
@@ -5135,6 +5459,139 @@ async function verifyAndroidFavoriteServerSwitch(browser) {
     assert.equal(await page.locator('.favorite-folder-strip button[aria-label^="旧服务器"]').count(), 0, "switching Android servers must prevent an older favorite GET from rendering over the new server state");
   } finally {
     releaseOldFavorite?.();
+    await page.close();
+  }
+}
+
+async function verifyShortVideoCollectionPickerBatch(browser) {
+  fixtureCollections.clear();
+  fixtureCollectionSequence = 0;
+  const addCollection = (id, name) => fixtureCollections.set(id, { collection: { id, name }, videoIds: new Set() });
+  for (let index = 0; index < 24; index += 1) addCollection(`batch-other-${index}`, `其他清单 ${index}`);
+  addCollection("batch-first", "ＶＲ · 樱花");
+  addCollection("batch-retry", "稍后看");
+  addCollection("batch-back-first", "返回检验 1");
+  addCollection("batch-back-next", "返回检验 2");
+  const writes = [];
+  let createCount = 0;
+  let failRetry = true;
+  let failCreated = true;
+  let releaseFirst, releaseBack;
+  const holdFirst = new Promise(resolve => { releaseFirst = resolve; });
+  const holdBack = new Promise(resolve => { releaseBack = resolve; });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  const collectionsPath = "/api/short-videos/collections";
+  try {
+    await page.route(url => url.origin === baseUrl && url.pathname.startsWith(collectionsPath), async route => {
+      const url = new URL(route.request().url());
+      if (route.request().method() === "POST" && url.pathname === collectionsPath) createCount += 1;
+      if (route.request().method() !== "PUT") return route.continue();
+      const [, id, videoId] = /\/collections\/([^/]+)\/videos\/([^/]+)$/.exec(url.pathname) || [];
+      writes.push({ id, videoId });
+      if (id === "batch-first" && writes.length === 1) {
+        await holdFirst;
+      }
+      if (id === "batch-back-first") await holdBack;
+      if ((id === "batch-retry" && failRetry) || (id === "svc_fixture_1" && failCreated)) {
+        if (id === "batch-retry") failRetry = false;
+        else failCreated = false;
+        return route.fulfill({ status: 409, json: { error: "合成写入失败" } });
+      }
+      return route.continue();
+    });
+    await page.goto(`${baseUrl}/short-videos`, { waitUntil: "domcontentloaded" });
+    await page.locator(".short-video-card .short-video-thumb-open").first().click();
+    await page.setViewportSize({ width: 320, height: 740 });
+    const trigger = page.locator(".short-video-rail-button.is-collection");
+    await trigger.click();
+    const picker = page.getByRole("dialog", { name: "加入清单" });
+    const filter = picker.getByRole("searchbox", { name: "搜索清单名称" });
+    const visible = picker.locator(".short-video-collection-picker-item:visible");
+    const multiple = picker.getByRole("button", { name: "多选", exact: true });
+    await filter.waitFor({ state: "visible" });
+    assert.equal(await filter.evaluate(input => {
+      const bounds = input.getBoundingClientRect();
+      return bounds.left >= 0 && bounds.right <= innerWidth && bounds.height >= 44;
+    }), true, "the picker has a usable search input at 320px");
+    await multiple.click();
+    await filter.fill("vr");
+    assert.deepEqual(await visible.locator("span").allTextContents(), ["ＶＲ · 樱花"]);
+    await filter.press("ArrowDown");
+    assert.equal(await visible.first().evaluate(button => document.activeElement === button), true);
+    await page.keyboard.press("Enter");
+    assert.equal(await visible.first().getAttribute("aria-pressed"), "true");
+    await filter.evaluate(node => {
+      node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      node.value = "稍";
+      node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    });
+    await filter.press("Escape");
+    assert.deepEqual(await visible.locator("span").allTextContents(), ["ＶＲ · 樱花"], "IME drafts must leave the committed choices visible");
+    await filter.evaluate(node => {
+      node.value = "稍";
+      node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    });
+    assert.deepEqual(await visible.locator("span").allTextContents(), ["稍后看"]);
+    await visible.first().click();
+    const selected = picker.getByRole("button", { name: "加入 2 个清单" });
+    assert.equal(await selected.isEnabled(), true, "batch selection spans successive filters");
+    await selected.click();
+    await waitFor(() => writes.length, count => count === 1, 5000);
+    assert.deepEqual(writes.map(write => write.id), ["batch-first"], "only one membership write may be in flight");
+    assert.equal(await selected.isDisabled(), true);
+    assert.equal(await picker.getByRole("button", { name: "创建并加入" }).isDisabled(), true);
+    releaseFirst();
+    await picker.getByText(/已确认 1 个清单，1 个未完成/).waitFor();
+    const remaining = picker.getByRole("button", { name: "加入 1 个清单" });
+    assert.equal(await remaining.evaluate(button => document.activeElement === button), true);
+    assert.deepEqual(writes.map(write => write.id), ["batch-first", "batch-retry"]);
+    await remaining.click();
+    await picker.waitFor({ state: "detached" });
+    assert.deepEqual(writes.map(write => write.id), ["batch-first", "batch-retry", "batch-retry"], "retry targets only unfinished destinations");
+    for (const id of ["batch-first", "batch-retry"]) {
+      assert.deepEqual([...fixtureCollections.get(id).videoIds], [writes[0].videoId]);
+    }
+
+    await trigger.click();
+    await picker.getByRole("textbox", { name: "新清单名称" }).fill("合成待归档");
+    await picker.getByRole("button", { name: "创建并加入" }).click();
+    await picker.getByText("合成写入失败", { exact: true }).waitFor();
+    assert.equal(createCount, 1);
+    assert.equal(await picker.getByRole("textbox", { name: "新清单名称" }).isDisabled(), true);
+    await picker.getByRole("button", { name: "重试加入" }).click();
+    await picker.waitFor({ state: "detached" });
+    assert.equal(createCount, 1, "a successful create is never replayed after the add fails");
+    assert.deepEqual(writes.slice(-2).map(write => write.id), ["svc_fixture_1", "svc_fixture_1"]);
+
+    await trigger.click();
+    await filter.fill("不存在的清单");
+    await picker.getByText("没有匹配的清单", { exact: true }).waitFor();
+    await filter.fill("其他清单 23");
+    await visible.first().click();
+    await picker.waitFor({ state: "detached" });
+    assert.equal(writes.at(-1).id, "batch-other-23", "one-click add remains available after filtering");
+
+    await trigger.click();
+    await filter.fill("返回检验");
+    await multiple.click();
+    await visible.first().click();
+    await visible.last().click();
+    await selected.click();
+    await waitFor(() => writes.at(-1)?.id, id => id === "batch-back-first", 5000);
+    await page.goBack();
+    await picker.waitFor({ state: "detached" });
+    const acknowledged = page.waitForResponse(response => response.request().method() === "PUT"
+      && response.url().includes("/collections/batch-back-first/"));
+    releaseBack();
+    await (await acknowledged).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.equal(writes.filter(write => write.id === "batch-back-next").length, 0,
+      "browser Back retires unsent destinations while leaving the accepted write intact");
+    assert.deepEqual([...fixtureCollections.get("batch-back-first").videoIds], [writes[0].videoId]);
+    console.log("Short-video collection picker passed (name search, IME, multi-add, partial retry, create retry, and Back ownership).");
+  } finally {
+    releaseFirst();
+    releaseBack();
     await page.close();
   }
 }

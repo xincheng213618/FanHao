@@ -8,7 +8,7 @@
     <style>html.app-module-loading body { visibility: hidden; }</style>
     <link rel="stylesheet" href="/css/foundation.css?v=20260710-web-css-modules-01" />
     <link rel="stylesheet" href="/css/shell.css?v=20260713-search-index-02" />
-    <link rel="stylesheet" href="/modules/fanhao/disk-usage/styles.css?v=20260816-disk-treemap-10" />
+    <link rel="stylesheet" href="/modules/fanhao/disk-usage/styles.css?v=20261113-disk-cross-search-01" />
   </head>
   <body class="disk-usage-page">
     <header class="product-topbar" aria-label="资料库模块">
@@ -73,13 +73,19 @@
             <button class="up-button" id="upButton" type="button" disabled>← 上一级</button>
             <nav class="path-breadcrumb" id="breadcrumb" aria-label="当前磁盘路径"></nav>
           </div>
-          <label class="disk-search">
-            <span aria-hidden="true">⌕</span>
-            <input id="pathSearch" type="search" placeholder="在当前磁盘缓存中查找文件或文件夹" autocomplete="off" />
-          </label>
+          <div class="disk-search-tools">
+            <label class="disk-search">
+              <span aria-hidden="true">⌕</span>
+              <input id="pathSearch" type="search" aria-label="查找文件或文件夹" placeholder="查找文件或文件夹" autocomplete="off" disabled />
+            </label>
+            <select id="searchScope" aria-label="搜索范围" disabled>
+              <option value="drive">当前磁盘</option>
+              <option value="all">全部磁盘缓存</option>
+            </select>
+          </div>
           <div class="browser-actions">
-            <button class="secondary-button" id="openCurrentButton" type="button">打开当前文件夹</button>
-            <button class="primary-button" id="refreshButton" type="button">手动刷新缓存</button>
+            <button class="secondary-button" id="openCurrentButton" type="button" disabled>打开当前文件夹</button>
+            <button class="primary-button" id="refreshButton" type="button" disabled>手动刷新缓存</button>
           </div>
         </div>
 
@@ -117,6 +123,10 @@
               </div>
               <span id="entryCount">0 项</span>
             </div>
+            <div class="disk-search-feedback" id="searchFeedback" hidden>
+              <span id="searchStatus" role="status"></span>
+              <button id="searchRetry" type="button" class="secondary-button" hidden>重试失败磁盘</button>
+            </div>
             <div class="entry-list" id="entryList"></div>
           </aside>
         </div>
@@ -146,7 +156,7 @@
 
     <script type="module">
       try {
-        await import("/modules/fanhao/disk-usage/app.js?v=20260816-disk-treemap-12");
+        await import("/modules/fanhao/disk-usage/app.js?v=20261113-disk-cross-search-01");
       } finally {
         document.documentElement.classList.remove("app-module-loading");
       }

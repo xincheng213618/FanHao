@@ -11,23 +11,29 @@
 //   showError 错误展示回调
 
 import { ensureMusicState } from "./state.js";
+import { isLocalTrackSearch } from "./list-search.js";
 import { collapseDuplicateTracks, createDuplicateTrackAccumulator, compactTrack, normalizePlaybackSpeed, nextRepeat } from "./format.js";
 import {
   writeLastTrackPreference,
   readLastTrackPreference,
+  readMusicQueuePreference,
+  writeMusicQueuePreference,
   writeVolumePreference,
   writePlaybackSpeedPreference,
   writeRepeatPreference,
   writeShufflePreference
-} from "./prefs.js";
+} from "./prefs.js?v=20261113-music-queue-resume-01";
 import {
   MUSIC_PAGE_LIMIT,
   MUSIC_ARTIST_PAGE_LIMIT,
-  MUSIC_ALBUM_PAGE_LIMIT
+  MUSIC_ALBUM_PAGE_LIMIT,
+  MUSIC_PLAYLIST_TRACK_LIMIT
 } from "./constants.js";
 import { createMusicProgressWriter } from "./music-progress-writer.js?v=20261004-music-progress-01";
 import { createMusicProgressSession, createMusicPlayedReport, musicProgressBody } from "./progress-session.js?v=20261004-music-progress-01";
 import { captureWebAccount } from "../../platform/accounts/session-context.js";
+
+const PLAYLIST_BATCH_TIMEOUT_MS = 25000;
 
 export function createMusicActions({ state, api, player, view, router, showError }) {
   let musicLoadGeneration = 0;
@@ -36,6 +42,8 @@ export function createMusicActions({ state, api, player, view, router, showError
   let lastAcceptedListRead = null;
   let musicListFailure = null;
   let searchDuplicateSession = null;
+  let idleQueueAccount = null;
+  let queuePlaylistId = null;
   let trackOpenGeneration = 0;
   let trackOpenController = null;
   let trackOpenRestoreOwner = null;
@@ -93,6 +101,7 @@ export function createMusicActions({ state, api, player, view, router, showError
   // existing lifetime when the user leaves a reader or changes the route.
   function cancelPendingRequests() {
     view.cancelNavigationTimers?.();
+    view.cancelTrackSelection?.();
     musicListFailure = null;
     favoriteFailure = null;
     ratingErrorStatus = null;
@@ -117,6 +126,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     if (trackOpenRestoreOwner) restoreAttemptKey = "";
     trackOpenRestoreOwner = null;
     if (state.music) {
+      if (music().playlistDialogBatch) clearPlaylistDialogState();
       if (hadList) {
         music().loading = false;
         music().loadingMore = false;
@@ -246,7 +256,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     ensureMusicState(state);
     const artistMode = music().mode === "artists";
     const albumMode = music().mode === "albums";
-    const append = Boolean(options.append && (music().mode === "library" || artistMode || albumMode));
+    const append = Boolean(options.append && (music().mode === "library" || music().mode === "smart" || artistMode || albumMode));
     if (!append) searchDuplicateSession = null;
     if (append && getListReadFailure()) return Promise.resolve(null);
     if (!append) musicListFailure = null;
@@ -343,10 +353,16 @@ export function createMusicActions({ state, api, player, view, router, showError
       } else if (music().mode === "playlist" && music().activePlaylistId) {
         data = await api.getPlaylist(music().activePlaylistId, signal);
       } else if (music().mode === "smart" && music().activeSmartPlaylistId) {
+        const smartId = music().activeSmartPlaylistId;
         const smartParams = new URLSearchParams();
         smartParams.set("limit", String(MUSIC_PAGE_LIMIT));
         if (append) smartParams.set("offset", params.get("offset"));
-        data = await api.getSmartPlaylist(music().activeSmartPlaylistId, smartParams, signal);
+        if (music().query) {
+          smartParams.set("smart", smartId);
+          smartParams.set("q", music().query);
+          data = await api.getTracks(smartParams, signal);
+          if (data.smartPlaylist?.id !== smartId) throw new Error("无法确认当前智能歌单，请重试");
+        } else data = await api.getSmartPlaylist(smartId, smartParams, signal);
       } else if (music().mode === "report") {
         data = await api.getReport(signal);
       } else if (music().mode === "home") {
@@ -380,7 +396,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       }
       music().loading = false;
       music().loadingMore = false;
-      if (!append && !background && ["library", "artists", "albums"].includes(music().mode)) {
+      if (!append && !background && ["library", "artists", "albums", "playlist", "history", "smart"].includes(music().mode)) {
         musicListFailure = { navigation: request.navigation, generation: request.generation, selection: request.selection,
           account: request.account, message: error?.message || "音乐列表读取失败", restoreLast: options.restoreLast === true };
       }
@@ -398,6 +414,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       return;
     }
     const incomingTracks = data.tracks || [];
+    const followsListQueue = music().queue === music().data?.tracks;
     const previousRawTracks = append ? music().data?.rawTracks || music().data?.tracks || [] : [];
     const mergedRawTracks = append ? [...previousRawTracks, ...incomingTracks] : incomingTracks;
     const searching = music().mode === "library" && Boolean(music().query);
@@ -428,7 +445,11 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().languages = data.languages || data.summary?.languages || music().languages || [];
     music().activePlaylist = data.playlist || null;
     music().activeSmartPlaylist = data.smartPlaylist || null;
-    if (!background && !artistMode && !albumMode && !music().current && !trackOpenController && isForegroundCurrent(request)) music().queue = mergedTracks;
+    if (!background && !artistMode && !albumMode && !music().current && !trackOpenController
+        && !hasIdleQueue(playbackAccount()) && (!append || followsListQueue) && isForegroundCurrent(request)) {
+      queuePlaylistId = data.playlist?.id || "";
+      music().queue = mergedTracks;
+    }
     music().loading = false;
     music().loadingMore = false;
     music().hasMore = Boolean(data.hasMore);
@@ -447,7 +468,8 @@ export function createMusicActions({ state, api, player, view, router, showError
             : !music().query && view.appendLibraryTrackPage(incomingTracks, previousRawTracks.length))
     );
     const restoreAllowed = !background && (options.restoreLast === true || (!options.keepCurrent && options.restoreLast !== false));
-    if (!artistMode && !albumMode && restoreAllowed && isForegroundCurrent(request)) await restoreLastTrack(request);
+    const restoreAccount = restoreAllowed ? playbackAccount()?.owner : "";
+    if (restoreAllowed && !restoreAccount && isForegroundCurrent(request)) await restoreLastTrack(request);
     if (!ownsMusicLoad(request) || request.selection !== listSelectionKey()) {
       finishMusicLoad(request);
       return;
@@ -471,6 +493,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       const writer = options.replaceRoute ? router.replace : router.push;
       writer(router.overrides());
     }
+    if (restoreAccount && isForegroundCurrent(request)) void restoreLastTrack();
   }
 
   function finishMusicLoad(request, keepSideLists = false) {
@@ -487,8 +510,8 @@ export function createMusicActions({ state, api, player, view, router, showError
     if (!request.background) view.setMusicListLoadingState(false);
   }
 
-  function loadPlaylists(signal, owner) {
-    return loadSideList("playlists", "playlistsLoadedAt", "getPlaylists", signal, owner);
+  function loadPlaylists(signal, owner, options) {
+    return loadSideList("playlists", "playlistsLoadedAt", "getPlaylists", signal, owner, options);
   }
 
   function loadSmartPlaylists(signal, owner) {
@@ -504,7 +527,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     } catch { return false; }
   }
 
-  async function loadSideList(kind, loadedAt, method, signal, owner) {
+  async function loadSideList(kind, loadedAt, method, signal, owner, { account, rejectErrors = false } = {}) {
     ensureMusicState(state);
     sideListRequests[kind]?.controller.abort();
     const controller = new AbortController();
@@ -515,7 +538,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     else signal?.addEventListener("abort", abort, { once: true });
     const isCurrent = () => !controller.signal.aborted && request.navigation === navigationGeneration
       && request.generation === sideListGenerations[kind] && sideListRequests[kind] === request
-      && isSideListOwnerCurrent(owner);
+      && isSideListOwnerCurrent(owner) && (!account || isPlaylistAccountCurrent(account));
     try {
       const data = await api[method](controller.signal);
       if (!isCurrent()) return false;
@@ -523,8 +546,9 @@ export function createMusicActions({ state, api, player, view, router, showError
       music()[loadedAt] = Date.now();
       if (owner?.keepSideLists) view.refreshSidebarPlaylists(kind);
       return true;
-    } catch {
+    } catch (error) {
       if (!isCurrent()) return false;
+      if (rejectErrors) throw error;
       music()[kind] = music()[kind] || [];
       return true;
     } finally {
@@ -555,6 +579,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     const request = { kind: "track", navigation: navigationGeneration, foreground: foregroundGeneration };
     const previousTrackId = music().current?.id || "";
     if (music().current?.id === trackId && player.getAudio().src && !options.forceReload) {
+      if (options.queueChanged) {
+        rememberLastTrack(music().current);
+        view.refreshQueueSurface();
+      }
       if (options.openPage) {
         music().trackPageOpen = true;
         music().playerStageOpen = false;
@@ -601,6 +629,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       trackOpenController = null;
       trackOpenRestoreOwner = null;
       view.setTrackOpeningState("");
+      if (!restoring && [404, 410].includes(error?.status) && playbackAccount()?.owner) removeTrackFromQueue(trackId);
       if (state.activeView === "music") view.refresh();
       throw error;
     }
@@ -634,10 +663,22 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().trackPageOpen = shouldOpenPage;
     music().playerStageOpen = false;
     currentLyricIndexReset();
+    let resumedSavedQueue = false;
+    if (!previousTrackId) {
+      const account = playbackAccount();
+      if (account && !hasIdleQueue(account)) {
+        const saved = options.savedPlaybackQueue || (options.restoreRouteQueue && readMusicQueuePreference(account.owner));
+        if (saved?.currentId === data.track.id) {
+          applySavedPlaybackQueue(saved, account);
+          resumedSavedQueue = true;
+        }
+      }
+    }
     if (!music().queue.length || !music().queue.some((track) => track.id === data.track.id)) {
+      queuePlaylistId = "";
       music().queue = [data.track];
     }
-    rememberLastTrack(data.track);
+    if (!resumedSavedQueue) rememberLastTrack(data.track);
     player.load(data.track, options.autoplay !== false);
     trackOpenController = null;
     trackOpenRestoreOwner = null;
@@ -660,9 +701,11 @@ export function createMusicActions({ state, api, player, view, router, showError
     const item = normalizeQueueTrack(track);
     if (!item) return Promise.resolve(null);
     const source = uniqueQueueTracks(tracks);
+    idleQueueAccount = null;
+    queuePlaylistId = tracks === music().data?.tracks ? music().activePlaylist?.id || "" : "";
     music().queue = source.some((candidate) => candidate.id === item.id) ? source : [item];
     music().queueVisibleLimit = 120;
-    return openTrack(item.id, options);
+    return openTrack(item.id, { ...options, queueChanged: true });
   }
 
   function uniqueQueueTracks(tracks = []) {
@@ -700,6 +743,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     const currentIndex = currentId ? queue.findIndex((entry) => entry.id === currentId) : -1;
     queue.splice(currentIndex >= 0 ? currentIndex + 1 : 0, 0, item);
     music().queue = queue;
+    savePlaybackQueueEdit();
     music().status = `下一首播放「${item.title || "歌曲"}」`;
     view.refreshQueueSurface();
   }
@@ -710,19 +754,55 @@ export function createMusicActions({ state, api, player, view, router, showError
     const queue = withoutQueueTrack(music().queue || [], item.id);
     queue.push(item);
     music().queue = queue;
+    savePlaybackQueueEdit();
     music().status = `已加入队列「${item.title || "歌曲"}」`;
     view.refreshQueueSurface();
   }
 
-  function moveQueueTrack(trackId, direction) {
+  function canSelectListTracks() {
+    const accepted = lastAcceptedListRead;
+    if (!accepted || state.activeView !== "music" || music().trackPageOpen || music().loading
+        || accepted.navigation !== navigationGeneration || accepted.selection !== listSelectionKey() || getListReadFailure()) return false;
+    try {
+      const account = captureWebAccount();
+      return account.revision === accepted.account.revision && (!accepted.account.owner || account.owner === accepted.account.owner);
+    } catch { return false; }
+  }
+
+  function appendSelectedTracksToQueue(trackIds) {
+    if (!canSelectListTracks()) return null;
+    const wanted = new Set(trackIds);
+    const queue = music().queue || [];
+    const existing = new Set(queue.map(track => track.id));
+    if (music().current?.id) existing.add(music().current.id);
+    const additions = [];
+    let alreadyQueued = 0;
+    for (const track of music().data?.tracks || []) {
+      if (!wanted.delete(track.id)) continue;
+      if (existing.has(track.id)) alreadyQueued++;
+      else additions.push(normalizeQueueTrack(track));
+    }
+    // A confirmed batch owns the idle queue even while the user browses for
+    // more songs before starting playback.
+    if (additions.length) {
+      music().queue = [...queue, ...additions];
+      view.refreshQueueSurface();
+    }
+    if (additions.length || alreadyQueued) savePlaybackQueueEdit();
+    return { added: additions.length, alreadyQueued };
+  }
+
+  function moveQueueTrack(trackId, offset) {
+    if (!Number.isInteger(offset) || !offset) return;
     const previousQueue = [...(music().queue || [])];
     const queue = [...previousQueue];
     const index = queue.findIndex((track) => track.id === trackId);
-    const nextIndex = index + direction;
+    const nextIndex = index + offset;
     if (index < 0 || nextIndex < 0 || nextIndex >= queue.length) return;
     const [item] = queue.splice(index, 1);
     queue.splice(nextIndex, 0, item);
     music().queue = queue;
+    savePlaybackQueueEdit();
     music().status = `已调整「${item.title || "歌曲"}」顺序`;
     view.refreshQueueSurface({ queueMove: { trackId, fromIndex: index, toIndex: nextIndex } });
     const request = queueOrderOwner(queue);
@@ -730,6 +810,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     persistPlaylistQueueOrder(queue, request).catch((error) => {
       if (!isQueueOrderCurrent(request)) return;
       music().queue = request.rollbackQueue;
+      savePlaybackQueueEdit();
       view.refreshQueueSurface();
       showError(error);
     });
@@ -739,8 +820,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     if (!trackId || music().current?.id === trackId) return;
     const queue = music().queue || [];
     const removed = queue.find((track) => track.id === trackId);
+    if (!removed) return;
     music().queue = queue.filter((track) => track.id !== trackId);
-    music().status = removed ? `已移出队列「${removed.title || "歌曲"}」` : "已更新队列";
+    savePlaybackQueueEdit();
+    music().status = `已移出队列「${removed.title || "歌曲"}」`;
     view.refreshQueueSurface();
   }
 
@@ -757,6 +840,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     } else {
       music().queue = (music().queue || []).filter((track) => track.id === current.id);
     }
+    savePlaybackQueueEdit();
     music().queueVisibleLimit = 120;
     music().status = current ? "已清空其他队列歌曲" : "已清空播放队列";
     view.refreshQueueSurface();
@@ -843,7 +927,7 @@ export function createMusicActions({ state, api, player, view, router, showError
 
   async function persistPlaylistQueueOrder(queue = music().queue || [], request = queueOrderOwner(queue)) {
     const playlistId = music().mode === "playlist" ? String(music().activePlaylistId || "").trim() : "";
-    if (!playlistId) return null;
+    if (!playlistId || (queuePlaylistId !== null && queuePlaylistId !== playlistId)) return null;
     const trackIds = uniqueTrackIds(queue);
     if (!trackIds.length) return null;
     const data = await writePlaylistQueueOrder(playlistId, queue, trackIds, request);
@@ -1343,28 +1427,58 @@ export function createMusicActions({ state, api, player, view, router, showError
       .catch(showError);
   }
 
-  async function openPlaylistDialog(trackId = "") {
+  async function openPlaylistDialog(trackId = "", batch = null) {
     ensureMusicState(state);
     playlistDialogReturnFocus = document.activeElement?.isConnected ? document.activeElement : null;
     music().playlistDialogOpen = true;
     music().playlistDialogTrackId = trackId || "";
     music().playlistDialogName = "";
+    music().playlistDialogBatch = batch;
     if (state.activeView === "music" && !view.refreshPlaylistDialog()) view.refresh();
+    if (batch) {
+      if (batch.existing && !sideListCacheFresh(music().playlistsLoadedAt)) await loadSelectedTracksPlaylists();
+      return;
+    }
     const requestedTrackId = music().playlistDialogTrackId;
     const navigation = navigationGeneration;
     const loadedCurrent = await loadPlaylists();
     if (!loadedCurrent || !isNavigationCurrent(navigation)) return;
     // Opening the dialog can replace a still-pending first-screen sidebar read.
     view.refreshSidebarPlaylists("playlists");
-    if (music().playlistDialogOpen && music().playlistDialogTrackId === requestedTrackId) view.refreshPlaylistDialog();
+    if (music().playlistDialogOpen && !music().playlistDialogBatch && music().playlistDialogTrackId === requestedTrackId) view.refreshPlaylistDialog();
   }
 
-  function closePlaylistDialog() {
-    const returnFocus = playlistDialogReturnFocus;
+  function orderedSelectedTrackIds(trackIds) {
+    const selected = new Set(trackIds);
+    return (music().data?.tracks || []).filter(track => selected.delete(track.id)).map(track => track.id);
+  }
+
+  function openSelectedTracksPlaylistDialog(trackIds, { existing = false } = {}) {
+    if (!canSelectListTracks() || music().playlistDialogOpen) return;
+    const ordered = orderedSelectedTrackIds(trackIds);
+    if (!ordered.length || ordered.length > MUSIC_PLAYLIST_TRACK_LIMIT) return;
+    return openPlaylistDialog("", {
+      trackIds: ordered,
+      existing,
+      navigation: navigationGeneration,
+      account: captureWebAccount(),
+      pending: false,
+      error: ""
+    });
+  }
+
+  function clearPlaylistDialogState() {
     playlistDialogReturnFocus = null;
     music().playlistDialogOpen = false;
     music().playlistDialogTrackId = "";
     music().playlistDialogName = "";
+    music().playlistDialogBatch = null;
+  }
+
+  function closePlaylistDialog() {
+    if (music().playlistDialogBatch?.pending) return;
+    const returnFocus = playlistDialogReturnFocus;
+    clearPlaylistDialogState();
     if (state.activeView === "music" && !view.refreshPlaylistDialog({ focus: false })) view.refresh();
     if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
   }
@@ -1380,6 +1494,8 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function createPlaylistFromDialog() {
     const name = String(music().playlistDialogName || "").trim();
     if (!name) return null;
+    const batch = music().playlistDialogBatch;
+    if (batch) return batch.existing ? null : createPlaylistFromSelection(batch, name);
     const trackId = music().playlistDialogTrackId || "";
     const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     closePlaylistDialog();
@@ -1405,6 +1521,104 @@ export function createMusicActions({ state, api, player, view, router, showError
       view.refresh();
     }
     return data.playlist || null;
+  }
+
+  function ownsSelectedTracksPlaylistDialog(batch) {
+    if (state.activeView !== "music" || music().playlistDialogBatch !== batch || !isNavigationCurrent(batch.navigation)) return false;
+    return isPlaylistAccountCurrent(batch.account);
+  }
+
+  function isPlaylistAccountCurrent(expected) {
+    try {
+      const account = captureWebAccount();
+      return account.revision === expected.revision && (!expected.owner || account.owner === expected.owner);
+    } catch { return false; }
+  }
+
+  async function loadSelectedTracksPlaylists() {
+    const batch = music().playlistDialogBatch;
+    if (!batch?.existing || batch.loading || batch.pending || !ownsSelectedTracksPlaylistDialog(batch)) return;
+    batch.loading = true;
+    batch.loadError = "";
+    view.refreshPlaylistDialog();
+    try {
+      const signal = AbortSignal.timeout(PLAYLIST_BATCH_TIMEOUT_MS);
+      const loaded = await loadPlaylists(signal, undefined, { account: batch.account, rejectErrors: true });
+      if (!ownsSelectedTracksPlaylistDialog(batch)) return;
+      if (signal.aborted) throw new Error("歌单加载超时，请重试");
+      if (!loaded && !sideListCacheFresh(music().playlistsLoadedAt)) throw new Error("歌单加载已中断，请重试");
+      if (loaded) view.refreshSidebarPlaylists("playlists");
+    } catch (error) {
+      if (ownsSelectedTracksPlaylistDialog(batch)) batch.loadError = error.message || "歌单加载失败，请重试";
+    } finally {
+      batch.loading = false;
+      if (ownsSelectedTracksPlaylistDialog(batch)) view.refreshPlaylistDialog();
+    }
+  }
+
+  async function addSelectedTracksToPlaylist(batch, playlist) {
+    if (!batch.existing || batch.loading || batch.loadError || batch.pending || !ownsSelectedTracksPlaylistDialog(batch)) return;
+    batch.pending = true;
+    batch.targetId = playlist.id;
+    batch.error = "";
+    view.refreshPlaylistDialog();
+    let receipt;
+    try {
+      receipt = await api.addTracksToPlaylist(playlist.id, batch.trackIds, AbortSignal.timeout(PLAYLIST_BATCH_TIMEOUT_MS));
+      const counts = [receipt?.addedCount, receipt?.alreadyPresentCount, receipt?.unavailableCount];
+      if (receipt?.ok !== true || counts.some(count => !Number.isSafeInteger(count) || count < 0)
+          || counts.reduce((total, count) => total + count, 0) !== batch.trackIds.length) {
+        throw new Error("未收到完整的歌单保存结果，请重试");
+      }
+    } catch (error) {
+      if (ownsSelectedTracksPlaylistDialog(batch)) {
+        batch.pending = false;
+        batch.error = error.name === "TimeoutError" ? "加入歌单超时，请重试" : error.message || "加入歌单失败，请重试";
+        view.refreshPlaylistDialog();
+      }
+      return;
+    }
+    if (!ownsSelectedTracksPlaylistDialog(batch)) {
+      if (isPlaylistAccountCurrent(batch.account)) music().playlistsLoadedAt = 0;
+      return;
+    }
+    batch.pending = false;
+    closePlaylistDialog();
+    view.trackSelectionPlaylistAdded(playlist, receipt);
+    invalidatePlaylistCache();
+    const loaded = await loadPlaylists(undefined, undefined, { account: batch.account });
+    if (!loaded || !isNavigationCurrent(batch.navigation) || !isPlaylistAccountCurrent(batch.account)) return;
+    view.refreshSidebarPlaylists("playlists");
+    if (receipt.addedCount && music().mode === "playlist" && music().activePlaylistId === playlist.id) {
+      await loadMusic({ replaceRoute: true, keepCurrent: true });
+    }
+  }
+
+  async function createPlaylistFromSelection(batch, name) {
+    if (batch.pending || !ownsSelectedTracksPlaylistDialog(batch)) return null;
+    batch.pending = true;
+    batch.error = "";
+    view.refreshPlaylistDialog();
+    let playlist;
+    try {
+      ({ playlist } = await api.createPlaylist({ name, trackIds: batch.trackIds }));
+      if (!playlist?.id) throw new Error("未收到歌单保存结果");
+    } catch (error) {
+      if (ownsSelectedTracksPlaylistDialog(batch)) {
+        batch.pending = false;
+        batch.error = error.message || "创建歌单失败，请重试";
+        view.refreshPlaylistDialog();
+      }
+      return null;
+    }
+    if (!ownsSelectedTracksPlaylistDialog(batch)) return playlist;
+    invalidatePlaylistCache();
+    music().playlists = [playlist, ...(music().playlists || []).filter(item => item.id !== playlist.id)];
+    view.refreshSidebarPlaylists("playlists");
+    batch.pending = false;
+    closePlaylistDialog();
+    view.trackSelectionPlaylistSaved?.(playlist, batch.trackIds.length);
+    return playlist;
   }
 
   async function saveQueueAsPlaylist() {
@@ -1518,7 +1732,10 @@ export function createMusicActions({ state, api, player, view, router, showError
   async function addTrackToPlaylistTarget(playlistId) {
     const trackId = music().playlistDialogTrackId;
     const playlist = (music().playlists || []).find((item) => item.id === playlistId);
-    if (!trackId || !playlist?.id) return;
+    if (!playlist?.id) return;
+    const batch = music().playlistDialogBatch;
+    if (batch) return addSelectedTracksToPlaylist(batch, playlist);
+    if (!trackId) return;
     const request = { navigation: navigationGeneration, foreground: foregroundGeneration };
     closePlaylistDialog();
     music().status = `正在加入「${playlist.name}」`;
@@ -1556,6 +1773,36 @@ export function createMusicActions({ state, api, player, view, router, showError
     await loadMusic({ replaceRoute: true, keepCurrent: true });
   }
 
+  async function removeSelectedTracksFromPlaylist(playlistId, trackIds, onSaved) {
+    if (!canSelectListTracks() || music().mode !== "playlist" || music().activePlaylist?.id !== playlistId) return;
+    const requested = orderedSelectedTrackIds(trackIds);
+    if (!requested.length || requested.length > MUSIC_PLAYLIST_TRACK_LIMIT) return;
+    const account = captureWebAccount();
+    const navigation = navigationGeneration;
+    const selection = listSelectionKey();
+    const ownsList = () => state.activeView === "music" && isNavigationCurrent(navigation)
+      && selection === listSelectionKey() && isPlaylistAccountCurrent(account);
+    let receipt;
+    try {
+      receipt = await api.removeTracksFromPlaylist(playlistId, requested, AbortSignal.timeout(PLAYLIST_BATCH_TIMEOUT_MS));
+      const counts = [receipt?.removedCount, receipt?.alreadyAbsentCount];
+      if (receipt?.ok !== true || counts.some(count => !Number.isSafeInteger(count) || count < 0)
+          || counts[0] + counts[1] !== requested.length) {
+        throw new Error("未收到完整的歌单保存结果，请重试");
+      }
+    } catch (error) {
+      if (ownsList()) throw error;
+      return;
+    }
+    if (!ownsList()) {
+      if (isPlaylistAccountCurrent(account)) music().playlistsLoadedAt = 0;
+      return;
+    }
+    invalidatePlaylistCache();
+    onSaved(receipt);
+    await loadMusic({ replaceRoute: true, keepCurrent: true });
+  }
+
   async function deleteActivePlaylist() {
     const playlist = music().activePlaylist;
     if (!playlist?.id) return;
@@ -1572,6 +1819,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     music().mode = "library";
     music().activePlaylistId = "";
     music().activePlaylist = null;
+    music().query = "";
     await loadMusic({ replaceRoute: true, keepCurrent: true });
   }
 
@@ -1635,7 +1883,7 @@ export function createMusicActions({ state, api, player, view, router, showError
       trackId: track.id,
       webAccountOwner: account.owner,
       webAccountRevision: account.revision,
-      positionMs: positionOverride === null
+      positionMs: positionOverride === null && !audio.ended
         ? Math.round((Number.isFinite(audio.currentTime) ? audio.currentTime : 0) * 1000)
         : Number(positionOverride || 0),
       durationMs: Math.round((Number.isFinite(audio.duration) ? audio.duration : 0) * 1000) || track.durationMs || 0
@@ -1681,10 +1929,10 @@ export function createMusicActions({ state, api, player, view, router, showError
     }
   }
 
-  function flushProgressKeepalive() {
+  function flushProgressKeepalive(positionOverride = null) {
     progressHidden = true;
     cancelProgressClock();
-    progressWriter.flushKeepalive(captureProgressRecord());
+    progressWriter.flushKeepalive(captureProgressRecord(positionOverride));
   }
 
   function resumeProgress() {
@@ -1701,12 +1949,65 @@ export function createMusicActions({ state, api, player, view, router, showError
   }
 
   // ---------- 恢复上次播放 ----------
+  function playbackAccount() {
+    try { return captureWebAccount(); } catch { return null; }
+  }
+
+  function hasIdleQueue(account) {
+    return Boolean(account && idleQueueAccount && idleQueueAccount.revision === account.revision
+      && (!idleQueueAccount.owner || idleQueueAccount.owner === account.owner));
+  }
+
+  function savePlaybackQueueEdit() {
+    const account = playbackAccount();
+    if (!account) return;
+    if (!music().current) idleQueueAccount = account.owner || music().queue.length ? account : null;
+    if (!music().queue.length) queuePlaylistId = "";
+    writeMusicQueuePreference(account.owner, music().queue, music().current?.id || "", queuePlaylistId);
+  }
+
+  function applySavedPlaybackQueue(saved, account) {
+    const tracksById = new Map((music().data?.tracks || []).map(track => [track.id, track]));
+    music().queue = saved.tracks.map(track => tracksById.get(track.id) || normalizeQueueTrack(track));
+    idleQueueAccount = account;
+    queuePlaylistId = saved.playlistId;
+  }
+
   async function restoreLastTrack(owner) {
     const navigation = navigationGeneration;
     const foreground = foregroundGeneration;
+    const account = playbackAccount();
     const isCurrent = () => navigation === navigationGeneration && foreground === foregroundGeneration
       && (!owner || isMusicLoadCurrent(owner));
-    if (!isCurrent() || !canRestoreLastTrack()) return;
+    if (!isCurrent() || !account || music().current || music().loading || music().openingTrackId || hasIdleQueue(account)) return;
+    if (account.owner) {
+      const saved = readMusicQueuePreference(account.owner);
+      if (!saved) return;
+      if (!saved.currentId) {
+        applySavedPlaybackQueue(saved, account);
+        view.refreshQueueSurface();
+        return;
+      }
+      const queue = music().queue;
+      const restoreGuard = () => {
+        const currentAccount = playbackAccount();
+        return isCurrent() && music().queue === queue && !hasIdleQueue(currentAccount)
+          && currentAccount?.owner === account.owner && currentAccount.revision === account.revision;
+      };
+      try {
+        await openTrack(saved.currentId, { autoplay: false, skipRoute: true, restoreGuard, restoreOwner: owner, savedPlaybackQueue: saved });
+      } catch (error) {
+        if (!restoreGuard()) return;
+        const missing = [404, 410].includes(error?.status);
+        if (missing) saved.tracks = withoutQueueTrack(saved.tracks, saved.currentId);
+        applySavedPlaybackQueue(saved, account);
+        if (missing) savePlaybackQueueEdit();
+        music().status = emptyMusicMessage(music().data?.total || music().queue.length);
+        view.refreshQueueSurface();
+      }
+      return;
+    }
+    if (!canRestoreLastTrack()) return;
     const saved = readLastTrackPreference();
     const trackId = String(saved?.trackId || "").trim();
     if (!trackId) return;
@@ -1741,6 +2042,12 @@ export function createMusicActions({ state, api, player, view, router, showError
 
   function rememberLastTrack(track) {
     if (!track?.id) return;
+    const account = playbackAccount();
+    if (!account) return;
+    if (account.owner) {
+      writeMusicQueuePreference(account.owner, music().queue, track.id, queuePlaylistId);
+      return;
+    }
     writeLastTrackPreference({
       trackId: track.id,
       track: compactTrack(track),
@@ -1753,7 +2060,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     const params = new URLSearchParams();
     if (music().mode === "playlist" && music().activePlaylistId) params.set("playlist", music().activePlaylistId);
     if (music().mode === "smart" && music().activeSmartPlaylistId) params.set("smart", music().activeSmartPlaylistId);
-    if (music().query) params.set("q", music().query);
+    if (music().query && !isLocalTrackSearch(music().mode)) params.set("q", music().query);
     if (music().artistId && music().artistId !== "all") params.set("artist", music().artistId);
     if (music().albumId && music().albumId !== "all") params.set("album", music().albumId);
     if (music().genre && music().genre !== "all") params.set("genre", music().genre);
@@ -1873,6 +2180,8 @@ export function createMusicActions({ state, api, player, view, router, showError
     openTrackFromList,
     queueTrackNext,
     appendTrackToQueue,
+    canSelectListTracks,
+    appendSelectedTracksToQueue,
     moveQueueTrack,
     removeTrackFromQueue,
     clearQueueAfterCurrent,
@@ -1886,6 +2195,8 @@ export function createMusicActions({ state, api, player, view, router, showError
     selectGenre,
     selectFirstSmartPlaylist,
     openPlaylistDialog,
+    openSelectedTracksPlaylistDialog,
+    loadSelectedTracksPlaylists,
     closePlaylistDialog,
     createPlaylistFromDialog,
     saveQueueAsPlaylist,
@@ -1893,6 +2204,7 @@ export function createMusicActions({ state, api, player, view, router, showError
     editActivePlaylist,
     addTrackToPlaylistTarget,
     removeTrackFromActivePlaylist,
+    removeSelectedTracksFromPlaylist,
     deleteActivePlaylist,
     clearHistory,
     startMusicRescan,

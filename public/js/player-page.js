@@ -2,6 +2,9 @@ import { createApiClient, addQueryParam } from "./api.js?v=20260701-gallery-merg
 import { createLatestRequestGate } from "../modules/fanhao/latest-request.js?v=20260717-fanhao-latest-request-01";
 import { createPlaybackTimeLink, createPlaybackTimeLinkControl, parsePlaybackStart } from "./player-time-link.js";
 import { createPlaybackTimeJumpControl } from "./player-time-jump.js";
+import { createPlayerBookmarks } from "./player-bookmarks.js?v=20261113-player-bookmarks-01";
+import { captureWebAccount } from "../platform/accounts/session-context.js";
+import { createPlayerEpisodeNavigation } from "./player-episode-navigation.js?v=20261113-episode-picker-01";
 import {
   createWorkMoveCleanupRetryGuard,
   fetchWorkMoveJobWithBackoff,
@@ -25,9 +28,11 @@ const mediaId = params.get("mediaId") || "";
 const diskDrive = params.get("diskDrive") || "";
 const diskPath = params.get("diskPath") || "";
 const requestedVideoId = params.get("videoId") || "";
+const subtitlePreview = params.get("preview") === "1" && Boolean(workId && requestedVideoId);
 let pendingLinkStart = parsePlaybackStart(params.get("t"));
 let pendingLinkVideoId = "";
 const returnTo = params.get("returnTo") || "";
+let episodeReturnPath = "";
 
 const els = {
   title: document.querySelector("#playerTitle"),
@@ -45,10 +50,19 @@ const els = {
   toggleSidebar: document.querySelector("#toggleSidebarButton"),
   toggleSidebarLabel: document.querySelector("#toggleSidebarButton .player-sidebar-toggle-label"),
   streamStart: document.querySelector("#playerStreamStart"),
+  playbackRate: document.querySelector("#playerPlaybackRate"),
   skipBack: document.querySelector("#skipBackButton"),
   skipForward: document.querySelector("#skipForwardButton"),
   reloadStream: document.querySelector("#reloadStreamButton"),
   files: document.querySelector("#playerFiles"),
+  filesTools: document.querySelector("#playerFilesTools"),
+  fileSearch: document.querySelector("#playerFileSearch"),
+  fileSearchCount: document.querySelector("#playerFileSearchCount"),
+  locateFile: document.querySelector("#playerLocateFile"),
+  autoNextFile: document.querySelector("#playerAutoNextFile"),
+  autoNextFileOption: document.querySelector("#playerAutoNextFileOption"),
+  fileSwitchTime: document.querySelector("#playerFileSwitchTime"),
+  fileSwitchTimeOption: document.querySelector("#playerFileSwitchTimeOption"),
   fileNavigation: document.querySelector("#playerFileNavigation"),
   filePrevious: document.querySelector("#playerFilePrevious"),
   fileNext: document.querySelector("#playerFileNext"),
@@ -66,7 +80,14 @@ const els = {
   timeJump: document.querySelector("#playerTimeJumpButton"),
   javdb: document.querySelector("#javdbLink")
 };
-const subtitleControls = createSubtitleControls({ api, container: document.querySelector("#playerSubtitles") });
+const subtitleHost = document.querySelector("#playerSubtitles");
+const subtitleControls = createSubtitleControls({ api, container: subtitleHost });
+const subtitleMenu = subtitleHost?.querySelector("details");
+const episodeNavigation = createPlayerEpisodeNavigation({
+  api, container: document.querySelector("#playerEpisodeNavigation"),
+  dialog: document.querySelector("#playerEpisodePicker"),
+  navigate: (url) => window.location.replace(url)
+});
 
 let currentWork = null;
 let renderedFilesWork = null;
@@ -74,6 +95,9 @@ let renderedFileVideos = null;
 let renderedFileRows = [];
 const renderedFileIndices = new Map();
 let activeFileRow = null;
+let fileSearchTerms = [];
+let composingFileSearch = false;
+let waitingForComparisonPlayback = false;
 let currentVideo = null;
 let currentPlayInfo = null;
 let progressTimer = null;
@@ -85,6 +109,7 @@ let playbackOffset = 0;
 let isSeeking = false;
 let player = null;
 let playerControlMode = "";
+let preferredPlaybackRate = null;
 let frameHoldCanvas = null;
 let frameHoldTimer = null;
 let uiIdleTimer = null;
@@ -98,6 +123,7 @@ let playbackSourceController = null;
 let replayedSource = null;
 let playbackAttempt = 0;
 let sourceAutoPlay = false;
+let autoNextBlockedBySeek = false;
 let pendingSourcePosition = null;
 let pendingSourceAutoPlay = null;
 let pagePlaybackSnapshot = null;
@@ -116,6 +142,13 @@ const timeJumpControl = createPlaybackTimeJumpControl({
   seek: seekTo,
   formatTime: formatPlaybackTime
 });
+const bookmarks = createPlayerBookmarks({
+  button: document.querySelector("#playerBookmarksButton"),
+  dialog: document.querySelector("#playerBookmarksDialog"),
+  getContext: playbackBookmarkContext,
+  seek: seekTo,
+  formatTime: formatPlaybackTime
+});
 const completedMoveReloader = createCompletedWorkMoveReloader({
   api,
   getCurrentWork: () => currentWork,
@@ -128,6 +161,9 @@ const PLYR_STREAM_CONTROLS = ["play-large", "play", "mute", "volume", "fullscree
 const mobileStreamControlsQuery = window.matchMedia("(max-width: 640px)");
 const mobileSidebarQuery = window.matchMedia("(max-width: 900px)");
 const PLAYER_SIDEBAR_STORAGE_KEY = "fanhao.player.sidebar-collapsed";
+const PLAYER_FILE_AUTO_NEXT_KEY = "fanhao.player.file-auto-next";
+const PLAYER_PLAYBACK_RATE_KEY = "fanhao.player.playback-rate";
+const PLAYER_PLAYBACK_RATES = Array.from(els.playbackRate?.options || [], option => Number(option.value));
 const LOCAL_MARKER_RELEASE_DELAY_MS = 900;
 const ACTIVE_MOVE_STORAGE_KEY = workId ? `fanhao.work-move.${workId}` : "";
 const ACTIVE_MOVE_REQUEST_STORAGE_KEY = workId ? `fanhao.work-move-request.${workId}` : "";
@@ -139,7 +175,7 @@ els.back?.addEventListener("click", () => {
     window.close();
     return;
   }
-  window.location.href = returnTo || (mediaId ? "/media" : diskDrive ? "/disk-usage" : "/");
+  window.location.href = episodeReturnPath || returnTo || (mediaId ? "/media" : diskDrive ? "/disk-usage" : "/");
 });
 
 els.openFile?.addEventListener("click", () => {
@@ -166,8 +202,33 @@ els.moveToPerson?.addEventListener("click", () => {
 els.toggleSidebar?.addEventListener("click", () => {
   setSidebarCollapsed(!sidebarCollapsed, { persist: true });
 });
+subtitleMenu?.addEventListener("toggle", () => {
+  if (subtitleMenu.open && !sidebarCollapsed) setSidebarCollapsed(true);
+});
 els.filePrevious?.addEventListener("click", () => playAdjacentFile(-1));
 els.fileNext?.addEventListener("click", () => playAdjacentFile(1));
+els.fileSearch?.addEventListener("compositionstart", () => { composingFileSearch = true; });
+els.fileSearch?.addEventListener("compositionend", () => { composingFileSearch = false; updateFileSearch(); });
+els.fileSearch?.addEventListener("input", event => { if (!event.isComposing) updateFileSearch(); });
+els.fileSearch?.addEventListener("search", updateFileSearch);
+els.fileSearch?.addEventListener("keydown", event => {
+  if (composingFileSearch || event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Enter" || event.key === "ArrowDown") {
+    event.preventDefault();
+    focusFileRow(renderedFileRows.find(row => !row.button.hidden));
+  } else if (event.key === "Escape" && els.fileSearch.value) {
+    event.preventDefault();
+    clearFileSearch();
+  }
+});
+els.locateFile?.addEventListener("click", () => {
+  if (!activeFileRow) return;
+  if (activeFileRow.button.hidden) clearFileSearch();
+  focusFileRow(activeFileRow);
+});
+els.autoNextFile?.addEventListener("change", () => {
+  try { window.localStorage.setItem(PLAYER_FILE_AUTO_NEXT_KEY, els.autoNextFile.checked ? "1" : "0"); } catch {}
+});
 
 els.streamStart?.addEventListener("click", startDeferredStream);
 
@@ -193,6 +254,9 @@ els.skipForward?.addEventListener("click", () => {
 els.reloadStream?.addEventListener("click", () => {
   reloadCurrentStream();
 });
+els.playbackRate?.addEventListener("change", () => {
+  if (playbackSourceController) setPlaybackRate(Number(els.playbackRate.value));
+});
 
 window.addEventListener("beforeunload", flushPlaybackProgress);
 document.addEventListener("visibilitychange", () => {
@@ -200,8 +264,10 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener("pagehide", () => {
   flushPlaybackProgress();
+  episodeNavigation.suspend();
   timeLinkControl.invalidate();
   timeJumpControl.invalidate();
+  bookmarks.setAvailable(false);
   pagePlaybackSnapshot = capturePlaybackSnapshot();
   playInfoRequests.cancel();
   resetPlaybackSource();
@@ -211,6 +277,7 @@ window.addEventListener("pagehide", () => {
 });
 window.addEventListener("pageshow", (event) => {
   if (event.persisted) {
+    void episodeNavigation.refresh();
     restoreMoveJobEntry();
     const snapshot = pagePlaybackSnapshot;
     pagePlaybackSnapshot = null;
@@ -224,6 +291,8 @@ mobileStreamControlsQuery.addEventListener?.("change", () => {
 });
 
 window.addEventListener("resize", updateVideoAspect);
+els.stage?.addEventListener("enterfullscreen", updateVideoAspect);
+els.stage?.addEventListener("exitfullscreen", updateVideoAspect);
 document.addEventListener("keydown", handlePlayerKeyboard);
 els.shortcuts?.addEventListener("click", () => els.shortcutsDialog?.showModal());
 els.shortcutsDialog?.querySelector("button")?.addEventListener("click", () => els.shortcutsDialog.close());
@@ -236,9 +305,12 @@ function initializePlayerExperience() {
   let storedPreference = null;
   try {
     storedPreference = window.localStorage.getItem(PLAYER_SIDEBAR_STORAGE_KEY);
+    if (els.autoNextFile) els.autoNextFile.checked = window.localStorage.getItem(PLAYER_FILE_AUTO_NEXT_KEY) === "1";
+    const rate = Number(window.localStorage.getItem(PLAYER_PLAYBACK_RATE_KEY));
+    if (PLAYER_PLAYBACK_RATES.includes(rate)) preferredPlaybackRate = rate;
   } catch {}
   const collapsedByDefault = mobileSidebarQuery.matches;
-  setSidebarCollapsed(storedPreference == null ? collapsedByDefault : storedPreference === "1");
+  setSidebarCollapsed(subtitlePreview || (storedPreference == null ? collapsedByDefault : storedPreference === "1"));
   revealPlayerUi();
 }
 
@@ -249,21 +321,27 @@ function installPlayerVideoEvents() {
   const listen = (type, handler) => els.video.addEventListener(type, handler, { signal: playerVideoEventsController.signal });
   listen("loadedmetadata", () => { updateVideoAspect(); updateSeekControl(); });
   listen("durationchange", () => updateSeekControl());
+  listen("ratechange", syncPlaybackRate);
   listen("timeupdate", () => updateSeekControl());
   listen("waiting", () => setPlaybackStatus("缓冲中", { transient: true }));
   listen("playing", () => {
+    if (playbackSourceController && els.video.readyState >= 2 && !els.video.paused) waitingForComparisonPlayback = false;
     streamNeedsActivation = false;
     setPlaybackStatus(els.video.dataset.autoplayMuted === "1" ? "已静音自动播放，点击页面恢复声音" : "");
     hideFrameHold();
     scheduleUiIdle();
   });
   listen("pause", revealPlayerUi);
-  listen("ended", revealPlayerUi);
+  listen("seeking", () => {
+    if (playbackSourceController && pendingSourcePosition == null) autoNextBlockedBySeek = sourceReachedEnd(0.05);
+  });
+  listen("ended", handlePlayerEnded);
   listen("error", handleVideoPlaybackError);
 }
 
 function setSidebarCollapsed(collapsed, options = {}) {
   sidebarCollapsed = Boolean(collapsed);
+  if (!sidebarCollapsed && subtitleMenu) subtitleMenu.open = false;
   document.body.classList.toggle("player-sidebar-collapsed", sidebarCollapsed);
   if (els.toggleSidebar) {
     els.toggleSidebar.setAttribute("aria-expanded", sidebarCollapsed ? "false" : "true");
@@ -279,13 +357,11 @@ function setSidebarCollapsed(collapsed, options = {}) {
     els.sidebar.inert = sidebarCollapsed;
     els.sidebar.setAttribute("aria-hidden", sidebarCollapsed ? "true" : "false");
   }
-  if (options.persist) {
+  if (options.persist && !subtitlePreview) {
     try {
       window.localStorage.setItem(PLAYER_SIDEBAR_STORAGE_KEY, sidebarCollapsed ? "1" : "0");
     } catch {}
   }
-  window.requestAnimationFrame(updateVideoAspect);
-  window.setTimeout(updateVideoAspect, 220);
 }
 
 function handlePlayerPointerMove() {
@@ -318,6 +394,12 @@ function handlePlayerKeyboard(event) {
     revealPlayerUi();
     return;
   }
+  if (key === "b") {
+    event.preventDefault();
+    bookmarks.open();
+    revealPlayerUi();
+    return;
+  }
   if (key === "?") {
     event.preventDefault();
     els.shortcutsDialog?.showModal();
@@ -327,6 +409,11 @@ function handlePlayerKeyboard(event) {
   if (key === "i") {
     event.preventDefault();
     setSidebarCollapsed(!sidebarCollapsed, { persist: true });
+    revealPlayerUi();
+    return;
+  }
+  if (key === "escape" && !sidebarCollapsed) {
+    setSidebarCollapsed(true, { persist: true });
     revealPlayerUi();
     return;
   }
@@ -355,12 +442,34 @@ function handlePlayerKeyboard(event) {
   } else if (key === "f") {
     event.preventDefault();
     player?.fullscreen?.toggle?.();
-  } else if (key === "escape" && mobileSidebarQuery.matches && !sidebarCollapsed) {
-    setSidebarCollapsed(true, { persist: true });
+  } else if ((key === "[" || key === "]") && playbackSourceController) {
+    event.preventDefault();
+    const current = els.video.playbackRate;
+    const rate = key === "[" ? PLAYER_PLAYBACK_RATES.findLast(value => value < current)
+      : PLAYER_PLAYBACK_RATES.find(value => value > current);
+    if (rate !== undefined) setPlaybackRate(rate);
   } else {
     return;
   }
   revealPlayerUi();
+}
+
+function setPlaybackRate(rate) {
+  if (!els.video || !PLAYER_PLAYBACK_RATES.includes(rate)) return;
+  els.video.defaultPlaybackRate = rate;
+  els.video.playbackRate = rate;
+  syncPlaybackRate();
+}
+
+function syncPlaybackRate() {
+  if (!playbackSourceController) return;
+  const rate = els.video.playbackRate;
+  if (!PLAYER_PLAYBACK_RATES.includes(rate)) return;
+  if (els.video.defaultPlaybackRate !== rate) els.video.defaultPlaybackRate = rate;
+  if (els.playbackRate) els.playbackRate.value = String(rate);
+  if (rate === preferredPlaybackRate) return;
+  preferredPlaybackRate = rate;
+  try { window.localStorage.setItem(PLAYER_PLAYBACK_RATE_KEY, String(rate)); } catch {}
 }
 
 function shouldIgnorePlayerShortcut(event) {
@@ -381,6 +490,18 @@ function playbackTimeLinkSnapshot() {
   }
   const position = mediaPosition();
   return { href: createPlaybackTimeLink(href.href, currentVideo.id, position), label: formatPlaybackTime(position) };
+}
+
+function playbackBookmarkContext() {
+  if (!currentVideo?.id || !currentPlayInfo || !playbackSourceController || els.video.hidden) return null;
+  let account;
+  try { account = captureWebAccount(); } catch { return null; }
+  const source = currentWork?.diskUsage
+    ? ["disk", currentVideo.diskDrive || diskDrive, currentVideo.diskPath || diskPath, currentVideo.id]
+    : mediaId ? ["media", mediaId, currentVideo.id] : ["work", currentWork?.id || workId, currentVideo.id];
+  const hasPosition = els.video.readyState >= 1 || usesCustomControls();
+  return { owner: account.owner || "guest", revision: account.revision, source, title: currentVideo.name || currentVideo.title || currentWork?.title || "",
+    position: hasPosition ? mediaPosition() : null, duration: hasPosition ? mediaDuration() : 0 };
 }
 
 async function load() {
@@ -440,6 +561,7 @@ function setStreamPending(pending) {
 
 async function loadGalleryMedia() {
   const data = await api(`/api/gallery-media/${encodeURIComponent(mediaId)}`);
+  episodeReturnPath = episodeNavigation.open(data.item, { mediaId, returnTo, position: params.get("episodePosition") });
   currentWork = galleryMediaAsWork(data.item);
   document.title = `${currentWork.title} - FanHao`;
   els.title.textContent = currentWork.title;
@@ -509,6 +631,7 @@ function galleryMediaAsWork(media = {}) {
 
 function selectInitialVideo(work) {
   const videos = work.videos || [];
+  if (subtitlePreview) return videos.find((video) => video.id === requestedVideoId) || null;
   return (
     videos.find((video) => video.id === requestedVideoId) ||
     videos.find((video) => video.id === work.progress?.videoId) ||
@@ -552,7 +675,7 @@ function renderFiles(work) {
       button.addEventListener("click", () => {
         if (renderedFilesWork !== work || currentWork !== work || button.parentElement !== els.files
             || !(work.videos || []).includes(row.video)) return;
-        void playVideo(row.video);
+        playSelectedFile(row.video);
       });
       els.files.append(button);
       return row;
@@ -564,12 +687,51 @@ function renderFiles(work) {
     setFileRowActive(row, video.id === currentVideo?.id);
     const title = video.name || video.title || "视频";
     const path = `${formatLibraryPath(video.relativePath)}${video.progress?.percent ? ` · ${Math.floor(video.progress.percent)}%` : ""}`;
+    row.searchText = normalizeFileSearch(`${title} ${formatLibraryPath(video.relativePath)}`);
     if (row.title.textContent !== title) row.title.textContent = title;
     if (row.path.textContent !== path) row.path.textContent = path;
   }
   renderedFileVideos = work.videos;
   activeFileRow = renderedFileRows[renderedFileIndices.get(currentVideo?.id)] || null;
+  if (els.filesTools) {
+    els.filesTools.hidden = videos.length < 2;
+    if (els.filesTools.hidden) clearFileSearch();
+    else filterFileRows();
+  }
   updateFileNavigation();
+}
+
+function normalizeFileSearch(value) {
+  return value.normalize("NFKC").toLowerCase().replaceAll("\\", "/");
+}
+
+function updateFileSearch() {
+  if (composingFileSearch || !els.fileSearch) return;
+  fileSearchTerms = normalizeFileSearch(els.fileSearch.value).trim().split(/\s+/u).filter(Boolean);
+  filterFileRows();
+}
+
+function clearFileSearch() {
+  if (els.fileSearch) els.fileSearch.value = "";
+  fileSearchTerms = [];
+  filterFileRows();
+}
+
+function filterFileRows() {
+  let matches = 0;
+  for (const row of renderedFileRows) {
+    const visible = fileSearchTerms.every(term => row.searchText.includes(term));
+    row.button.hidden = !visible;
+    if (visible) matches++;
+  }
+  if (els.fileSearchCount) els.fileSearchCount.textContent = !fileSearchTerms.length ? ""
+    : matches ? `${matches} / ${renderedFileRows.length} 个文件` : "没有匹配的文件";
+}
+
+function focusFileRow(row) {
+  if (!row || row.button.hidden) return;
+  row.button.focus({ preventScroll: true });
+  row.button.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
 }
 
 function setFileRowActive(row, active) {
@@ -610,8 +772,11 @@ function currentFileIndex(videos) {
 }
 
 function updateFileNavigation() {
-  if (!els.fileNavigation) return;
+  if (els.locateFile) els.locateFile.disabled = !activeFileRow;
   const videos = currentWork?.videos || [];
+  if (els.autoNextFileOption) els.autoNextFileOption.hidden = subtitlePreview || videos.length < 2;
+  if (els.fileSwitchTimeOption) els.fileSwitchTimeOption.hidden = !workId || Boolean(mediaId || diskDrive || subtitlePreview) || videos.length < 2;
+  if (!els.fileNavigation) return;
   const index = currentFileIndex(videos);
   els.fileNavigation.hidden = videos.length < 2 || index < 0;
   const position = `${Math.max(0, index + 1)} / ${videos.length}`;
@@ -628,13 +793,52 @@ function playAdjacentFile(offset) {
   const index = currentFileIndex(videos);
   const target = index >= 0 ? videos[index + offset] : null;
   if (!target || !els.fileNavigation?.isConnected || els.fileNavigation.hidden) return;
-  void playVideo(target);
+  playSelectedFile(target);
+}
+
+function useCurrentTimeForFileSwitch() {
+  return Boolean(els.fileSwitchTime?.checked && els.fileSwitchTimeOption?.hidden === false);
+}
+
+function playSelectedFile(video) {
+  if (useCurrentTimeForFileSwitch()) {
+    if (video.id === currentVideo?.id) return;
+    if (currentPlayInfo || pendingSourcePosition !== null) {
+      void playVideo(video, {
+        resumePosition: mediaPosition(),
+        autoPlay: pendingSourceAutoPlay ?? (!els.video.paused && !els.video.ended),
+        compareFile: true
+      });
+      return;
+    }
+  }
+  void playVideo(video);
+}
+
+function sourceReachedEnd(tolerance) {
+  const duration = usesCustomControls() ? Number(currentPlayInfo?.duration) : Number(els.video?.duration);
+  const offset = usesCustomControls() ? playbackOffset : 0;
+  return Number.isFinite(duration) && duration > 0 && offset + Number(els.video?.currentTime) >= duration - tolerance;
+}
+
+function handlePlayerEnded() {
+  revealPlayerUi();
+  if (subtitlePreview || !els.autoNextFile?.checked || !playbackSourceController || !els.video.ended
+      || pendingSourcePosition != null || !sourceAutoPlay || autoNextBlockedBySeek
+      || document.querySelector("dialog[open], .player-move-dialog") || !sourceReachedEnd(0.75)) return;
+  const videos = currentWork?.videos || [];
+  const index = currentFileIndex(videos);
+  if (index < 0) return;
+  const next = videos.find((video, offset) => offset > index && video.id && video.id !== currentVideo.id);
+  if (next) void playVideo(next, { resumePosition: 0 });
 }
 
 async function playVideo(video, options = {}) {
   reportProgress(null, { force: true });
+  waitingForComparisonPlayback = options.compareFile === true;
   timeLinkControl.invalidate();
   timeJumpControl.invalidate();
+  bookmarks.setAvailable(false);
   if (pendingLinkStart !== null) {
     if (!pendingLinkVideoId) {
       if (requestedVideoId && requestedVideoId !== video.id) pendingLinkStart = null;
@@ -689,9 +893,11 @@ async function playVideo(video, options = {}) {
 function resetPlaybackSource() {
   playbackSourceController?.abort();
   playbackSourceController = null;
+  if (els.playbackRate) els.playbackRate.hidden = true;
   replayedSource = null;
   playbackAttempt += 1;
   sourceAutoPlay = false;
+  autoNextBlockedBySeek = false;
   pendingSourcePosition = null;
   pendingSourceAutoPlay = null;
 }
@@ -710,6 +916,7 @@ function setVideoSourceAt(position, options = {}) {
   sourceAutoPlay = autoPlay;
   pendingSourceAutoPlay = autoPlay;
   const customControls = mode !== "direct";
+  autoNextBlockedBySeek = customControls && Number(currentPlayInfo.duration) > 0 && target >= Number(currentPlayInfo.duration);
   const deferGeneratedStream = customControls && !autoPlay;
   let streamUrl = currentPlayInfo.streamUrl;
   els.video.preload = mode === "direct" ? "auto" : "none";
@@ -717,6 +924,7 @@ function setVideoSourceAt(position, options = {}) {
   els.video.autoplay = false;
   updateVideoAspect();
   configurePlyrForCurrentMode();
+  if (preferredPlaybackRate !== null) setPlaybackRate(preferredPlaybackRate);
   els.video.preload = mode === "direct" ? "auto" : "none";
   playbackOffset = mode === "direct" ? 0 : Math.floor(target);
   streamNeedsActivation = deferGeneratedStream;
@@ -736,9 +944,11 @@ function setVideoSourceAt(position, options = {}) {
   els.video.src = streamUrl;
   updateSubtitleContext();
   els.video.hidden = false;
+  if (els.playbackRate) els.playbackRate.hidden = false;
   els.notice.hidden = true;
   timeLinkControl.setAvailable(true);
   timeJumpControl.setAvailable(true);
+  bookmarks.setAvailable(true);
 
   els.video.addEventListener(
     "loadedmetadata",
@@ -803,7 +1013,10 @@ function updateSubtitleContext(media = els.video) {
 function requestVideoPlayback(options = {}) {
   const source = playbackSourceController;
   if (!source || source.signal.aborted) return;
-  if (options.restartEnded && els.video?.ended) replayedSource = source;
+  if (options.restartEnded && els.video?.ended) {
+    replayedSource = source;
+    autoNextBlockedBySeek = false;
+  }
   sourceAutoPlay = true;
   if (pendingSourcePosition != null) pendingSourceAutoPlay = true;
   const attemptId = ++playbackAttempt;
@@ -846,8 +1059,9 @@ function pauseVideoPlayback() {
 function restoreAutoplayAudioFromInteraction(event) {
   // Utility dialogs and their openers preserve the current playback intent.
   if (document.querySelector("dialog[open]") ||
-      event?.target?.closest?.("#playerShortcutsButton, #playerTimeJumpButton, #copyTimeLinkButton, #playerFileNavigation [aria-disabled='true']") ||
-      (event?.type === "keydown" && (["?", "g"].includes(String(event.key).toLowerCase()) || event.isComposing || event.keyCode === 229))) return;
+      event?.target?.closest?.("#playerShortcutsButton, #playerTimeJumpButton, #playerBookmarksButton, #copyTimeLinkButton, #playerPlaybackRate, #playerFileNavigation [aria-disabled='true'], #playerFilesTools") ||
+      (useCurrentTimeForFileSwitch() && event?.target?.closest?.("#playerFileNavigation button, #playerFiles .player-file-button")) ||
+      (event?.type === "keydown" && (["?", "g", "b", "[", "]"].includes(String(event.key).toLowerCase()) || event.isComposing || event.keyCode === 229))) return;
   if (!els.video || els.video.dataset.autoplayMuted !== "1") return;
   delete els.video.dataset.autoplayMuted;
   els.video.muted = false;
@@ -897,6 +1111,7 @@ function configurePlyrForCurrentMode() {
   player = new window.Plyr(els.video, {
     autoplay: false,
     controls: directMode ? PLYR_DIRECT_CONTROLS : PLYR_STREAM_CONTROLS,
+    fullscreen: { container: ".player-stage" },
     iconUrl: "/vendor/plyr/plyr.svg",
     invertTime: false,
     keyboard: { focused: true, global: false },
@@ -909,6 +1124,8 @@ function configurePlyrForCurrentMode() {
     if (mediaState.autoplayMuted) els.video.dataset.autoplayMuted = mediaState.autoplayMuted;
     else delete els.video.dataset.autoplayMuted;
   }
+  // Plyr restores its stored rate asynchronously during construction.
+  if (preferredPlaybackRate !== null) player.speed = preferredPlaybackRate;
   const currentPlayer = player;
   player.togglePlay = (playing) => {
     if (player !== currentPlayer || !els.video.isConnected) return;
@@ -1033,6 +1250,7 @@ function reloadCurrentStream() {
 
 function seekTo(position) {
   if (!currentVideo || !currentPlayInfo || !els.video) return;
+  waitingForComparisonPlayback = false;
   const target = clampSeekTime(position);
   const progressOptions = { force: true, resetAtStart: target === 0 };
   if (pendingLinkStart !== null && pendingLinkVideoId === currentVideo.id) pendingLinkStart = target;
@@ -1479,6 +1697,7 @@ function capturePlaybackSnapshot() {
     videoId: currentVideo.id,
     position: pendingSourcePosition ?? (hasPreparedPlayback ? mediaPosition() : Number(currentVideo.progress?.position || 0)),
     autoPlay: pendingSourceAutoPlay ?? (hasPreparedPlayback ? (!els.video.paused && !els.video.ended) : true),
+    compareFile: waitingForComparisonPlayback,
     muted: Boolean(els.video.muted),
     volume: Number(els.video.volume)
   };
@@ -1492,7 +1711,8 @@ async function restorePlaybackSnapshot(snapshot) {
   els.video.muted = snapshot.muted;
   await playVideo(video, {
     resumePosition: snapshot.position,
-    autoPlay: snapshot.autoPlay
+    autoPlay: snapshot.autoPlay,
+    compareFile: snapshot.compareFile && video.id === snapshot.videoId
   });
 }
 
@@ -2335,6 +2555,7 @@ async function deleteCurrentLocalFiles() {
 function stopCurrentPlayback() {
   timeLinkControl.invalidate();
   timeJumpControl.invalidate();
+  bookmarks.setAvailable(false);
   pendingLinkStart = null;
   playInfoRequests.cancel();
   resetPlaybackSource();
@@ -2396,6 +2617,8 @@ function showNotice(message) {
   els.notice.textContent = message;
   els.notice.hidden = false;
   els.video.hidden = true;
+  bookmarks.setAvailable(false);
+  if (els.playbackRate) els.playbackRate.hidden = true;
   hidePlaybackControls();
 }
 
@@ -2410,6 +2633,7 @@ function stopProgressTimer() {
 }
 
 function reportProgress(positionOverride = null, options = {}) {
+  if (subtitlePreview || waitingForComparisonPlayback) return;
   const duration = mediaDuration();
   if (!currentVideo || !currentPlayInfo || !playbackSourceController || !els.video || !duration || currentWork?.diskUsage) return;
   if (positionOverride == null && els.video.readyState < 1) return;

@@ -4,6 +4,7 @@
 // 视图层（含 home.js）只调用这里导出的原语 + actions，不反向捕获组合根闭包。
 
 import { qualityLabel, ratingLabel, formatClock } from "../format.js";
+import { openMusicQueuePositionDialog } from "../queue-position-dialog.js";
 
 export function createComponents(deps) {
   const { music, actions, formatNumber, showError, registerMusicTrackElement, registerCurrentTrackIndicator, registerPlaybackButton } = deps;
@@ -128,17 +129,24 @@ export function createComponents(deps) {
     return row;
   }
 
-  function trackRow(track, index) {
+  function trackRow(track, index, checkbox = null) {
     const row = document.createElement("div");
     row.className = `music-track-row${music.current?.id === track.id ? " active" : ""}`;
     registerMusicTrackElement(row, track.id);
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    row.setAttribute("aria-label", `播放 ${track.title}${Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个版本` : ""}`);
     const number = document.createElement("span");
-    const numberLabel = String(index + 1).padStart(2, "0");
-    number.textContent = music.current?.id === track.id && music.playing ? "Ⅱ" : numberLabel;
-    registerCurrentTrackIndicator(number, track.id, numberLabel, "Ⅱ");
+    if (checkbox) {
+      row.classList.add("music-track-selectable");
+      const label = document.createElement("label");
+      label.append(checkbox);
+      number.append(label);
+    } else {
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-label", `播放 ${track.title}${Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个版本` : ""}`);
+      const numberLabel = String(index + 1).padStart(2, "0");
+      number.textContent = music.current?.id === track.id && music.playing ? "Ⅱ" : numberLabel;
+      registerCurrentTrackIndicator(number, track.id, numberLabel, "Ⅱ");
+    }
     const title = document.createElement("span");
     title.className = "music-track-title";
     const strong = document.createElement("strong");
@@ -154,6 +162,11 @@ export function createComponents(deps) {
     quality.textContent = qualityLabel(track);
     const duration = document.createElement("span");
     duration.textContent = formatClock(track.durationMs || 0);
+    row.append(number, title, artist, album, quality, duration);
+    if (checkbox) {
+      row.addEventListener("click", (event) => { if (!number.contains(event.target)) checkbox.click(); });
+      return row;
+    }
     const actionsEl = document.createElement("span");
     actionsEl.className = "music-track-actions";
     actionsEl.append(
@@ -161,7 +174,7 @@ export function createComponents(deps) {
       trackActionButton("入队", `加入队列 ${track.title}`, () => actions.appendTrackToQueue(track)),
       trackActionButton("下载", `下载 ${track.title}`, () => actions.downloadTrack(track))
     );
-    row.append(number, title, artist, album, quality, duration, actionsEl);
+    row.append(actionsEl);
     row.addEventListener("click", () => actions.openTrackFromList(track, music.data?.tracks || [], { autoplay: true }).catch(() => {}));
     row.addEventListener("keydown", (event) => {
       if (event.target !== row || event.defaultPrevented) return;
@@ -260,9 +273,17 @@ export function createComponents(deps) {
     play.addEventListener("click", () => { if (row.isConnected && isCurrent()) actions.openTrack(track.id, { autoplay: true }).catch(() => {}); });
     const actionsEl = document.createElement("span");
     actionsEl.className = "music-queue-actions";
+    const move = queueActionButton("移到", "移到指定位置", () => {
+      if (!row.isConnected || !isCurrent()) return;
+      openMusicQueuePositionDialog({ track, trigger: move, getQueue: () => music.queue || [], getCurrentId: () => music.current?.id,
+        isCurrent, move: offset => actions.moveQueueTrack(track.id, offset), formatNumber });
+    }, (music.queue || []).length < 2);
+    move.classList.add("music-queue-position-action");
+    move.setAttribute("aria-haspopup", "dialog");
     actionsEl.append(
       queueActionButton("↑", "上移", () => { if (row.isConnected && isCurrent()) actions.moveQueueTrack(track.id, -1); }, index <= 0),
       queueActionButton("↓", "下移", () => { if (row.isConnected && isCurrent()) actions.moveQueueTrack(track.id, 1); }, index >= (music.queue || []).length - 1),
+      move,
       queueActionButton("×", "移出队列", () => { if (row.isConnected && isCurrent()) actions.removeTrackFromQueue(track.id); }, music.current?.id === track.id)
     );
     row.append(play, actionsEl);

@@ -15,11 +15,9 @@ await assert.rejects(() => runMangaReaderFixture({
 }), { name: "AssertionError", message: /detached retry controls must not replace an old image source/ });
 console.log("PASS negative control detects detached image retry ownership");
 const styles = fs.readFileSync(new URL("../public/modules/photos/manga.css", import.meta.url), "utf8");
-const sizeMarker = ".manga-reader-image.load-failed:has(img:not([width]))";
-assert.equal(styles.split(sizeMarker).length, 2, "negative must restore only the failed image's unconditional minimum height");
 await assert.rejects(() => runMangaReaderFixture({
   casePattern: "image retry short banner success",
-  sourceOverrides: { "/modules/photos/manga.css": styles.replace(sizeMarker, ".manga-reader-image.load-failed") }
+  sourceOverrides: { "/modules/photos/manga.css": `${styles}\n.manga-reader-image.load-failed { min-height: 160px; }\n` }
 }), { name: "AssertionError", message: /known short images must retain declared ratio/ });
 console.log("PASS negative control detects short image failure geometry inflation");
 const recoveryMarker = "compactFailure = height < 60 || height / width < .25;";

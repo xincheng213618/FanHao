@@ -6,6 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createNovelStore } from "../src/modules/novels/server/store.js";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import { createNovelTextSearch } from "../src/modules/novels/server/text-search-service.js";
+import { routeNovelApi } from "../src/modules/novels/server/routes.js";
 import { paginateNovelCollectionHistory } from "../public/modules/novels/collection-admin.js";
 
 const root = path.resolve(import.meta.dirname, "..");
@@ -219,6 +223,7 @@ try {
   assert.equal(completeCatalog.total, 245);
   assert.equal(completeCatalog.chapters.length, 245, "complete catalog mode must return every chapter without segmentation");
   assert.equal(completeCatalog.offset, 0);
+  await verifyBookTextSearch(tempDbPath, tempStore, catalogBook, longer, uploaded);
   const mine = tempStore.listBooks(new URL("http://127.0.0.1/api/novels?reading=1&sort=progress&limit=10"));
   assert.equal(mine.readingOnly, true);
   assert.equal(mine.total, 1);
@@ -343,3 +348,71 @@ if (process.env.FANHAO_NOVEL_VERIFY_SYNTHETIC_ONLY !== "1" && fs.existsSync(dbPa
 }
 
 console.log(`novel-storage: ok${counts ? ` (${counts.books} books, ${counts.chapters} chapters, no FTS)` : " (synthetic only)"}`);
+
+async function verifyBookTextSearch(dbPath, novelStore, catalog, longer, replaced) {
+  const service = createNovelTextSearch({ dbPath });
+  const server = createServer((req, res) => routeNovelApi(req, res, new URL(req.url, "http://fixture"), {
+    searchBookText: service.search,
+    novelStore,
+    sendJson: (response, code, data) => response.writeHead(code, { "Content-Type": "application/json" }).end(JSON.stringify(data)),
+    notFound: response => response.writeHead(404).end()
+  })).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const search = (book, q, after = 0) => fetch(`${base}/api/novels/${encodeURIComponent(book.id)}/search-text?${new URLSearchParams({
+    q, after: String(after), sourceRealm: book.sourceRealm, catalogRevision: book.catalogRevision
+  })}`);
+  try {
+    const lookup = (ids, sourceRealm = catalog.book.sourceRealm) => fetch(`${base}/api/novels/bookmarks/books?${new URLSearchParams([
+      ["sourceRealm", sourceRealm], ...ids.map(id => ["id", id])
+    ])}`);
+    const books = await (await lookup([catalog.book.id, longer.book.id, catalog.book.id, "missing"])).json();
+    assert.equal(books.sourceRealm, catalog.book.sourceRealm);
+    assert.deepEqual(books.books.sort((a, b) => a.id.localeCompare(b.id)), [catalog.book, longer.book]
+      .map(({ id, title, catalogRevision }) => ({ id, title, catalogRevision })).sort((a, b) => a.id.localeCompare(b.id)));
+    assert.equal((await lookup([catalog.book.id], "server:another-realm")).status, 409);
+    assert.equal((await lookup([])).status, 400);
+    assert.equal((await lookup(Array(51).fill(catalog.book.id))).status, 400);
+    const response = await search(catalog.book, "这是正文");
+    assert.equal(response.status, 200);
+    const first = await response.json();
+    assert.equal(first.bookId, catalog.book.id);
+    assert.equal(first.catalogRevision, catalog.book.catalogRevision);
+    assert.deepEqual(first.matches.map(row => row.index), Array.from({ length: 20 }, (_, index) => index + 1));
+    assert(first.matches.every(row => row.match === "这是正文" && !Object.hasOwn(row, "content")));
+    assert.equal(first.nextAfter, 20);
+    const second = await (await search(catalog.book, "这是正文", first.nextAfter)).json();
+    assert.equal(second.matches[0].index, 21);
+    assert.equal(second.nextAfter, 40);
+    const tail = await (await search(catalog.book, "这是正文", 240)).json();
+    assert.equal(tail.matches.length, 5);
+    assert.equal(tail.nextAfter, null);
+    const snippet = await (await search(longer.book, "较长正文")).json();
+    assert.equal(snippet.matches.length, 1);
+    assert(snippet.matches[0].after.endsWith("…") && snippet.matches[0].after.length <= 65);
+    assert.deepEqual((await (await search(catalog.book, ".*[ABC]+")).json()).matches, []);
+    assert.equal((await search(replaced.book, "正文")).status, 409);
+    assert.equal((await search({ ...catalog.book, sourceRealm: "server:changed" }, "正文")).status, 409);
+    assert.equal((await search({ ...catalog.book, id: "missing" }, "正文")).status, 404);
+    assert.equal((await search(catalog.book, "")).status, 400);
+    assert.equal((await search(catalog.book, "正文", -1)).status, 400);
+  } finally {
+    await service.stop();
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+
+  const limited = createNovelTextSearch({ dbPath, capacity: 1 });
+  const abort = new AbortController();
+  const pending = limited.search(catalog.book.id, { query: "这是正文" }, { signal: abort.signal });
+  const canceled = assert.rejects(pending, { statusCode: 503 });
+  await assert.rejects(limited.search(catalog.book.id, { query: "正文" }), { statusCode: 503 });
+  abort.abort();
+  await canceled;
+  await limited.stop();
+  await assert.rejects(limited.search(catalog.book.id, { query: "正文" }), { statusCode: 503 });
+  limited.start();
+  try { assert.equal((await limited.search(catalog.book.id, { query: "正文" })).matches.length, 20); }
+  finally { await limited.stop(); }
+  console.log("novel whole-book search: worker, HTTP, identity, pagination, snippets, cancellation and capacity passed");
+}

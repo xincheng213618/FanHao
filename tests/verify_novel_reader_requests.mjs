@@ -54,6 +54,14 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
       if (upload) { sendJson(res, { book: { ...book("A"), title: body.fileName } }); return; }
       if (reimport) { sendJson(res, { kind: "book", book: book(url.pathname.split("/")[3]) }); return; }
       if (correction) { sendJson(res, req.method === "PATCH" ? { book: { ...book(url.pathname.split("/")[3]), ...body } } : { deleted: true }); return; }
+      if (url.pathname === "/api/novels/bookmarks/books") {
+        const ids = url.searchParams.getAll("id"), sourceRealm = url.searchParams.get("sourceRealm");
+        assert(ids.length > 0 && ids.length <= 50);
+        sendJson(res, { sourceRealm, books: ids.filter(id => id !== "gone").map(id => {
+          const { title, catalogRevision } = book(id);
+          return { id, title, catalogRevision };
+        }) }); return;
+      }
       const chapterMatch = /^\/api\/novels\/([AB])\/chapters\/([123])$/.exec(url.pathname);
       if (chapterMatch) { sendJson(res, chapterResponse(chapterMatch[1], Number(chapterMatch[2]))); return; }
       const catalogMatch = /^\/api\/novels\/([AB])\/catalog$/.exec(url.pathname);
@@ -107,6 +115,209 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
   };
   try {
     browser = await launchBrowser();
+    await run("novel read later saves from library and detail, searches, and returns to the same selection", async () => {
+      const page = await newPage({ real: true });
+      const shelf = page.locator(".novel-read-later");
+      const search = shelf.getByRole("searchbox", { name: "搜索待读清单" });
+      const saved = shelf.locator(".novel-read-later-open");
+      try {
+        await mockEmptyReadingHistory(page, () => "server:fixture");
+        const startWrites = progressWrites.length;
+        const first = page.locator(".novel-book-row").filter({ hasText: "Book A" }).locator(".novel-read-later-toggle");
+        await first.click();
+        assert.equal(await first.getAttribute("aria-pressed"), "true");
+        await page.getByRole("button", { name: "Book B", exact: true }).click();
+        await detailTitle(page, "Book B");
+        const second = page.locator(".novel-detail .novel-read-later-toggle");
+        await second.click();
+        assert.equal(await second.getAttribute("aria-pressed"), "true");
+        await page.locator(".novel-section-menu").getByRole("button", { name: "我的", exact: true }).click();
+        await shelf.waitFor();
+        assert.deepEqual(await saved.allTextContents(), ["Book B", "Book A"]);
+        await page.setViewportSize({ width: 320, height: 720 });
+        const geometry = await shelf.boundingBox();
+        assert(geometry.x >= 0 && geometry.x + geometry.width <= 320);
+        await search.fill("ＢＯＯＫ Ａ");
+        assert.deepEqual(await saved.allTextContents(), ["Book A"]);
+        await saved.press("Enter");
+        await detailTitle(page, "Book A");
+        assert.equal(await page.locator(".novel-detail .novel-read-later-toggle").getAttribute("aria-pressed"), "true");
+        await page.getByRole("button", { name: "返回列表", exact: true }).click();
+        await page.waitForFunction(() => document.activeElement?.classList.contains("novel-read-later-open"));
+        assert.equal(await search.inputValue(), "ＢＯＯＫ Ａ");
+        assert.deepEqual(await saved.allTextContents(), ["Book A"]);
+        await page.reload();
+        await shelf.waitFor();
+        assert.deepEqual(await saved.allTextContents(), ["Book B", "Book A"]);
+        await shelf.getByRole("button", { name: "从待读移除 Book B" }).press("Enter");
+        assert.deepEqual(await saved.allTextContents(), ["Book A"]);
+        assert.equal(await shelf.getByRole("button", { name: "从待读移除 Book A" }).evaluate(node => document.activeElement === node), true);
+        assert.equal(progressWrites.length, startWrites, "adding a title for later must not create or change its reading progress");
+      } finally { await page.close(); }
+    });
+    await run("novel read later preserves a failed write and checks account and book source on open and retry", async () => {
+      const page = await newPage({ real: true });
+      let source = "server:fixture";
+      const saved = page.locator(".novel-read-later-open");
+      const detail = url => url.pathname === "/api/novels/A";
+      try {
+        await mockEmptyReadingHistory(page, () => source);
+        const toggle = page.locator(".novel-book-row").filter({ hasText: "Book A" }).locator(".novel-read-later-toggle");
+        await page.evaluate(() => {
+          window.originalReadingSetItem = Storage.prototype.setItem;
+          Storage.prototype.setItem = function (key, value) {
+            if (key.startsWith("fanhao.novel.readLater.v1:")) throw new DOMException("Fixture quota", "QuotaExceededError");
+            return originalReadingSetItem.call(this, key, value);
+          };
+        });
+        await toggle.click();
+        await page.getByText("待读清单无法读取或保存，请检查浏览器存储。", { exact: true }).waitFor();
+        assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+        await page.evaluate(() => { Storage.prototype.setItem = originalReadingSetItem; });
+        await toggle.click();
+        assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+        await page.locator(".novel-section-menu").getByRole("button", { name: "我的", exact: true }).click();
+        await saved.waitFor();
+        const wrong = { book: { ...book("A"), title: "Other source book", sourceRealm: "server:other" }, chapterTotal: 3 };
+        const first = hold(detail, "", wrong);
+        await saved.click(); await requested(first); await settle(page, first);
+        await page.getByText("待读记录与当前书库中的书籍不一致。", { exact: true }).waitFor();
+        assert.equal(await page.locator(".novel-detail-title").count(), 0);
+        const retry = hold(detail, "", wrong);
+        await page.getByRole("button", { name: "重试打开书籍" }).click(); await requested(retry); await settle(page, retry);
+        assert.equal(await page.locator(".novel-detail-title").count(), 0, "retry must keep the saved book's original identity guard");
+        await page.getByRole("button", { name: "返回列表", exact: true }).click();
+        await saved.waitFor();
+
+        const reads = countRequests(detail);
+        await page.evaluate(async () => (await import("/platform/accounts/session-context.js")).publishWebAccountChange("account:novel-fixture"));
+        await saved.click(); await tick(page);
+        assert.equal(countRequests(detail), reads, "a retired account control must not request a saved book");
+        await navigateRoute(page, "/novels/mine");
+        await page.getByText("还没有待读小说。", { exact: true }).waitFor();
+        assert.equal(await saved.count(), 0);
+        await page.evaluate(async () => (await import("/platform/accounts/session-context.js")).publishWebAccountChange("guest"));
+        await navigateRoute(page, "/novels/mine");
+        await saved.waitFor();
+        source = "server:other";
+        await navigateRoute(page, "/novels/mine");
+        await page.getByText("还没有待读小说。", { exact: true }).waitFor();
+        assert.equal(await saved.count(), 0);
+        assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('fanhao.novel.readLater.v1:["guest","server:fixture"]')).books.length), 1);
+      } finally { await page.close(); }
+    });
+    await run("reader bookmarks shelf searches old local records across books and jumps to the exact saved position", async () => {
+      const page = await newPage({ real: true });
+      const shelf = page.locator(".novel-bookmark-shelf");
+      const search = shelf.getByRole("searchbox");
+      const metadata = url => url.pathname === "/api/novels/bookmarks/books";
+      try {
+        await page.setViewportSize({ width: 320, height: 780 });
+        await mockEmptyReadingHistory(page, () => "server:fixture");
+        await page.evaluate(() => {
+          const put = (id, items) => localStorage.setItem(`fanhao.novel.bookmarks.v1:${JSON.stringify(["guest", "server:fixture", id])}`, JSON.stringify({ version: 1, items }));
+          const mark = (id, index, title, revision = `rev-${id}`, ratio = .47) => ({ id: `${id}-${title}`, chapterId: `${id}-${index}`, catalogRevision: revision, chapterIndex: index, title, ratio });
+          put("A", Array.from({ length: 17 }, (_, index) => mark("A", 1, `Saved ${index + 1}`)));
+          put("B", [mark("B", 2, "The saved place"), mark("B", 3, "Old catalog place", "older")]);
+          put("gone", [mark("gone", 1, "Removed novel place")]);
+        });
+        await navigateRoute(page, "/novels/mine");
+        await shelf.locator("summary").waitFor();
+        const reads = countRequests(metadata);
+        await shelf.locator("summary").click();
+        await shelf.getByText("20 个书签", { exact: true }).waitFor();
+        assert.equal(await shelf.evaluate(panel => panel.scrollWidth <= panel.clientWidth), true);
+        assert.equal(countRequests(metadata), reads + 1);
+        assert.equal(await shelf.locator("li").count(), 16);
+        await shelf.getByRole("button", { name: "下一页", exact: true }).click();
+        assert.equal(await shelf.locator("li").count(), 4);
+        assert.equal(await shelf.getByRole("button", { name: /^书籍不可用.*Removed novel place/ }).isDisabled(), true);
+        await search.fill("Ｂｏｏｋ Ｂ");
+        assert.equal(await shelf.locator("li").count(), 2);
+        assert.equal(await shelf.getByRole("button", { name: /^Book B.*Old catalog place/ }).isDisabled(), true);
+        await shelf.getByRole("button", { name: /^移除书签 Book B.*Old catalog place/ }).press("Enter");
+        assert.equal(await shelf.locator("li").count(), 1);
+        assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('fanhao.novel.bookmarks.v1:["guest","server:fixture","B"]')).items.map(mark => mark.title)), ["The saved place"]);
+        const opened = shelf.getByRole("button", { name: /^Book B.*The saved place/ });
+        const request = page.waitForRequest(request => new URL(request.url()).pathname === "/api/novels/B/chapters/2");
+        await opened.press("Enter");
+        const target = new URL((await request).url());
+        assert.equal(target.searchParams.get("sourceRealm"), "server:fixture");
+        assert.equal(target.searchParams.get("catalogRevision"), "rev-B");
+        assert.equal(target.searchParams.get("chapterId"), "B-2");
+        await readerTitle(page, "B", 2);
+        await assertReadOpeningGeometry(page, .47);
+        await page.getByRole("button", { name: "返回列表", exact: true }).click();
+        await opened.waitFor();
+        assert.equal(await search.inputValue(), "Ｂｏｏｋ Ｂ");
+        await page.waitForFunction(() => document.activeElement?.classList.contains("novel-bookmark-shelf-open"));
+        assert.equal(await opened.evaluate(button => button === document.activeElement), true);
+        assert.equal(countRequests(metadata), reads + 1);
+        await page.route(/\/api\/novels\/B\/chapters\/2\?/, route => route.fulfill({ status: 409, json: { error: "书签目录已经更新" } }));
+        await opened.click();
+        await shelf.getByText("书签目录已经更新", { exact: true }).waitFor();
+        assert.equal(await page.locator(".novel-reader-page").count(), 0, "a changed catalogue must reject the bookmark even when the old chapter is cached");
+      } finally { await page.close(); }
+    });
+    await run("reader bookmarks shelf retries failed reads and limits batches to this account and realm", async () => {
+      const page = await newPage({ real: true });
+      const metadata = url => url.pathname === "/api/novels/bookmarks/books";
+      const failure = hold(metadata, "synthetic bookmark metadata failure");
+      const chapterFailure = hold(url => url.pathname === "/api/novels/B/chapters/2", "synthetic bookmark chapter failure");
+      try {
+        await mockEmptyReadingHistory(page, () => "server:fixture");
+        await page.evaluate(() => {
+          const put = (owner, realm, id) => localStorage.setItem(`fanhao.novel.bookmarks.v1:${JSON.stringify([owner, realm, id])}`,
+            JSON.stringify({ version: 1, items: [{ id: "mark", chapterId: `${id}-2`, catalogRevision: `rev-${id}`, chapterIndex: 2, title: `Saved ${id}`, ratio: .25 }] }));
+          put("guest", "server:fixture", "B");
+          for (let index = 0; index < 50; index++) put("guest", "server:fixture", `fixture-${index}`);
+          put("account:other", "server:fixture", "foreign-account");
+          put("guest", "server:other", "foreign-library");
+        });
+        await navigateRoute(page, "/novels/mine");
+        const shelf = page.locator(".novel-bookmark-shelf");
+        const input = shelf.getByRole("searchbox");
+        const loaded = [];
+        page.on("request", request => { const url = new URL(request.url()); if (metadata(url)) loaded.push(url.searchParams.getAll("id")); });
+        await shelf.locator("summary").click(); await requested(failure); await settle(page, failure);
+        await input.fill("Saved B");
+        await shelf.getByText("synthetic bookmark metadata failure", { exact: true }).waitFor();
+        await shelf.getByRole("button", { name: "重试书目读取" }).click();
+        const target = shelf.getByRole("button", { name: /^Book B.*Saved B/ });
+        await target.waitFor();
+        assert.deepEqual(loaded.map(ids => ids.length), [50, 50, 1]);
+        assert.equal(new Set(loaded.slice(1).flat()).size, 51);
+        assert(loaded.flat().every(id => id !== "foreign-account" && id !== "foreign-library"));
+        await target.click(); await requested(chapterFailure); await settle(page, chapterFailure);
+        await shelf.getByText("synthetic bookmark chapter failure", { exact: true }).waitFor();
+        assert.equal(await input.inputValue(), "Saved B");
+        await target.click(); await readerTitle(page, "B", 2);
+      } finally { failure.release(); chapterFailure.release(); held.delete(failure); held.delete(chapterFailure); await page.close(); }
+    });
+    await run("novel read later pages a full shelf, searches hidden entries and reports its limit", async () => {
+      const page = await newPage({ real: true });
+      const shelf = page.locator(".novel-read-later");
+      const more = shelf.getByRole("button", { name: "显示更多", exact: true });
+      const saved = shelf.locator(".novel-read-later-open");
+      try {
+        await mockEmptyReadingHistory(page, () => "server:fixture");
+        await page.evaluate(() => localStorage.setItem('fanhao.novel.readLater.v1:["guest","server:fixture"]', JSON.stringify({
+          version: 1, books: Array.from({ length: 100 }, (_, index) => ({ id: `saved-${index}`, title: `Saved book ${index}`, author: `Writer ${index}` }))
+        })));
+        const toggle = page.locator(".novel-book-row").filter({ hasText: "Book A" }).locator(".novel-read-later-toggle");
+        await toggle.click();
+        await page.getByText("待读清单已满，最多保存 100 本。", { exact: true }).waitFor();
+        assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+        await page.locator(".novel-section-menu").getByRole("button", { name: "我的", exact: true }).click();
+        await shelf.waitFor();
+        assert.equal(await saved.count(), 8);
+        await more.press("Enter");
+        assert.equal(await saved.count(), 16);
+        assert.equal(await more.evaluate(node => document.activeElement === node), true);
+        await shelf.getByRole("searchbox").fill("writer 99");
+        assert.deepEqual(await saved.allTextContents(), ["Saved book 99"]);
+      } finally { await page.close(); }
+    });
     for (const ignoreAbort of [true, false]) {
       const transport = ignoreAbort ? "ignore-abort" : "normal";
       await run(`reader LAN HTTP opens books and preserves progress sessions ${transport}`, async () => {
@@ -239,6 +450,81 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
             assert.equal(await page.evaluate(() => __nativeNovelSortTree.every(node => node.isConnected) && document.activeElement === __nativeNovelSort && __nativeNovelSortBlur === 0), true);
             if (error) assert(!(await page.locator(".novel-status-line").textContent()).includes(error));
           } finally { for (const gate of [first, second].filter(Boolean)) { gate.release(); held.delete(gate); } await page.close(); }
+        }
+      });
+      await run(`novel reading status filters the paged library and rejects an obsolete append ${transport}`, async () => {
+        const page = await newPage({ real: true, ignoreAbort, route: "/novels?q=Book&category=Fixture&sort=title", manualObservers: true });
+        const matches = (status, offset) => url => url.pathname === "/api/novels"
+          && url.searchParams.get("readingStatus") === status && Number(url.searchParams.get("offset")) === offset;
+        const finished = hold(matches("finished", 0), "", { ...libraryData(), readingStatus: "finished", books: [book("A")], total: 2, nextOffset: 1 });
+        const oldAppend = hold(matches("finished", 1), "", { ...libraryData(), readingStatus: "finished", books: [book("B")], offset: 1, nextOffset: 2 });
+        const empty = hold(matches("review", 0), "", { ...libraryData(), readingStatus: "review", books: [], total: 0 });
+        const legacy = hold(matches("unread", 0), "", libraryData());
+        const authorMatch = (url) => url.pathname === "/api/novels/authors/Synthetic" && url.searchParams.get("readingStatus") === "reading";
+        const authorReply = { ...libraryData(), author: { name: "Synthetic", bookCount: 2 }, readingStatus: "reading", books: [book("B")], total: 1 };
+        const author = hold(url => authorMatch(url) && !url.searchParams.has("q"), "", authorReply);
+        const authorSearch = hold(url => authorMatch(url) && url.searchParams.get("q") === "Book B", "", authorReply);
+        try {
+          await page.setViewportSize({ width: 320, height: 740 });
+          const filter = page.getByRole("combobox", { name: "阅读状态", exact: true });
+          await filter.focus();
+          const original = await filter.elementHandle();
+          await filter.selectOption("finished"); await requested(finished);
+          const apiParams = new URL(finished.url, page.url()).searchParams;
+          assert.deepEqual([apiParams.get("q"), apiParams.get("category"), apiParams.get("sort")], ["Book", "Fixture", "title"]);
+          await settle(page, finished);
+          assert.equal(new URL(page.url()).searchParams.get("readingStatus"), "finished");
+          assert.equal(await filter.evaluate((node, old) => node === old && node === document.activeElement, original), true);
+          assert.equal(await page.locator(".novel-book-title").allTextContents().then(values => values.join(",")), "Book A");
+          await page.getByRole("button", { name: "加载更多", exact: true }).click(); await requested(oldAppend);
+          await filter.selectOption("review"); await requested(empty); await settle(page, empty);
+          await finishOld(page, oldAppend, ignoreAbort);
+          assert.equal(await page.locator(".novel-book-row").count(), 0, "an obsolete filtered append cannot populate the new filter");
+          await page.getByRole("heading", { name: "没有符合筛选的小说" }).waitFor();
+          await filter.selectOption("unread"); await requested(legacy); await settle(page, legacy);
+          await page.getByRole("heading", { name: "书库暂时无法读取" }).waitFor();
+          assert.equal(await page.locator(".novel-book-row").count(), 0, "a server missing filter support cannot show unfiltered results");
+          await navigateRoute(page, "/novels/authors/Synthetic?readingStatus=reading");
+          await requested(author); await settle(page, author);
+          assert.equal(await filter.inputValue(), "reading");
+          const search = page.getByRole("searchbox", { name: "搜索小说", exact: true });
+          await search.fill("Book B"); await search.press("Enter");
+          await requested(authorSearch); await settle(page, authorSearch);
+          assert.equal(new URL(page.url()).pathname, "/novels/authors/Synthetic");
+          assert.equal(new URL(page.url()).searchParams.get("readingStatus"), "reading");
+        } finally {
+          for (const gate of [finished, oldAppend, empty, legacy, author, authorSearch]) { gate.release(); held.delete(gate); }
+          await page.close();
+        }
+      });
+      await run(`novel reading status refreshes after a late progress receipt ${transport}`, async () => {
+        const isUnread = url => url.pathname === "/api/novels" && url.searchParams.get("readingStatus") === "unread";
+        const listing = { ...libraryData(), sourceRealm: "server:fixture", readingStatus: "unread", books: [book("A")], total: 1 };
+        const initial = hold(isUnread, "", listing);
+        const stale = hold(isUnread, "", listing);
+        const fresh = hold(isUnread, "", { ...listing, books: [], total: 0 });
+        const progress = hold((url, req) => req.method === "POST" && url.pathname === "/api/novels/A/progress");
+        let page;
+        try {
+          page = await newPage({ real: true, ignoreAbort, route: "/novels?readingStatus=unread", waitReady: false });
+          await requested(initial); await settle(page, initial); await ready(page);
+          await navigateRoute(page, "/novels/A/3?readingStatus=unread");
+          await readerTitle(page, "A", 3);
+          await tick(page);
+          await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+          await page.locator(".novel-list-return").evaluate(node => node.click());
+          await requested(progress); await requested(stale);
+          assert.deepEqual([progress.body.chapterIndex, progress.body.scrollRatio], [3, 1]);
+          await settle(page, stale);
+          assert.equal(await page.locator(".novel-book-title").textContent(), "Book A");
+          progress.release();
+          await requested(fresh); await settle(page, fresh);
+          await page.getByRole("heading", { name: "没有符合筛选的小说" }).waitFor();
+          assert.equal(new URL(page.url()).searchParams.get("readingStatus"), "unread");
+          assert.equal(await page.getByRole("combobox", { name: "阅读状态", exact: true }).inputValue(), "unread");
+        } finally {
+          for (const gate of [initial, stale, fresh, progress]) { gate.release(); held.delete(gate); }
+          await page?.close();
         }
       });
       await run(`novel sort input respects newer composition navigation and retired controls ${transport}`, async () => {
@@ -2171,6 +2457,85 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
         } finally { await page.close(); }
       });
 
+      await run(`reader auto scroll advances, pauses and saves at the end ${transport}`, async () => {
+        const page = await newPage({ real: true, ignoreAbort, route: "/novels/A/3" });
+        try {
+          await page.setViewportSize(ignoreAbort ? { width: 320, height: 700 } : { width: 1280, height: 400 });
+          await readerTitle(page, "A", 3);
+          const toggle = page.getByRole("button", { name: "自动滚动", exact: true });
+          const settings = page.getByRole("button", { name: "设置", exact: true });
+          await settings.click();
+          const speed = page.getByRole("combobox", { name: "自动滚动速度" });
+          assert.equal(await speed.inputValue(), "normal");
+          await speed.selectOption("fast");
+          await page.getByRole("button", { name: "完成", exact: true }).click();
+          await page.reload(); await ready(page); await readerTitle(page, "A", 3);
+          await settings.click(); assert.equal(await speed.inputValue(), "fast");
+          assert(await page.locator(".novel-settings-panel").evaluate(panel =>
+            panel.getBoundingClientRect().bottom <= document.querySelector(".novel-reader-toolbar").getBoundingClientRect().top),
+          "settings must clear the toolbar in narrow and short windows");
+          await page.getByRole("button", { name: "完成", exact: true }).click(); await tick(page);
+          assert(await page.locator(".novel-reader-toolbar").evaluate(toolbar => {
+            const rowTop = toolbar.firstElementChild.getBoundingClientRect().top;
+            return [...toolbar.children].every(button => {
+              const rect = button.getBoundingClientRect();
+              return rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight && rect.top === rowTop;
+            });
+          }), "all reading controls must fit in one row inside the viewport");
+          await page.evaluate(() => {
+            window.__holdFrames = true;
+            window.__stepNovelScroll = now => {
+              const frames = [...__heldFrames.values()];
+              __heldFrames.clear();
+              frames.forEach(frame => frame(now));
+              return scrollY;
+            };
+          });
+          const step = now => page.evaluate(time => __stepNovelScroll(time), now);
+          const initial = await page.evaluate(() => scrollY);
+          await toggle.press("Enter");
+          assert.equal(await toggle.getAttribute("aria-pressed"), "true");
+          await step(100);
+          assert.equal(await step(180) - initial, 5);
+          assert.equal(await step(10180) - initial, 10, "a delayed frame must not jump ahead");
+          await toggle.press("Enter");
+          assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+          assert.equal(await step(10260) - initial, 10);
+
+          await toggle.press("Enter"); await step(10340);
+          await page.evaluate(() => document.querySelector(".novel-reader-content").dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 180 })));
+          assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+          await toggle.press("Enter"); await step(10420);
+          await page.evaluate(() => window.scrollBy({ top: 200, behavior: "instant" }));
+          await step(10500);
+          assert.equal(await toggle.getAttribute("aria-pressed"), "false", "external scroll movement must also retire automatic scrolling");
+
+          await page.evaluate(() => window.scrollTo({ top: document.documentElement.scrollHeight - innerHeight - 10, behavior: "instant" }));
+          const before = progressWrites.length;
+          await toggle.press("Enter"); await step(10600); await step(10680); await step(10760); await step(10840);
+          assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+          assert.equal(new URL(page.url()).pathname, "/novels/A/3");
+          await until(() => progressWrites.slice(before).some(write => write.bookId === "A" && write.chapterId === "A-3" && write.scrollRatio === 1),
+            "automatic scrolling at the end must save the final chapter position");
+
+          await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+          await toggle.press("Enter"); await step(10920);
+          await page.evaluate(() => {
+            Object.defineProperty(document, "hidden", { value: true, configurable: true });
+            document.dispatchEvent(new Event("visibilitychange"));
+            delete document.hidden;
+          });
+          assert.equal(await toggle.getAttribute("aria-pressed"), "false");
+          await toggle.press("Enter"); await step(11000);
+          await page.evaluate(() => { window.__oldAutoScrollFrame = [...__heldFrames.values()][0]; });
+          await navigateRoute(page, "/novels/B/1"); await readerTitle(page, "B", 1); await step(11080);
+          const newTop = await page.evaluate(() => scrollY);
+          await page.evaluate(() => __oldAutoScrollFrame(11160));
+          assert.equal(await page.evaluate(() => scrollY), newTop);
+          assert.equal(await toggle.getAttribute("aria-pressed"), "false", "a retired frame must not scroll the next chapter");
+        } finally { await page.close(); }
+      });
+
       await run(`reader position preserves long chapter selection focus and saves exact ratios ${transport}`, async () => {
         const page = await newPage({ ignoreAbort });
         try {
@@ -2212,6 +2577,180 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
           assert(Math.abs(await readerRatio(page) - .0005) < .00005, "a saved near-zero percentage must restore exactly when reopening the chapter");
           assert.equal(await input.inputValue(), "0.05", "a settings panel mounted with the restored chapter shows its precise current position");
         } finally { await page.close(); }
+      });
+
+      await run(`whole-book text search pages results and jumps to the matched paragraph ${transport}`, async () => {
+        const query = "[Needle]+";
+        const search = url => url.pathname === "/api/novels/A/search-text" && url.searchParams.get("q") === query;
+        const data = (index, nextAfter) => ({ bookId: "A", sourceRealm: "server:fixture", catalogRevision: "rev-A", query,
+          matches: [{ id: `A-${index}`, index, title: `A Chapter ${index}`, before: "命中前文 ", match: query, after: " 后文" }], nextAfter });
+        const first = hold(url => search(url) && url.searchParams.get("after") === "0", "", data(1, 1));
+        const more = hold(url => search(url) && url.searchParams.get("after") === "1", "", data(2, null));
+        const target = chapterResponse("A", 2);
+        target.chapter.content = Array.from({ length: 80 }, (_, index) => index === 45 ? `这是定位目标 ${query}。` : `这是合成段落 ${index + 1}，用于验证正文滚动位置。`).join("\n\n");
+        const chapterRead = hold(url => url.pathname === "/api/novels/A/chapters/2", "", target);
+        const page = await newPage({ real: true, ignoreAbort, route: "/novels/A" });
+        try {
+          await page.setViewportSize({ width: 320, height: 700 });
+          await page.getByRole("button", { name: "搜索全书正文", exact: true }).click();
+          const dialog = page.getByRole("dialog", { name: "搜索全书正文" });
+          const input = dialog.getByRole("searchbox", { name: "全书正文关键词" });
+          assert(await dialog.evaluate(node => { const box = node.getBoundingClientRect(); return box.left >= 0 && box.right <= innerWidth; }));
+          await input.fill(query); await input.press("Enter"); await requested(first); await settle(page, first);
+          assert.equal(new URL(first.url, base).searchParams.get("sourceRealm"), "server:fixture");
+          assert.equal(new URL(first.url, base).searchParams.get("catalogRevision"), "rev-A");
+          assert.equal(await dialog.locator("mark").first().textContent(), query);
+          await dialog.locator("li").first().evaluate(row => { window.__firstTextSearchResult = row; });
+          await dialog.getByRole("button", { name: "加载更多匹配章节" }).press("Enter");
+          await requested(more); await settle(page, more);
+          assert(await dialog.locator("li").first().evaluate(row => row === __firstTextSearchResult));
+          const hit = dialog.getByRole("button", { name: /A Chapter 2/ });
+          assert(await hit.evaluate(node => node === document.activeElement));
+          await hit.press("Enter"); await requested(chapterRead);
+          assert.equal(new URL(chapterRead.url, base).searchParams.get("chapterId"), "A-2");
+          await settle(page, chapterRead); await readerTitle(page, "A", 2);
+          const finder = page.getByRole("search", { name: "本章正文" });
+          assert.equal(await finder.getByRole("status").textContent(), "第 1 / 1 处");
+          await page.waitForFunction(() => {
+            const paragraph = [...document.querySelectorAll(".novel-reader-content p")].find(node => node.textContent.includes("定位目标"));
+            return scrollY > 500 && paragraph?.getBoundingClientRect().top >= 0 && paragraph.getBoundingClientRect().top < innerHeight;
+          });
+          const prior = countRequests(search);
+          await finder.getByRole("button", { name: "搜索全书正文" }).click();
+          assert.equal(await input.inputValue(), query);
+          assert.equal(await dialog.locator("li").count(), 2);
+          assert.equal(countRequests(search), prior, "reopening the search in the same revision must reuse the current result pages");
+          await input.press("Escape");
+          assert.equal(await dialog.count(), 0);
+          assert(await page.getByRole("button", { name: "查找", exact: true }).evaluate(node => node === document.activeElement));
+        } finally { for (const gate of [first, more, chapterRead]) { gate.release(); held.delete(gate); } await page.close(); }
+      });
+
+      await run(`whole-book text search drops stale reads on query replacement and dismissal ${transport}`, async () => {
+        const matches = query => url => url.pathname === "/api/novels/A/search-text" && url.searchParams.get("q") === query;
+        const data = query => ({ bookId: "A", sourceRealm: "server:fixture", catalogRevision: "rev-A", query,
+          matches: [{ id: "A-1", index: 1, title: `${query} Chapter`, before: "", match: query, after: "" }], nextAfter: null });
+        const old = hold(matches("obsolete"), "", data("obsolete"));
+        const fresh = hold(matches("fresh"), "", data("fresh"));
+        const staleRevision = hold(matches("stale revision"), "", { ...data("stale revision"), catalogRevision: "rev-previous" });
+        const retry = hold(matches("stale revision"), "", data("stale revision"));
+        const pending = hold(matches("pending"), "", data("pending"));
+        const page = await newPage({ real: true, ignoreAbort, route: "/novels/A/1" });
+        try {
+          await page.getByRole("button", { name: "查找", exact: true }).click();
+          await page.getByRole("button", { name: "搜索全书正文", exact: true }).click();
+          const dialog = page.getByRole("dialog", { name: "搜索全书正文" });
+          const input = dialog.getByRole("searchbox");
+          await input.fill("obsolete"); await input.press("Enter"); await requested(old);
+          await input.fill("fresh"); await input.press("Enter"); await requested(fresh); await settle(page, fresh);
+          await finishOld(page, old, ignoreAbort);
+          assert.deepEqual(await dialog.locator("li strong").allTextContents(), ["fresh Chapter"]);
+          await input.fill("stale revision"); await input.press("Enter"); await requested(staleRevision); await settle(page, staleRevision);
+          assert.equal(await dialog.locator("li").count(), 0);
+          await dialog.getByRole("button", { name: "重试", exact: true }).click(); await requested(retry); await settle(page, retry);
+          assert.deepEqual(await dialog.locator("li strong").allTextContents(), ["stale revision Chapter"]);
+          await input.fill("pending"); await input.press("Enter"); await requested(pending);
+          await input.press("Escape");
+          await finishOld(page, pending, ignoreAbort);
+          assert.equal(await dialog.count(), 0);
+          await readerTitle(page, "A", 1);
+        } finally { for (const gate of [old, fresh, staleRevision, retry, pending]) { gate.release(); held.delete(gate); } await page.close(); }
+      });
+
+      await run(`chapter text search locates literal matches and retires old controls ${transport}`, async () => {
+        const reply = chapterResponse("A", 1);
+        const paragraphs = Array.from({ length: 1000 }, (_, index) => index === 39 ? "第一处 [A]+，第二处 [a]+。"
+          : index === 829 ? "第三处 [A]+。" : `合成的正文段落 ${index + 1}。本文用于验证章节内查找与滚动。`);
+        reply.chapter.content = paragraphs.join("\n\n");
+        const read = hold(url => url.pathname === "/api/novels/A/chapters/1", "", reply);
+        const fallback = ignoreAbort;
+        const page = await newPage({ real: true, ignoreAbort, plainHttp: fallback, route: "/novels/A/1", waitReady: false });
+        try {
+          await requested(read); await settle(page, read); await readerTitle(page, "A", 1); await ready(page);
+          if (fallback) {
+            await page.setViewportSize({ width: 320, height: 640 });
+            await page.evaluate(() => Object.defineProperty(window, "Highlight", { configurable: true, value: undefined }));
+          }
+          const initialReads = countRequests(read.match);
+          const finder = page.getByRole("search", { name: "本章正文" });
+          const trigger = page.getByRole("button", { name: "查找", exact: true });
+          const input = finder.getByRole("searchbox", { name: "查找本章正文" });
+          const status = finder.getByRole("status");
+          const next = finder.getByRole("button", { name: "下一处匹配" });
+          const previous = finder.getByRole("button", { name: "上一处匹配" });
+          await page.evaluate(() => { window.__chapterParagraph = document.querySelector(".novel-reader-content p"); window.scrollTo(0, 250); });
+          await tick(page);
+          const origin = await page.evaluate(() => scrollY);
+          await trigger.click();
+          assert.equal(await input.evaluate(node => node === document.activeElement), true);
+          assert.equal(await trigger.getAttribute("aria-expanded"), "true");
+          assert.equal(await next.evaluate(button => {
+            const box = button.getBoundingClientRect();
+            return box.width >= 44 && box.height >= 44 && box.right <= innerWidth;
+          }), true, "the match navigation has touch-sized controls inside a narrow viewport");
+          await input.evaluate(node => {
+            node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "候选" }));
+            node.value = "候选";
+            node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+          });
+          await input.press("Escape");
+          assert.equal(await finder.isVisible(), true, "IME cancellation must not close the chapter search");
+          assert.equal(await status.textContent(), "");
+          await input.evaluate(node => {
+            node.value = "[a]+";
+            node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "[a]+" }));
+          });
+          assert.equal(await status.textContent(), "3 处匹配", "regular-expression characters must be matched literally");
+          assert.equal(await page.evaluate(() => scrollY), origin, "typing must not move the reading viewport");
+          async function assertMatch(label, text, paragraphIndex) {
+            assert.equal(await status.textContent(), label);
+            const location = await page.evaluate(() => {
+              const mark = document.querySelector("mark.novel-chapter-match");
+              const range = CSS.highlights && [...(CSS.highlights.get("novel-chapter-match") || [])][0];
+              const match = mark || range;
+              const paragraph = mark?.parentElement || range?.startContainer.parentElement;
+              const top = match?.getBoundingClientRect().top;
+              const background = getComputedStyle(mark || paragraph, mark ? null : "::highlight(novel-chapter-match)").backgroundColor;
+              return { index: [...document.querySelectorAll(".novel-reader-content p")].indexOf(paragraph), text: mark?.textContent || range?.toString(),
+                exposed: top > document.querySelector(".novel-chapter-search").getBoundingClientRect().bottom && top < innerHeight,
+                painted: background !== "rgba(0, 0, 0, 0)", preserved: window.__chapterParagraph === document.querySelector(".novel-reader-content p"), mode: mark ? "mark" : "range" };
+            });
+            assert.deepEqual(location, { index: paragraphIndex, text, exposed: true, painted: true, preserved: true, mode: fallback ? "mark" : "range" });
+          }
+          await input.press("Enter"); await assertMatch("第 1 / 3 处", "[A]+", 39);
+          await next.click(); await assertMatch("第 2 / 3 处", "[a]+", 39);
+          await input.press("Shift+Enter"); await assertMatch("第 1 / 3 处", "[A]+", 39);
+          await previous.click(); await assertMatch("第 3 / 3 处", "[A]+", 829);
+          await input.fill("没有出现的词"); assert.equal(await status.textContent(), "本章无匹配"); assert(await next.isDisabled());
+          await input.fill("[a]+"); await input.press("Enter");
+          await finder.evaluate(node => { window.__retiredChapterSearch = node; });
+          await input.press("Escape");
+          assert.equal(await finder.count(), 0);
+          assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+          assert.equal(await page.evaluate(() => CSS.highlights?.has("novel-chapter-match") || Boolean(document.querySelector(".novel-chapter-match"))), false);
+          assert.deepEqual(await page.locator(".novel-reader-content p").allTextContents(), paragraphs, "closing restores the exact chapter text");
+          assert.equal(countRequests(read.match), initialReads, "chapter search uses the mounted text without a new read");
+
+          await trigger.click();
+          await page.evaluate(() => window.__retiredChapterSearch.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+          assert.equal(await finder.isVisible(), true, "a detached search panel cannot dismiss its replacement");
+          await input.fill("[a]+"); await input.press("Enter");
+          await page.getByRole("button", { name: "设置", exact: true }).click();
+          assert.equal(await finder.count(), 0);
+          await trigger.click();
+          assert.equal(await page.locator(".novel-settings-panel").count(), 0);
+          await page.locator('[data-reader-focus="toolbar-目录"]').click();
+          assert.equal(await finder.count(), 0);
+          await page.keyboard.press("Escape");
+          await trigger.click();
+          await input.fill("[a]+"); await input.press("Enter");
+          await page.getByRole("button", { name: "下一章", exact: true }).click();
+          await readerTitle(page, "A", 2);
+          assert.equal(await finder.count(), 0);
+          assert.equal(await page.evaluate(() => CSS.highlights?.has("novel-chapter-match") || Boolean(document.querySelector(".novel-chapter-match"))), false);
+          await trigger.click();
+          assert.equal(await input.inputValue(), "");
+        } finally { read.release(); await page.close(); }
       });
 
       await run(`reader position validates input and supports narrow keyboard and touch controls ${transport}`, async () => {
@@ -3584,6 +4123,12 @@ export async function runNovelReaderFixture({ legacyNovel = false, legacyHost = 
       }
     }
     return page;
+  }
+  async function mockEmptyReadingHistory(page, source) {
+    await page.route(/\/api\/novels\?/, route => {
+      const reading = new URL(route.request().url()).searchParams.get("reading") === "1";
+      return reading ? route.fulfill({ json: { ...libraryData(), sourceRealm: source(), books: [], total: 0 } }) : route.continue();
+    });
   }
   async function readLibraryPage(page, data, options = {}) {
     const gate = hold(url => url.pathname === "/api/novels", "", data);

@@ -144,8 +144,10 @@ button { color: inherit; }
 }
 .path-breadcrumb button:hover { background: var(--disk-green-soft); color: var(--disk-green-dark); }
 .path-separator { color: #9ba8a3; }
+.disk-search-tools { display: flex; min-width: 0; align-items: stretch; gap: 6px; }
 .disk-search {
   display: flex;
+  flex: 1;
   min-width: 0;
   height: 34px;
   align-items: center;
@@ -158,6 +160,17 @@ button { color: inherit; }
 }
 .disk-search:focus-within { border-color: #69ad96; box-shadow: 0 0 0 3px rgba(31, 126, 96, .1); }
 .disk-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--disk-ink); font-size: 13px; }
+.disk-search-tools select {
+  flex: 0 0 auto;
+  border: 1px solid var(--disk-line);
+  border-radius: 8px;
+  padding: 0 6px;
+  background: #fbfcfb;
+  color: var(--disk-ink);
+  font: inherit;
+  font-size: 12px;
+}
+.disk-search-tools select:focus-visible { outline: 2px solid var(--disk-green); outline-offset: 1px; }
 .browser-actions { display: flex; gap: 8px; }
 .primary-button, .secondary-button {
   min-height: 34px;
@@ -302,6 +315,8 @@ button:disabled { cursor: wait; opacity: .55; }
 .treemap-empty strong { display: block; margin-bottom: 6px; color: #fff; font-size: 20px; }
 .treemap-empty span { max-width: 470px; color: #aab7b2; font-size: 13px; line-height: 1.7; }
 
+.disk-search-feedback { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; padding: 0 7px 8px; color: var(--disk-muted); font-size: 12px; }
+.disk-search-feedback .secondary-button { min-height: 27px; padding: 3px 7px; font-size: inherit; }
 .entry-list { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 0 0 10px; }
 .entry-row {
   position: relative;

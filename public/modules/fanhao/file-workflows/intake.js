@@ -1,16 +1,39 @@
+import { createIntakeLibrarySearch } from "./intake-library-search.js?v=2";
+import { intakeDraftJobOwns, intakeDraftPathKey, mergeIntakeQueueDraft, readIntakeQueueDraft, restoreIntakeQueueDraft, saveIntakeQueueDraft } from "./intake-queue-draft.js?v=1";
+
 const prefix = "/api/fanhao/file-workflows/intake/";
 const videoExtension = /\.(?:mp4|mkv|avi|mov|wmv|flv|m4v|ts|m2ts|webm|mpg|mpeg)$/i;
 const $ = (id) => document.getElementById(id);
 const queue = new Map();
-const actionLabels = { replace: "替换馆藏视频", keep: "两份都保留", new: "新番号入库", discard: "丢弃源视频", discardBoth: "两份都删除", mark: "馆藏标记重命名" };
+const dedicatedSubtitle = new URLSearchParams(location.search).get("mode") === "subtitle";
+let queueDraft = dedicatedSubtitle ? { entries: [], selected: "" } : readIntakeQueueDraft();
+let draftRestore = null;
+let draftFailures = [];
+const draftSubmitting = new Map();
+const librarySearch = createIntakeLibrarySearch({ section: $("librarySearch"), form: $("librarySearchForm"),
+  status: $("librarySearchStatus"), results: $("librarySearchResults"), selectVideo: selectLibrarySubtitleVideo,
+  catalog: dedicatedSubtitle ? { tools: $("libraryBrowseTools"), sort: $("librarySort"), cardSize: $("libraryCardSize"),
+    excludeChinese: $("excludeChineseSubtitles"), excludeVr: $("excludeLibraryVr"), onlyMarkedA: $("libraryOnlyMarkedA"), showFiles: showLibraryFiles,
+    onlyUnreviewed: $("libraryOnlyUnreviewed"), onReviewChanged: renderSubtitleReviewMark,
+    more: $("libraryLoadMore"), loadStatus: $("libraryLoadStatus"), retry: $("retryLibraryLoad"),
+    resume: $("resumeLibraryBrowse"), restart: $("restartLibraryBrowse"), resumeTools: $("libraryResumeTools"), resumeStatus: $("libraryResumeStatus"),
+    people: { input: $("libraryPeopleQuery"), status: $("libraryPeopleStatus"), list: $("libraryPeopleList"), retry: $("retryLibraryPeople") } } : null });
+const actionLabels = { replace: "替换馆藏视频", keep: "两份都保留", new: "新番号入库", discard: "丢弃源视频", discardBoth: "两份都删除", discardLibraryVideo: "删除此文件", mark: "馆藏标记重命名" };
 const actionLabel = (job) => job.action === "discard" && job.package ? "丢弃整个文件夹" : actionLabels[job.action];
-const isDiscard = (action) => action === "discard" || action === "discardBoth";
+const isDiscard = (action) => action === "discard" || action === "discardBoth" || action === "discardLibraryVideo";
 const markFields = [["markLtx", "ltx", "ltx"], ["markU", "u", "uncensored"], ["markC", "c", "subtitled"]];
 const stateLabels = { prepared: "待确认", queued: "排队中", working: "迁移中", committed: "已入库 · 待收尾", interrupted: "执行中断", completed: "已完成", blocked: "待处理" };
 const phaseLabels = { prepare: "准备", copy: "传输文件", verify: "校验", publish: "写入馆藏", cleanup: "清理并刷新馆藏", delete: "删除" };
 const failedStates = new Set(["committed", "interrupted", "blocked"]);
 let selected = "", comparison = null, oldId = null, generation = 0, busyOwner = -1, confirmation = null;
+let comparisonRequest, sourceDetailsRequest;
+let subtitleReview, advancingSubtitleWork = false;
+let reviewMode = "wash";
+let automaticSubtitleQueue = Promise.resolve();
 let discardReasons = {}, discardPage = 1, discardStatsRequest = 0;
+let subtitleRemoval = false;
+let libraryVideoDeletion = false, libraryFileList;
+const pendingLibraryDeletes = new Map();
 let jobs = [], known = new Map(), pollTimer = 0, polling = false, doneCount = 0, toastTimer = 0;
 const taskRows = new Map(), taskGroups = new Map();
 
@@ -29,9 +52,9 @@ function message(text, error = false) {
   if (!error) toastTimer = setTimeout(() => { $("notice").hidden = true; }, 8000);
 }
 
-async function api(route, body) {
-  const response = await fetch(prefix + route, body === undefined ? { cache: "no-store" }
-    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+async function api(route, body, signal) {
+  const response = await fetch(prefix + route, body === undefined ? { cache: "no-store", signal }
+    : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "操作失败");
   return data;
@@ -66,13 +89,109 @@ const trayJobs = () => jobs.filter((job) => job.active || failedStates.has(job.s
 const nextItem = () => [...queue.values()].find((item) => !item.error && item.path !== selected);
 
 function updateView() {
-  const tray = trayJobs();
-  $("bench").dataset.view = queue.size || tray.length ? "work" : "drop";
+  const tray = dedicatedSubtitle ? [] : trayJobs();
+  const inWork = Boolean(queue.size || tray.length);
+  $("bench").dataset.view = inWork ? "work" : "drop";
+  const slot = $(inWork ? "sideModeSlot" : "dropModeSlot");
+  if ($("reviewMode").parentElement !== slot) slot.append($("reviewMode"));
+  if (dedicatedSubtitle) {
+    $("libraryQueue").hidden = !queue.size;
+  } else {
+    const searchSlot = $(inWork ? "sideLibrarySearchSlot" : "dropLibrarySearchSlot");
+    if ($("librarySearch").parentElement !== searchSlot) searchSlot.append($("librarySearch"));
+  }
   $("tasksPanel").hidden = !tray.length;
   $("doneCount").textContent = doneCount ? `本次完成 ${doneCount}` : "";
+  renderDraftPrompt();
+}
+
+function draftJobs() {
+  return [...known.values(), ...draftSubmitting.values()];
+}
+
+function persistWashDraft() {
+  if (dedicatedSubtitle) return;
+  saveIntakeQueueDraft(mergeIntakeQueueDraft(queueDraft, queue.values(), selected, draftJobs()));
+}
+
+function renderDraftPrompt() {
+  if (dedicatedSubtitle) return;
+  const panel = $("queueDraft");
+  const slot = $($("bench").dataset.view === "work" ? "sideQueueDraftSlot" : "dropQueueDraftSlot");
+  if (panel.parentElement !== slot) slot.append(panel);
+  panel.hidden = reviewMode !== "wash" || !queueDraft.entries.length;
+  if (panel.hidden) return;
+  $("queueDraftStatus").textContent = draftRestore
+    ? `正在检查 ${queueDraft.entries.length} 项待核对文件…`
+    : draftFailures.length ? `还有 ${queueDraft.entries.length} 项未恢复，可重试或清除。`
+      : `此标签页有 ${queueDraft.entries.length} 项待核对草稿。`;
+  $("restoreQueueDraft").disabled = $("clearQueueDraft").disabled = Boolean(draftRestore);
+  $("queueDraftFailures").hidden = !draftFailures.length || Boolean(draftRestore);
+  $("queueDraftFailures").querySelector("ul").replaceChildren(...draftFailures.map(({ entry, error }) => {
+    const name = entry.path.split(/[\\/]/).at(-1);
+    const row = node("li", `${entry.code || name} · ${error}`);
+    row.title = entry.path;
+    return row;
+  }));
+}
+
+async function restoreWashDraft() {
+  if (dedicatedSubtitle || reviewMode !== "wash" || draftRestore || !queueDraft.entries.length) return;
+  const owner = new AbortController();
+  const draft = queueDraft;
+  draftRestore = owner;
+  renderDraftPrompt();
+  try {
+    const { jobs: activeJobs } = await api("jobs", undefined, owner.signal);
+    if (!Array.isArray(activeJobs)) throw new Error("无法确认执行队列，请重试恢复。");
+    const outcomes = await restoreIntakeQueueDraft(draft.entries, {
+      signal: owner.signal,
+      scan: (path) => api("scan", { path }, owner.signal),
+      hasJob: (entry) => intakeDraftJobOwns(entry, activeJobs)
+    });
+    if (draftRestore !== owner || owner.signal.aborted) return;
+    const existing = new Map([...queue.values()].map((item) => [intakeDraftPathKey(item.path), item]));
+    const currentJobs = [...activeJobs, ...draftJobs()];
+    const pending = new Set(queueDraft.entries.map(({ path }) => intakeDraftPathKey(path)));
+    draftFailures = [];
+    let restored = 0, skipped = 0, first = null, previous = null;
+    for (const outcome of outcomes) {
+      const { entry, item, error } = outcome;
+      const key = intakeDraftPathKey(entry.path);
+      if (!pending.has(key)) continue;
+      if (outcome.skipped || intakeDraftJobOwns(entry, currentJobs)) { skipped++; continue; }
+      if (!item) { draftFailures.push({ entry, error }); continue; }
+      const itemKey = intakeDraftPathKey(item.path);
+      const value = existing.get(itemKey) || item;
+      if (value === item) {
+        queue.set(item.path, item);
+        existing.set(itemKey, item);
+      }
+      restored++;
+      first ??= value;
+      if (key === intakeDraftPathKey(draft.selected)) previous = value;
+    }
+    queueDraft = { entries: draftFailures.map(({ entry }) => entry), selected: draft.selected };
+    renderQueue();
+    if (!selected && reviewMode === "wash" && (previous || first)) void selectItem(previous || first);
+    message(`已恢复 ${restored} 项${skipped ? `，执行记录中已有 ${skipped} 项` : ""}${draftFailures.length ? `，${draftFailures.length} 项可重试` : ""}。`);
+  } catch (error) {
+    if (draftRestore === owner && !owner.signal.aborted) message(error.message, true);
+  } finally {
+    if (draftRestore === owner) {
+      draftRestore = null;
+      renderDraftPrompt();
+    }
+  }
 }
 
 function renderQueue() {
+  if (queueDraft.entries.length && queue.size) {
+    const visible = new Set([...queue.values()].filter((item) => !item.library).map((item) => intakeDraftPathKey(item.path)));
+    queueDraft = { ...queueDraft, entries: queueDraft.entries.filter(({ path }) => !visible.has(intakeDraftPathKey(path))) };
+    draftFailures = draftFailures.filter(({ entry }) => !visible.has(intakeDraftPathKey(entry.path)));
+  }
+  persistWashDraft();
   $("queueCount").textContent = String(queue.size);
   $("queue").replaceChildren();
   if (!queue.size) $("queue").append(node("p", "没有待核对的视频。", "queue-empty"));
@@ -83,32 +202,42 @@ function renderQueue() {
     pick.disabled = Boolean(item.error);
     pick.title = item.path;
     pick.append(node("strong", item.code || "待确认番号"), node("small", item.name));
+    if (item.library) pick.append(node("small", "馆藏视频"));
     if (item.package) pick.append(node("small", `下载包 · ${item.package.videos.length} 份正片 · ${item.package.ads.length} 个广告`));
+    if (item.savedSubtitle) pick.append(node("small", "已保存外挂字幕"));
+    if (item.subtitleError) pick.append(node("small", `自动字幕失败 · ${item.subtitleError}`, "error"));
     if (item.error) pick.append(node("small", item.error, "error"));
-    const remove = button("×", () => item.package ? discardPackage(item) : removeItem(item.path), "queue-drop");
-    remove.title = item.package ? "移除并丢弃整个文件夹" : "从待核对移除（不动文件）";
-    remove.setAttribute("aria-label", item.package ? `移除下载包 ${item.code}` : `从待核对移除 ${item.name}`);
+    const discardBundle = reviewMode === "wash" && item.package;
+    const remove = button("×", () => discardBundle ? discardPackage(item) : removeItem(item.path), "queue-drop");
+    remove.title = discardBundle ? "移除并丢弃整个文件夹" : "从待核对移除（不动文件）";
+    remove.setAttribute("aria-label", discardBundle ? `移除下载包 ${item.code}` : `从待核对移除 ${item.name}`);
     row.append(pick, remove);
     $("queue").append(row);
   }
   updateView();
 }
 
-function clearSelection(text) {
+function clearSelection(text, keepFileList = false) {
+  comparisonRequest?.abort();
+  closeSubtitleReview();
   generation += 1;
   selected = ""; comparison = null; oldId = null;
-  $("compareBody").hidden = true; $("compareEmpty").hidden = false;
+  if (!keepFileList) setSubtitleDrawer("");
+  librarySearch.setSelectedWork();
+  resetSubtitlePreview();
+  $("subtitlePane").hidden = $("compareBody").hidden = true;
+  $("compareEmpty").hidden = false;
   $("compareEmpty").textContent = text;
 }
 
 // Removes a row and moves the review on, so a submitted video never blocks the next one.
-function removeItem(file) {
+function removeItem(file, keepFileList = false) {
   const wasSelected = selected === file;
-  const next = wasSelected ? nextItem() : null;
+  const next = wasSelected && !keepFileList ? nextItem() : null;
   queue.delete(file);
   if (wasSelected) {
     if (next) void selectItem(next);
-    else clearSelection("待办都已提交。可以继续把视频拖进窗口。");
+    else clearSelection("待办都已提交。可以继续把视频拖进窗口。", keepFileList);
   }
   renderQueue();
 }
@@ -121,7 +250,7 @@ function renderMetadata() {
     const title = node("strong", meta.title);
     title.title = meta.title || "";
     host.append(title);
-    const lines = [[meta.actors?.join("、"), meta.date, meta.maker, meta.series, meta.rating ? `评分 ${meta.rating}` : ""].filter(Boolean).join(" · "), meta.tags?.join(" · ")];
+    const lines = [[meta.actors?.join("、"), meta.date, meta.maker, meta.series, meta.rating ? `评分 ${meta.rating}` : "", meta.source].filter(Boolean).join(" · "), meta.tags?.join(" · ")];
     for (const line of lines.filter(Boolean)) {
       const row = node("p", line);
       row.title = line;
@@ -144,9 +273,10 @@ function renderMetadata() {
 
 const bitrate = (file) => (file?.size > 0 && file.probe?.duration > 0 ? file.size * 8 / file.probe.duration / 1e6 : 0);
 const pixels = (file) => (file?.probe?.width ? file.probe.width * file.probe.height : 0);
-const resolution = (file) => (file?.probe?.width ? `${file.probe.width}×${file.probe.height}` : "待确认");
-const duration = (file) => (file?.probe?.duration ? timeLabel(file.probe.duration) : "未知");
-const codecs = (file) => [file?.probe?.videoCodec, file?.probe?.audioCodec].filter(Boolean).map((value) => value.toUpperCase()).join(" / ") || "未知";
+const probePlaceholder = (file, fallback = "未知") => file?.probePending ? "读取中…" : fallback;
+const resolution = (file) => (file?.probe?.width ? `${file.probe.width}×${file.probe.height}` : probePlaceholder(file, "待确认"));
+const duration = (file) => (file?.probe?.duration ? timeLabel(file.probe.duration) : probePlaceholder(file));
+const codecs = (file) => [file?.probe?.videoCodec, file?.probe?.audioCodec].filter(Boolean).map((value) => value.toUpperCase()).join(" / ") || probePlaceholder(file);
 
 function versionLabels(file) {
   const labels = [...(file.labels || [])];
@@ -195,9 +325,14 @@ function columnHead(title, file, library = false) {
   const head = node("th");
   head.scope = "col";
   head.append(node("span", title, "col-title"));
-  if (file.available !== false) {
+  if (library ? file.available : file.available !== false) {
     const tools = node("div", undefined, "col-tools");
     tools.append(button("打开视频", () => openFile(file, false)), button("打开文件夹", () => openFile(file, true)));
+    if (!library) {
+      const subtitles = button("字幕", openSubtitleReview);
+      subtitles.id = "manageSourceSubtitles";
+      tools.append(subtitles);
+    }
     if (library && file.marks) {
       const mark = button("修改馆藏标记", () => openMarkDialog(file));
       mark.id = "markSelected";
@@ -211,7 +346,7 @@ function columnHead(title, file, library = false) {
 function renderTable() {
   const source = comparison.source;
   const old = comparison.files.find((file) => file.id === oldId) || comparison.files.find((file) => !file.available);
-  const usable = old?.available ? old : null;
+  const usable = old?.available || old?.probePending ? old : null;
   const table = $("compareTable");
   table.replaceChildren();
   const headRow = node("tr");
@@ -227,9 +362,9 @@ function renderTable() {
   add("分辨率", valueCell(resolution(source), tone(pixels(source), pixels(usable), 0)), usable ? valueCell(resolution(usable)) : unavailable());
   const sourceBitrate = bitrate(source), oldBitrate = bitrate(usable);
   const bitrateTone = tone(sourceBitrate, oldBitrate);
-  add("码率", valueCell(sourceBitrate ? `${sourceBitrate.toFixed(1)} Mbps` : "未知", bitrateTone,
+  add("码率", valueCell(sourceBitrate ? `${sourceBitrate.toFixed(1)} Mbps` : probePlaceholder(source), bitrateTone,
     bitrateTone ? `${sourceBitrate > oldBitrate ? "+" : ""}${Math.round((sourceBitrate / oldBitrate - 1) * 100)}%` : ""),
-  usable ? valueCell(oldBitrate ? `${oldBitrate.toFixed(1)} Mbps` : "未知") : unavailable());
+  usable ? valueCell(oldBitrate ? `${oldBitrate.toFixed(1)} Mbps` : probePlaceholder(usable)) : unavailable());
   const sizeTone = tone(source.size, usable?.size);
   add("大小", valueCell(sizeLabel(source.size), sizeTone, sizeTone ? `${source.size > usable.size ? "+" : "−"}${sizeLabel(Math.abs(source.size - usable.size))}` : ""),
     usable ? valueCell(sizeLabel(usable.size)) : textCell(old ? sizeLabel(old.size) : ""));
@@ -238,6 +373,20 @@ function renderTable() {
   add("编码", valueCell(codecs(source)), usable ? valueCell(codecs(usable)) : unavailable());
   add("标记", chipsCell(source), old ? chipsCell(old) : textCell(""));
   add("路径", textCell(source.path, "path"), textCell(old?.path || "", "path"));
+  const packageSubtitles = new Set(comparison.package?.subtitles || []);
+  const sourceSubtitles = (source.subtitles || []).filter((name) => !packageSubtitles.has(name));
+  if (sourceSubtitles.length) {
+    const cell = node("td");
+    const names = node("ul", undefined, "subtitle-list");
+    for (const name of sourceSubtitles) names.append(node("li", name));
+    cell.append(names);
+    if (subtitleRemoval) {
+      const remove = button("移除外挂…", () => openSubtitleReview({ focusRemoval: true }), "danger subtitle-list-action");
+      remove.id = "manageSourceSubtitleRemoval";
+      cell.append(remove);
+    }
+    add("源字幕", cell, textCell(""));
+  }
   if (comparison.package) {
     const bundle = comparison.package;
     add("下载包", textCell(bundle.folder, "path"), textCell(""));
@@ -261,7 +410,7 @@ function renderTable() {
     }
   }
   table.append(thead, body);
-  $("openBoth").hidden = !usable || source.available === false;
+  $("openBoth").hidden = !old?.available || source.available === false;
 }
 
 function renderVersions() {
@@ -274,10 +423,10 @@ function renderVersions() {
     const control = node("input");
     control.type = "radio";
     control.name = "existingVersion";
-    control.disabled = !file.available;
+    control.disabled = file.available === false;
     control.checked = oldId === file.id;
     control.addEventListener("change", () => { oldId = file.id; $("tagA").checked = Boolean(file.a); renderTable(); updateActions(); });
-    label.append(control, file.available ? `${resolution(file)} · ${sizeLabel(file.size)}${file.a ? " · [A]" : ""}` : "文件不可读");
+    label.append(control, file.available === false ? "文件不可读" : `${resolution(file)} · ${sizeLabel(file.size)}${file.a ? " · [A]" : ""}`);
     host.append(label);
   }
   if (moreFiles) host.append(node("span", "只显示前 40 份匹配视频。", "queue-empty"));
@@ -287,44 +436,375 @@ function updateActions() {
   const old = comparison?.files.find((file) => file.id === oldId);
   const newWork = comparison && !comparison.files.length;
   const edited = $("code").value.trim() !== (comparison?.code || "");
-  const canMove = !isBusy() && !edited && Boolean(comparison?.source.probe);
+  const sourceReady = comparison && !comparison.source.probePending && comparison.source.available !== false;
+  const canMove = !isBusy() && !edited && sourceReady && Boolean(comparison.source.probe);
+  for (const id of ["manageSourceSubtitles", "manageSourceSubtitleRemoval"]) {
+    if ($(id)) $(id).disabled = isBusy() || edited || !sourceReady || !comparison?.code;
+  }
   $("replace").hidden = $("keep").hidden = !comparison?.files.length;
   $("addNew").hidden = $("newWork").hidden = $("noExisting").hidden = !newWork;
   $("replace").disabled = !canMove || !old?.available;
-  if ($("markSelected")) $("markSelected").disabled = isBusy() || edited;
+  if ($("markSelected")) $("markSelected").disabled = isBusy() || edited || !sourceReady;
   $("keep").disabled = !canMove || !old?.available;
   const recommendKeep = Boolean(old?.protected4k);
   $("keep").classList.toggle("primary", recommendKeep);
   $("replace").classList.toggle("primary", !recommendKeep);
   $("addNew").disabled = !canMove || !comparison?.code || (comparison.actors.length > 0 && $("actorTarget").value === "");
-  $("fetchMeta").disabled = isBusy() || !comparison?.code || edited;
-  $("discard").disabled = isBusy() || !comparison;
+  $("fetchMeta").disabled = $("fetchMetaUrl").disabled = $("metadataUrl").disabled = isBusy() || !comparison?.code || edited;
+  $("discard").disabled = isBusy() || !sourceReady;
   $("discard").textContent = comparison?.package ? "丢弃整个文件夹" : "丢弃源视频";
   $("discardBoth").hidden = !old?.available;
-  $("discardBoth").disabled = isBusy() || edited;
+  $("discardBoth").disabled = isBusy() || edited || !sourceReady;
   $("qualityTag").hidden = !comparison?.source.flags?.quality4k;
   $("qualityTag").textContent = "实测 4K · 普通视频入库自动加 -4K";
   const hint = edited ? "番号已编辑，请先重新匹配。"
-    : comparison && !comparison.source.probe ? "源视频探测失败，请先打开视频核对。"
+    : comparison?.source.probePending ? "正在读取源视频参数，可以先核对番号和资料。"
+      : old?.probePending ? "正在读取馆藏视频参数…"
+        : comparison && !comparison.source.probe ? "源视频参数无法读取，请重新匹配或打开视频核对。"
       : recommendKeep ? "馆藏是 4K 或更高分辨率，推荐两份都保留。"
         : old?.available && !old.probe ? "馆藏参数暂未读取，核对后仍可替换。" : "";
   $("actionHint").textContent = hint;
   $("actionHint").hidden = !hint;
 }
 
-async function selectItem(item, code) {
-  const owner = ++generation;
-  selected = item.path; comparison = null; oldId = null;
-  renderQueue();
-  $("compareBody").hidden = true; $("compareEmpty").hidden = false;
-  $("compareEmpty").textContent = "正在查找馆藏并读取视频参数…";
+function subtitleStatus(text, error = false) {
+  const status = $("sourceSubtitleStatus");
+  status.textContent = text;
+  status.classList.toggle("error", error);
+}
+
+function closeSubtitleReview() {
+  subtitleReview?.controller.abort();
+  subtitleReview = null;
+  setReviewModeLocked(false);
+  if ($("sourceSubtitles").open) $("sourceSubtitles").close();
+}
+
+function setReviewModeLocked(locked) {
+  for (const control of $("reviewMode").querySelectorAll("button")) control.disabled = locked;
+}
+
+function subtitleReviewIsCurrent(review) {
+  if (subtitleReview !== review || review.controller.signal.aborted || review.owner !== generation) return false;
+  return review.inline ? reviewMode === "subtitle" && selected === review.body.path
+    : $("sourceSubtitles").open && comparison?.source.path === review.body.path && $("code").value.trim() === review.body.code;
+}
+
+function startSubtitleReview(source, code, inline = false) {
+  subtitleReview = {
+    owner: generation, controller: new AbortController(), inline, source,
+    body: { path: source.path, code, ...(inline ? { subtitleMode: true } : {}) }
+  };
+  $("sourceSubtitleResults").replaceChildren();
+  renderSubtitleAttachments();
+  setSubtitleReviewPending(subtitleReview, false);
+  subtitleStatus("字幕将保存到源视频旁，可先打开视频核对。");
+}
+
+function openSubtitleReview({ focusRemoval = false } = {}) {
+  if (!comparison?.code || $("manageSourceSubtitles")?.disabled || $("sourceSubtitles").open) return;
+  $("sourceSubtitlesTitle").textContent = `${comparison.code} · 源视频字幕`;
+  startSubtitleReview(comparison.source, comparison.code);
+  $("sourceSubtitles").showModal();
+  const item = queue.get(comparison.source.path);
+  if (item) showAutomaticSubtitle(item, subtitleReview);
+  if (focusRemoval) $("sourceSubtitleAttachments").querySelector("button")?.focus();
+}
+
+function setSubtitleReviewPending(review, pending, saving = false) {
+  review.pending = pending;
+  review.saving = pending && saving;
+  const waiting = pending || Boolean(queue.get(review.body.path)?.automaticSubtitle);
+  $("downloadSourceSubtitle").disabled = $("searchSourceSubtitles").disabled = $("importSourceSubtitle").disabled = waiting;
+  $("closeSourceSubtitles").disabled = review.saving;
+  renderSubtitleReviewMark();
+  setReviewModeLocked(review.saving);
+  for (const control of $("sourceSubtitleContent").querySelectorAll(".job-list button")) control.disabled = pending;
+}
+
+async function withSubtitleReview(status, operation, { saving = false } = {}) {
+  const review = subtitleReview;
+  if (!review || review.pending || !subtitleReviewIsCurrent(review) || queue.get(review.body.path)?.automaticSubtitle) return;
+  setSubtitleReviewPending(review, true, saving);
+  subtitleStatus(status);
+  try { await operation(review); }
+  catch (error) { if (subtitleReviewIsCurrent(review)) subtitleStatus(error.message, true); }
+  finally { if (subtitleReviewIsCurrent(review)) setSubtitleReviewPending(review, false); }
+}
+
+function subtitleOption(label, control) {
+  const row = node("div", undefined, "job-row");
+  row.append(node("span", label));
+  if (control) row.append(control);
+  return row;
+}
+
+function renderSubtitleAttachments() {
+  const source = subtitleReview?.inline ? subtitleReview.source : comparison?.source;
+  const names = source?.subtitles || [];
+  const list = $("sourceSubtitleAttachments");
+  list.hidden = !names.length;
+  list.replaceChildren(...names.map((name) => {
+    if (!subtitleRemoval) return subtitleOption(name);
+    const remove = button("移除外挂", () => void removeSourceSubtitle(name));
+    remove.setAttribute("aria-label", `移除外挂 ${name}`);
+    return subtitleOption(name, remove);
+  }));
+}
+
+function showSubtitleResults(review) {
+  const results = review.results;
+  $("sourceSubtitleResults").replaceChildren(...results.map((result) =>
+    subtitleOption(result.title, button("查看中文字幕", () => void loadSubtitleFiles(result)))));
+  subtitleStatus(results.length ? `找到 ${results.length} 个结果，选择版本查看字幕。` : "未找到此番号的字幕，可以继续洗版。");
+}
+
+async function searchSubtitles(review) {
+  const result = await api("subtitle-search", review.body, review.controller.signal);
+  if (!subtitleReviewIsCurrent(review)) return;
+  review.results = result.results || [];
+  showSubtitleResults(review);
+}
+
+async function loadSubtitleFiles(result) {
+  await withSubtitleReview("正在读取可下载的字幕…", async (review) => {
+    const data = await api("subtitle-files", { ...review.body, resultId: result.id }, review.controller.signal);
+    if (!subtitleReviewIsCurrent(review)) return;
+    const chinese = (data.files || []).filter((file) => /^zh(?:-|$)/i.test(file.languageCode || file.language || ""));
+    $("sourceSubtitleResults").replaceChildren(button("返回搜索结果", () => showSubtitleResults(review)),
+      ...chinese.map((file) => subtitleOption(`${file.label || "中文字幕"} · ${file.name}`,
+        button(review.inline ? "下载字幕" : "下载并匹配", () => void saveSourceSubtitle("subtitle-download", () => ({ resultId: result.id, fileId: file.id }))))));
+    subtitleStatus(chinese.length ? result.title : "此版本暂无可直接下载的中文字幕。");
+  });
+}
+
+async function refreshSourceSubtitleComparison(review, name, removed = false) {
+  if (review.inline) {
+    const names = review.source.subtitles;
+    review.source.subtitles = removed ? names.filter((item) => item !== name) : [...new Set([...names, name])];
+    return true;
+  }
   try {
-    const result = await api("compare", { path: item.path, code, packageFolder: item.package?.folder });
+    await sourceDetailsRequest;
+    if (!subtitleReviewIsCurrent(review)) return false;
+    const data = await api("compare", { ...review.body, phase: "source", packageFolder: comparison.package?.folder },
+      review.controller.signal);
+    if (!subtitleReviewIsCurrent(review)) return false;
+    comparison.source = data.source;
+    comparison.package = data.package;
+    const item = queue.get(review.body.path);
+    if (item) item.package = data.package;
+  } catch {
+    if (subtitleReviewIsCurrent(review)) {
+      const names = comparison.source.subtitles || [];
+      comparison.source.subtitles = removed ? names.filter((item) => item !== name) : [...new Set([...names, name])];
+      renderTable(); updateActions();
+    }
+    return false;
+  }
+  renderTable(); renderQueue(); updateActions();
+  return true;
+}
+
+async function removeSourceSubtitle(name) {
+  await withSubtitleReview("正在备份并移除字幕…", async (review) => {
+    const result = await api("subtitle-remove", { ...review.body, name }, review.controller.signal);
+    if (!subtitleReviewIsCurrent(review)) return;
+    const item = queue.get(review.body.path);
+    if (item?.savedSubtitle === name) {
+      delete item.savedSubtitle;
+      delete item.automaticSubtitleReceipt;
+      renderQueue();
+    }
+    const refreshed = await refreshSourceSubtitleComparison(review, name, true);
+    if (!subtitleReviewIsCurrent(review)) return;
+    renderSubtitleAttachments();
+    subtitleStatus(`已移除 ${name}。备份位置 ${result.backupPath}${refreshed ? "" : "。请重新匹配以更新入库预览。"}`);
+    if (review.inline && item?.library) void librarySearch.subtitleChanged(item.previewWorkId, false);
+  }, { saving: true });
+}
+
+async function saveSourceSubtitle(route, input) {
+  const direct = route === "subtitle-download-direct";
+  await withSubtitleReview(direct ? "正在读取并校验目录字幕…" : "正在校验并保存字幕…", async (review) => {
+    const fields = await input?.();
+    if (!subtitleReviewIsCurrent(review)) return;
+    const result = await api(route, { ...review.body, ...fields }, review.controller.signal);
+    if (!subtitleReviewIsCurrent(review)) return;
+    if (direct && result.available === false) {
+      setSubtitleReviewPending(review, true);
+      subtitleStatus("本地 LTX 目录暂无直链，正在按番号查找字幕…");
+      await searchSubtitles(review);
+      return;
+    }
+    const refreshed = await refreshSourceSubtitleComparison(review, result.name);
+    if (!subtitleReviewIsCurrent(review)) return;
+    const item = queue.get(review.body.path);
+    if (item?.subtitleError) {
+      delete item.subtitleError;
+      renderQueue();
+    }
+    if (review.inline) {
+      $("sourceSubtitleResults").replaceChildren();
+      renderSubtitleAttachments();
+      subtitleStatus(`已保存到视频旁 · ${result.name}`);
+      if (item?.library) void librarySearch.subtitleChanged(item.previewWorkId, true);
+      return;
+    }
+    closeSubtitleReview();
+    $("manageSourceSubtitles")?.focus();
+    message(refreshed ? `已匹配字幕 · ${result.name}。可打开源视频核对。` : "字幕已保存。请重新匹配，更新入库预览。", !refreshed);
+  }, { saving: true });
+}
+
+function showAutomaticSubtitle(item, review) {
+  if (item.savedSubtitle) {
+    if (review.inline) review.source.subtitles = [...new Set([...review.source.subtitles, item.savedSubtitle])];
+    renderSubtitleAttachments();
+    subtitleStatus(`已自动保存到视频旁 · ${item.savedSubtitle}`);
+  } else if (item.automaticSubtitle) subtitleStatus("正在检查 LTX 目录字幕…");
+  else if (item.subtitleError) subtitleStatus(`${item.subtitleError}。可以手动查找字幕。`, true);
+  else if (item.subtitleReason === "no-direct-link") subtitleStatus("本地目录没有字幕直链，可以手动查找字幕。");
+  else if (item.subtitleReason === "different-version") subtitleStatus("当前文件与 LTX 目录版本不一致，可以手动选字幕。");
+  else subtitleStatus("字幕将保存到源视频旁，可先打开视频核对。");
+  setSubtitleReviewPending(review, false);
+}
+
+function showSavedSubtitleInComparison(view, name) {
+  if (!name || !view.source.subtitles || view.source.subtitles.includes(name)) return;
+  view.source.subtitles.push(name);
+  const bundle = view.package;
+  if (bundle && !bundle.subtitles.includes(name)) {
+    // Keep the reviewed fingerprints. Prepare verifies the addition against the write receipt.
+    view.package = { ...bundle, subtitles: [...bundle.subtitles, name], extras: bundle.extras + 1 };
+  }
+}
+
+async function downloadAutomaticSubtitle(item) {
+  try {
+    if (queue.get(item.path) !== item) return;
+    const result = await api("subtitle-download-direct", { path: item.path, code: item.code, automatic: true, subtitleMode: item.library === true });
+    if (result.name) {
+      item.savedSubtitle = result.name;
+      if (result.signature) item.automaticSubtitleReceipt = { name: result.name, signature: result.signature };
+    }
+    item.subtitleReason = result.reason;
+  } catch (error) {
+    item.subtitleError = error.message;
+  } finally {
+    item.automaticSubtitle = null;
+    if (queue.get(item.path) === item) {
+      if (item.savedSubtitle && comparison?.source.path === item.path) {
+        showSavedSubtitleInComparison(comparison, item.savedSubtitle);
+        renderTable(); updateActions();
+      }
+      const review = subtitleReview;
+      if (review?.body.path === item.path && subtitleReviewIsCurrent(review)) showAutomaticSubtitle(item, review);
+      if (item.savedSubtitle || item.subtitleError) renderQueue();
+    }
+  }
+}
+
+function scheduleAutomaticSubtitle(item) {
+  if (!item.code || item.error) return;
+  let request;
+  const start = () => request ??= downloadAutomaticSubtitle(item);
+  item.automaticSubtitle = start;
+  automaticSubtitleQueue = automaticSubtitleQueue.then(start);
+}
+
+async function readLocalSubtitle(file) {
+  if (!/\.srt$/i.test(file.name) || !file.size || file.size > 2 * 1024 * 1024) throw new Error("请选择 2 MiB 以内的 SRT 字幕。");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+  return { name: file.name, contentBase64: btoa(binary) };
+}
+
+async function loadComparisonDetails(phase, request, view, item, signal) {
+  const initialMetadata = view.metadata;
+  const automaticSubtitle = item.automaticSubtitle;
+  try {
+    const data = await api("compare", { ...request, phase }, signal);
+    if (signal.aborted || comparison !== view) return;
+    if (phase === "source") {
+      view.source = data.source;
+      view.package = item.package = data.package;
+      if (automaticSubtitle) showSavedSubtitleInComparison(view, item.savedSubtitle);
+      if (view.metadata === initialMetadata) {
+        Object.assign(view, { metadata: data.metadata, actors: data.actors });
+        renderMetadata();
+      }
+      renderQueue();
+    } else {
+      const previous = view.files.find((file) => file.id === oldId);
+      view.files = data.files;
+      view.moreFiles = data.moreFiles;
+      if (!view.files.some((file) => file.id === oldId && file.available)) {
+        const next = view.files.find((file) => file.available);
+        oldId = next?.id || null;
+        if ($("tagA").checked === Boolean(previous?.a)) $("tagA").checked = Boolean(next?.a);
+      }
+    }
+  } catch (error) {
+    if (signal.aborted || comparison !== view) return;
+    if (phase === "source") Object.assign(view.source, { probePending: false, available: false });
+    else view.files = view.files.map((file) => ({ ...file, probePending: false, available: false }));
+    message(error.message, true);
+  }
+  if (phase === "library") renderVersions();
+  renderTable(); updateActions();
+}
+
+async function selectItem(item, code) {
+  if (dedicatedSubtitle) $("libraryLocalFiles").open = false;
+  librarySearch.setSelectedWork(item.previewWorkId);
+  resetSubtitlePreview(item);
+  setSubtitleDrawer("subtitle");
+  const owner = ++generation;
+  comparisonRequest?.abort();
+  closeSubtitleReview();
+  comparisonRequest = new AbortController();
+  const { signal } = comparisonRequest;
+  selected = item.path; comparison = null; oldId = null;
+  renderSubtitleReviewMark();
+  $("metadataUrl").value = "";
+  renderQueue();
+  $("subtitlePane").hidden = $("compareBody").hidden = true;
+  $("compareEmpty").hidden = false;
+  const inline = reviewMode === "subtitle";
+  $("compareEmpty").textContent = inline ? "正在读取视频旁的字幕…" : "正在按番号查找馆藏…";
+  try {
+    if (inline) {
+      const result = await api("subtitle-source", { path: item.path, code: code ?? item.code, subtitleMode: true }, signal);
+      if (owner !== generation || signal.aborted) return;
+      item.code = result.code;
+      $("subtitleVideoName").textContent = result.source.name;
+      $("subtitleVideoPath").textContent = result.source.path;
+      $("subtitleCode").value = result.code;
+      $("subtitleCodeForm").hidden = Boolean(result.code);
+      $("inlineSubtitleSlot").hidden = !result.code;
+      if (result.code) {
+        startSubtitleReview(result.source, result.code, true);
+        showAutomaticSubtitle(item, subtitleReview);
+      }
+      renderSubtitleReviewMark();
+      $("subtitlePane").hidden = false;
+      $("compareEmpty").hidden = true;
+      renderQueue();
+      return;
+    }
+    if (item.library) {
+      $("compareEmpty").textContent = "这是馆藏视频。切到字幕模式继续处理。";
+      return;
+    }
+    const request = { path: item.path, code: code ?? item.code, packageFolder: item.package?.folder };
+    const result = await api("compare", { ...request, phase: "index" }, signal);
     if (owner !== generation) return;
     comparison = result;
+    result.package = item.package;
     item.code = result.code;
-    item.package = result.package;
-    oldId = result.files.find((file) => file.available)?.id || null;
+    oldId = result.files[0]?.id || null;
     $("code").value = result.code;
     $("tagLtx").checked = true;
     $("tagU").checked = Boolean(result.source.flags.uncensored);
@@ -332,10 +812,220 @@ async function selectItem(item, code) {
     $("tagA").checked = Boolean(result.files.find((file) => file.id === oldId)?.a);
     $("compareBody").hidden = false; $("compareEmpty").hidden = true;
     renderVersions(); renderTable(); renderMetadata(); renderQueue(); updateActions();
+    request.code = result.code;
+    sourceDetailsRequest = loadComparisonDetails("source", request, result, item, signal);
+    await Promise.all([
+      sourceDetailsRequest,
+      result.files.length ? loadComparisonDetails("library", request, result, item, signal) : null
+    ]);
   } catch (error) {
-    if (owner === generation) $("compareEmpty").textContent = error.message;
+    if (owner !== generation || signal.aborted) return;
+    if (inline && code !== undefined) {
+      $("subtitlePane").hidden = false;
+      $("compareEmpty").hidden = true;
+      message(error.message, true);
+    } else $("compareEmpty").textContent = error.message;
   }
 }
+
+function switchReviewMode(mode) {
+  if (mode === reviewMode || subtitleReview?.saving) return;
+  closeSubtitleReview();
+  reviewMode = mode;
+  const inline = mode === "subtitle";
+  $("bench").dataset.mode = mode;
+  librarySearch.setActive(inline);
+  document.title = `${inline ? "字幕" : "视频洗版"}工作台 · FanHao`;
+  $("inlineSubtitleSlot").hidden = true;
+  $(inline ? "inlineSubtitleSlot" : "dialogSubtitleSlot").append($("sourceSubtitleContent"));
+  for (const control of $("reviewMode").querySelectorAll("button")) {
+    control.setAttribute("aria-pressed", String(control.dataset.mode === mode));
+  }
+  const item = queue.get(selected);
+  if (item) void selectItem(item);
+  else {
+    $("compareEmpty").textContent = inline ? "在左侧选择影片，处理字幕并播放确认。" : "选中左侧待办开始对照。";
+    renderQueue();
+  }
+}
+
+async function selectLibrarySubtitleVideo(video, workId, signal) {
+  if (subtitleReview?.saving) throw new Error("字幕正在保存，请稍后再选视频。");
+  const owner = generation;
+  const data = await api("scan", { path: video.sourcePath, subtitleMode: true }, signal);
+  if (signal.aborted || reviewMode !== "subtitle" || owner !== generation) return false;
+  if (subtitleReview?.saving) throw new Error("字幕正在保存，请稍后再选视频。");
+  const [item] = data.items;
+  if (item?.error || !item?.library || data.items.length !== 1) throw new Error(item?.error || "此馆藏视频当前不可用，请重新搜索。");
+  if (jobs.some((job) => job.active && job.source === item.path)) throw new Error("此视频正在迁移，请稍后再试。");
+  if (!queue.has(item.path)) queue.set(item.path, item);
+  const queued = queue.get(item.path);
+  queued.previewWorkId = workId;
+  queued.previewVideoId = video.id;
+  await selectItem(queued);
+  if (!signal.aborted && selected === item.path && !$("subtitlePane").hidden
+    && (!dedicatedSubtitle || $("bench").dataset.subtitleDrawer === "subtitle")) $("subtitleVideoName").focus();
+  return true;
+}
+
+function setSubtitleDrawer(view) {
+  if (!dedicatedSubtitle) return;
+  $("bench").dataset.subtitleDrawer = view;
+  $("libraryFilePicker").hidden = view !== "files";
+  if (view !== "files") libraryFileList = null;
+  if (view) $("reviewPane").scrollTop = 0;
+  subtitleAdvanceStatus();
+}
+
+function showLibraryFiles(work, choices, videos, reload) {
+  resetSubtitlePreview();
+  const fileList = libraryFileList = { work, reload, deletes: [] };
+  $("libraryFilePickerTitle").textContent = work.title || work.directoryName;
+  const rows = choices.map((pick, index) => {
+    const video = videos[index];
+    const row = node("div", undefined, "library-file-choice");
+    row.append(pick);
+    if (videos.length > 1 && video.id && Number.isSafeInteger(video.size)) {
+      const remove = button("删除此文件", () => void prepareLibraryVideoDelete(fileList, video, remove), "danger library-file-delete");
+      remove.setAttribute("aria-label", `删除此文件：${video.name}`);
+      fileList.deletes.push({ path: video.sourcePath, button: remove, pick });
+      row.append(remove);
+    }
+    return row;
+  });
+  $("libraryFileChoices").replaceChildren(...(rows.length ? rows : [node("p", "这部作品没有可用的本地视频。", "queue-empty")]));
+  setSubtitleDrawer("files");
+  librarySearch.setSelectedWork(work.id);
+  updateLibraryDeleteButtons();
+  $("libraryFilePickerTitle").focus();
+}
+
+function updateLibraryDeleteButtons() {
+  for (const { path, button: control, pick } of libraryFileList?.deletes || []) {
+    control.hidden = !libraryVideoDeletion;
+    const deleting = [...pendingLibraryDeletes.values()].some((job) => job.source === path)
+      || jobs.some((job) => job.active && job.source === path);
+    control.disabled = Boolean(libraryFileList.preparing || deleting);
+    pick.disabled = deleting;
+  }
+  renderSubtitleReviewMark();
+}
+
+async function prepareLibraryVideoDelete(fileList, video, control) {
+  if (!libraryVideoDeletion || fileList !== libraryFileList || control.disabled || $("confirm").open) return;
+  fileList.preparing = true;
+  updateLibraryDeleteButtons();
+  try {
+    const job = await api("prepare", { action: "discardLibraryVideo", workId: String(fileList.work.id),
+      videoId: String(video.id), path: video.sourcePath, size: video.size, modifiedAt: video.modifiedAt || "" });
+    if (fileList !== libraryFileList || $("confirm").open) await cancelJob(job, false);
+    else if (job.missingSource) await submitJob(job);
+    else askConfirmation(job, true);
+  } catch (error) { message(error.message, true); }
+  finally { fileList.preparing = false; updateLibraryDeleteButtons(); }
+}
+
+function closeSubtitleDrawer() {
+  resetSubtitlePreview();
+  setSubtitleDrawer("");
+  librarySearch.cancelSelection();
+  librarySearch.focusLastWork();
+}
+
+function resetSubtitlePreview(item) {
+  $("subtitlePreview").replaceChildren();
+  $("subtitlePreview").hidden = true;
+  $("subtitlePreviewButton").hidden = !(dedicatedSubtitle && item?.previewWorkId && item?.previewVideoId);
+  $("subtitlePreviewButton").textContent = "播放确认";
+}
+
+function currentSubtitleWorkId() {
+  const view = $("bench").dataset.subtitleDrawer;
+  const id = view === "files" ? libraryFileList?.work.id : view === "subtitle" ? queue.get(selected)?.previewWorkId : "";
+  return String(id || "");
+}
+
+function renderSubtitleReviewMark() {
+  const workId = queue.get(selected)?.previewWorkId;
+  const mark = $("markSubtitleReviewed");
+  mark.hidden = !(dedicatedSubtitle && workId);
+  mark.disabled = Boolean(subtitleReview?.saving || advancingSubtitleWork);
+  const reviewed = librarySearch.isReviewed(workId);
+  mark.textContent = reviewed ? "撤销已查无中字" : "标记已查无中字";
+  const next = $("nextSubtitleWork");
+  next.hidden = !currentSubtitleWorkId();
+  next.disabled = mark.disabled || Boolean(libraryFileList?.preparing);
+  const markAndNext = $("markAndNextSubtitleWork");
+  markAndNext.hidden = mark.hidden || reviewed;
+  markAndNext.disabled = next.disabled;
+}
+
+function subtitleAdvanceStatus(text = "", error = false) {
+  const status = $("subtitleAdvanceStatus");
+  status.textContent = text;
+  status.hidden = !text;
+  status.classList.toggle("error", error);
+}
+
+async function advanceSubtitleWork(markReviewed) {
+  const workId = currentSubtitleWorkId();
+  if (!workId || advancingSubtitleWork || subtitleReview?.saving || libraryFileList?.preparing) return;
+  const trigger = $(markReviewed ? "markAndNextSubtitleWork" : "nextSubtitleWork");
+  const hadFocus = document.activeElement === trigger;
+  if (markReviewed) {
+    try { librarySearch.setReviewed(workId, true); }
+    catch { subtitleAdvanceStatus("浏览器无法保存核查标记，请检查本地存储设置。", true); return; }
+  }
+  const owner = generation;
+  const isCurrent = () => owner === generation && workId === currentSubtitleWorkId() && !subtitleReview?.saving;
+  advancingSubtitleWork = true;
+  renderSubtitleReviewMark();
+  const status = $("subtitleAdvanceStatus");
+  const loading = "正在读取下一部作品…";
+  subtitleAdvanceStatus(loading);
+  try {
+    const result = await librarySearch.openNextWork(workId, isCurrent);
+    if (!isCurrent()) return;
+    if (result === "last") subtitleAdvanceStatus("已到当前筛选结果的最后一部。");
+    if (result === "outside") subtitleAdvanceStatus("这部作品不在当前筛选结果中，请从馆藏列表重新选择。");
+  } catch (error) {
+    if (isCurrent()) subtitleAdvanceStatus(error.message, true);
+  } finally {
+    if (status.textContent === loading) subtitleAdvanceStatus();
+    advancingSubtitleWork = false;
+    renderSubtitleReviewMark();
+    if (hadFocus && isCurrent() && !status.hidden && document.activeElement === document.body) {
+      $("nextSubtitleWork").focus({ preventScroll: true });
+    }
+  }
+}
+
+$("markSubtitleReviewed").addEventListener("click", () => {
+  const workId = queue.get(selected)?.previewWorkId;
+  if (!dedicatedSubtitle || !workId || subtitleReview?.saving || advancingSubtitleWork) return;
+  try {
+    librarySearch.setReviewed(workId, !librarySearch.isReviewed(workId));
+  } catch {
+    message("浏览器无法保存核查标记，请检查本地存储设置。", true);
+  }
+});
+$("nextSubtitleWork").addEventListener("click", () => void advanceSubtitleWork(false));
+$("markAndNextSubtitleWork").addEventListener("click", () => void advanceSubtitleWork(true));
+
+$("subtitlePreviewButton").addEventListener("click", () => {
+  const item = queue.get(selected);
+  if (!item?.previewWorkId || !item.previewVideoId) return;
+  const preview = $("subtitlePreview");
+  const frame = document.createElement("iframe");
+  const params = new URLSearchParams({ workId: item.previewWorkId, videoId: item.previewVideoId, preview: "1", t: "0" });
+  frame.src = `/player.html?${params}`;
+  frame.title = `播放确认 · ${item.name}`;
+  frame.allow = "autoplay";
+  frame.allowFullscreen = true;
+  preview.replaceChildren(frame);
+  preview.hidden = false;
+  $("subtitlePreviewButton").textContent = "重新载入播放";
+});
 
 function showUnmatched(unmatched) {
   const host = $("unmatched");
@@ -351,14 +1041,19 @@ function showUnmatched(unmatched) {
 async function addToQueue(input) {
   try {
     message("正在定位本机视频…");
-    const data = await api("scan", input);
+    const data = await api("scan", reviewMode === "subtitle" ? { ...input, subtitleMode: true } : input);
     const live = new Set(jobs.filter((job) => job.active).map((job) => job.source));
     const items = data.items.filter((item) => !live.has(item.path));
     let refresh = null;
     for (const item of items) {
-      if (queue.has(item.path) && !item.package) continue;
-      if (item.package && selected === item.path && !queue.get(item.path)?.package) refresh = item;
-      queue.set(item.path, item);
+      const previous = queue.get(item.path);
+      if (previous && !item.package) continue;
+      if (item.package && selected === item.path && !previous?.package) refresh = previous || item;
+      if (previous) Object.assign(previous, item);
+      else {
+        queue.set(item.path, item);
+        scheduleAutomaticSubtitle(item);
+      }
     }
     renderQueue(); showUnmatched(data.unmatched);
     const ads = items.reduce((total, item) => total + (item.package?.ads.length || 0), data.skippedAds?.length || 0);
@@ -412,8 +1107,11 @@ function askConfirmation(job, fresh = false) {
   const oldPaths = job.oldPaths || (job.old ? [job.old] : []);
   if ($("history").open) $("history").close();
   $("confirmTitle").textContent = actionLabel(job);
+  $("confirmRun").textContent = job.missingSource ? "移除记录" : job.action === "discardLibraryVideo" ? "永久删除" : "确认提交";
   $("confirmText").textContent = job.action === "discardBoth"
     ? `这会永久删除${job.package ? "整个下载包" : "待迁移视频"}和所选馆藏文件夹。馆藏文件夹里有 ${job.libraryRemoval.videos} 份视频，共 ${job.libraryRemoval.files} 个文件。`
+    : job.missingSource ? "这个视频已不在原路径。确认后会移除这条馆藏记录。"
+    : job.action === "discardLibraryVideo" ? "这会永久删除下面这一份视频。其他视频和外挂字幕会保留。"
     : job.action === "discard" ? (job.package ? "这会永久删除整个下载包及其所有内容。" : "这会永久删除这个源视频。")
     : job.action === "mark" ? "确认后立即重命名所选馆藏及同名外挂字幕，并同步馆藏索引。"
       : job.package ? `移动 ${job.package.videos.length} 份正片和配套字幕。入库后清理已核对的下载包文件，新增或变动的文件会留在原目录。${job.replaces4k ? "所选旧馆藏为 4K 或更高分辨率，也会被移除。" : job.old ? "所选旧馆藏也会被移除。" : ""}`
@@ -431,7 +1129,8 @@ function askConfirmation(job, fresh = false) {
   const paths = job.action === "discardBoth" ? [
     [job.package ? "将删除的下载包" : "将删除的源视频", job.package?.folder || job.source],
     ["将删除的馆藏文件夹", job.libraryRemoval.folder]
-  ] : job.action === "mark" ? [["当前馆藏", job.source], ["新文件名", job.target]]
+  ] : job.action === "discardLibraryVideo" ? [[job.missingSource ? "缺失的视频" : "将删除的视频", job.source]]
+    : job.action === "mark" ? [["当前馆藏", job.source], ["新文件名", job.target]]
     : [[job.package ? "将删除的源文件夹" : "源文件", job.package?.folder || job.source],
       ...oldPaths.map((path, index) => [oldPaths.length > 1 ? `替换的馆藏分段 ${index + 1}/${oldPaths.length}` : "替换的旧视频", path]),
       ["入库位置", job.target]];
@@ -456,10 +1155,10 @@ function askConfirmation(job, fresh = false) {
   (isDiscard(job.action) || oldPaths.length > 1 || job.replaces4k || job.oldQualityUnknown ? $("confirmBack") : $("confirmRun")).focus();
 }
 
-async function loadMetadata(owner) {
+async function loadMetadata(owner, detailUrl = "") {
   const code = comparison.code;
-  message("正在使用 115Chrome 查询 JavDB 资料…");
-  const data = await api("metadata", { path: selected, code });
+  message(detailUrl ? "正在使用 115Chrome 读取 JavDB 详情页…" : "正在使用 115Chrome 查询 JavDB 资料…");
+  const data = await api("metadata", { path: selected, code, detailUrl: detailUrl || undefined });
   if (owner !== generation || $("code").value.trim() !== code) return false;
   Object.assign(comparison, data);
   renderMetadata();
@@ -467,12 +1166,18 @@ async function loadMetadata(owner) {
 }
 
 async function prepareAction(action, tags) {
-  if (!comparison || isBusy()) return;
-  const owner = generation;
+  if (!comparison || isBusy() || comparison.source.probePending || comparison.source.available === false) return;
+  const owner = generation, item = queue.get(selected);
   busyOwner = owner; updateActions();
   try {
+    if (action !== "mark" && item?.automaticSubtitle) {
+      $("actionHint").textContent = "正在检查当前视频的自动字幕…";
+      $("actionHint").hidden = false;
+      await item.automaticSubtitle();
+      if (owner !== generation || (action !== "discard" && $("code").value.trim() !== comparison.code)) return;
+    }
     if (action === "new") {
-      if (!comparison.actors.length && !await loadMetadata(owner)) return;
+      if (!comparison.actors.length && !await loadMetadata(owner, $("metadataUrl").value.trim())) return;
       if (!comparison.actors.length) throw new Error("资料已找到，但没有可用的归档目录");
       if ($("actorTarget").value === "") {
         message("资料已找到，请选择人物和归档目录。");
@@ -490,6 +1195,7 @@ async function prepareAction(action, tags) {
     const job = await api("prepare", { action, path: selected, code: action === "discard" ? undefined : comparison.code,
       packageFolder: comparison.package?.folder, packageFingerprint: comparison.package?.fingerprint,
       packageMediaFingerprint: comparison.package?.mediaFingerprint, supportsPackageConfirmation: true,
+      automaticSubtitle: item?.automaticSubtitleReceipt,
       sourceSignature: comparison.source.signature, oldId, oldSignature: old?.signature, oldParts: oldParts || undefined,
       actorFolder: actor?.folder, actorName: actor?.name,
       tags: tags || { ltx: $("tagLtx").checked, u: $("tagU").checked, c: $("tagC").checked, a: $("tagA").checked } });
@@ -502,16 +1208,37 @@ async function prepareAction(action, tags) {
 async function discardPackage(item) {
   if (isBusy()) return;
   if (selected !== item.path || !comparison?.package) await selectItem(item);
+  else if (comparison.source.probePending) await sourceDetailsRequest;
   if (selected === item.path && comparison?.package) await prepareAction("discard");
 }
 
 async function submitJob(job, discardDecision) {
   known.set(job.id, { ...job, active: true });
+  const singleVideo = job.action === "discardLibraryVideo";
+  const trackDraft = !dedicatedSubtitle && !singleVideo && job.action !== "mark";
+  if (trackDraft) {
+    draftSubmitting.set(job.id, { ...job, active: true });
+    persistWashDraft();
+  }
+  if (singleVideo) {
+    pendingLibraryDeletes.set(job.id, job);
+    updateLibraryDeleteButtons();
+  }
   try {
     await api(`jobs/${job.id}/run`, { discardDecision });
-    if (queue.has(job.source)) removeItem(job.source);
-    message(`${job.code || "视频"}${isDiscard(job.action) ? " 已提交删除。" : job.action === "mark" ? " 正在重命名馆藏。" : " 已提交到执行队列。"}`);
-  } catch (error) { known.delete(job.id); message(error.message, true); }
+    if (!singleVideo && queue.has(job.source)) removeItem(job.source);
+    message(job.missingSource ? "正在移除缺失视频的馆藏记录…" :
+      `${job.code || "视频"}${isDiscard(job.action) ? " 已提交删除。" : job.action === "mark" ? " 正在重命名馆藏。" : " 已提交到执行队列。"}`);
+  } catch (error) {
+    known.delete(job.id);
+    pendingLibraryDeletes.delete(job.id);
+    message(error.message, true);
+  } finally {
+    if (trackDraft) {
+      draftSubmitting.delete(job.id);
+      persistWashDraft();
+    }
+  }
   await refreshJobs();
 }
 
@@ -519,7 +1246,7 @@ async function cancelJob(job, requeue = true) {
   try {
     const result = await api(`jobs/${job.id}/cancel`, {});
     known.delete(job.id);
-    if (result.cancelled && requeue && job.action !== "mark" && !queue.has(job.source)) {
+    if (result.cancelled && requeue && job.action !== "mark" && job.action !== "discardLibraryVideo" && !queue.has(job.source)) {
       queue.set(job.source, { path: job.source, name: job.source.split(/[\\/]/).pop(), code: job.code, package: job.package });
       renderQueue();
       if (!selected) void selectItem(queue.get(job.source));
@@ -676,11 +1403,16 @@ function showDiscardStats(show) {
 
 async function refreshMarkedComparison(job) {
   const previous = comparison;
+  const previousSource = previous?.source;
   const owner = generation;
   if (previous?.code !== job.code || $("code").value.trim() !== job.code) return;
   try {
     const result = await api("compare", { path: selected, code: previous.code, packageFolder: previous.package?.folder });
     if (owner !== generation || comparison !== previous || $("code").value.trim() !== job.code) return;
+    if (previous.source !== previousSource) {
+      result.source = previous.source;
+      result.package = previous.package;
+    }
     comparison = result;
     if (!result.files.some((file) => file.id === oldId && file.available)) oldId = result.files.find((file) => file.available)?.id || null;
     renderVersions(); renderTable(); updateActions();
@@ -691,10 +1423,19 @@ function announce(job) {
   if (job.state === "completed") {
     doneCount += 1;
     const retained = job.result?.sourceFolderRemaining;
-    message(`${actionLabel(job)}完成${job.target ? ` · ${job.target}` : ""}。${retained ? ` 下载包仍有保留文件：${retained}` : ""}`);
+    message(job.result?.missingSource ? "原文件已不存在，已移除馆藏记录。" :
+      `${actionLabel(job)}完成${job.target ? ` · ${job.target}` : ""}。${retained ? ` 下载包仍有保留文件：${retained}` : ""}`);
     if (job.action === "mark") void refreshMarkedComparison(job);
+    if (job.action === "discardLibraryVideo") {
+      const files = String(libraryFileList?.work.id) === job.workId ? libraryFileList : null;
+      if (queue.has(job.source)) removeItem(job.source, Boolean(files));
+      files?.reload();
+    }
     if (job.action === "discard" && $("history").open && !$("discardStats").hidden) void refreshDiscardStats(discardPage);
-  } else if (job.state !== "prepared") message(job.error || "任务已中断，可在执行队列中重试。", true);
+  } else if (job.state !== "prepared") {
+    const retry = job.action === "discardLibraryVideo" && dedicatedSubtitle ? " 可在视频洗版的迁移记录里重试。" : "";
+    message((job.error || "任务已中断。") + retry, true);
+  }
 }
 
 async function refreshJobs() {
@@ -704,7 +1445,11 @@ async function refreshJobs() {
   let live = false;
   try {
     ({ jobs } = await api("jobs"));
-    for (const job of jobs) if (known.get(job.id)?.active && !job.active) announce(job);
+    for (const job of jobs) {
+      if (job.active) continue;
+      if (job.state !== "prepared" && pendingLibraryDeletes.delete(job.id)) announce(job);
+      else if (!dedicatedSubtitle && known.get(job.id)?.active) announce(job);
+    }
     known = new Map(jobs.map((job) => [job.id, job]));
     renderTasks(); updateView();
     if ($("history").open) renderHistory();
@@ -714,11 +1459,12 @@ async function refreshJobs() {
     message(error.message, true);
   } finally {
     polling = false;
-    if (live) pollTimer = setTimeout(refreshJobs, 1000);
+    updateLibraryDeleteButtons();
+    if (live || pendingLibraryDeletes.size) pollTimer = setTimeout(refreshJobs, 1000);
   }
 }
 
-for (const form of document.querySelectorAll(".path-form")) {
+for (const form of document.querySelectorAll(".path-form:not(#librarySearchForm)")) {
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const input = form.querySelector("input");
@@ -726,6 +1472,15 @@ for (const form of document.querySelectorAll(".path-form")) {
     input.value = "";
   });
 }
+$("restoreQueueDraft").addEventListener("click", () => void restoreWashDraft());
+$("clearQueueDraft").addEventListener("click", () => {
+  if (draftRestore || dedicatedSubtitle) return;
+  queueDraft = { entries: [], selected: "" };
+  draftFailures = [];
+  persistWashDraft();
+  renderDraftPrompt();
+});
+window.addEventListener("pagehide", () => draftRestore?.abort());
 for (const [triggers, picker] of [[["pickFiles", "addFiles"], "filePicker"], [["pickFolder", "addFolder"], "folderPicker"]]) {
   for (const trigger of triggers) $(trigger).addEventListener("click", () => $(picker).click());
   $(picker).addEventListener("change", (event) => {
@@ -753,21 +1508,47 @@ document.addEventListener("drop", async (event) => {
 });
 $("codeForm").addEventListener("submit", (event) => { event.preventDefault(); if (selected) void selectItem(queue.get(selected), $("code").value.trim()); });
 $("code").addEventListener("input", updateActions);
+$("reviewMode").addEventListener("click", (event) => {
+  const control = event.target.closest("button[data-mode]");
+  if (control) switchReviewMode(control.dataset.mode);
+});
+$("subtitleCodeForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (selected) void selectItem(queue.get(selected), $("subtitleCode").value.trim());
+});
+$("subtitleOpenVideo").addEventListener("click", () => { if (selected) void openFile({ path: selected }, false); });
+$("subtitleOpenFolder").addEventListener("click", () => { if (selected) void openFile({ path: selected }, true); });
 $("actorTarget").addEventListener("change", updateActions);
+$("downloadSourceSubtitle").addEventListener("click", () => void saveSourceSubtitle("subtitle-download-direct"));
+$("searchSourceSubtitles").addEventListener("click", () => void withSubtitleReview("正在按番号查找字幕…", searchSubtitles));
+$("importSourceSubtitle").addEventListener("click", () => $("sourceSubtitlePicker").click());
+$("sourceSubtitlePicker").addEventListener("change", (event) => {
+  const [file] = event.target.files;
+  event.target.value = "";
+  if (file) void saveSourceSubtitle("subtitle-import", () => readLocalSubtitle(file));
+});
+$("sourceSubtitles").addEventListener("cancel", (event) => { if (subtitleReview?.saving) event.preventDefault(); });
+$("sourceSubtitles").addEventListener("close", () => { if (!subtitleReview?.inline && !$("sourceSubtitles").open) closeSubtitleReview(); });
 $("openBoth").addEventListener("click", async () => {
   const old = comparison?.files.find((file) => file.id === oldId);
   if (!comparison || !old?.available) return;
   await openFile(comparison.source, false);
   await openFile(old, false);
 });
-$("fetchMeta").addEventListener("click", async () => {
-  if (!comparison) return;
+async function fetchMetadataForSelection(detailUrl) {
+  if (!comparison || isBusy() || $("code").value.trim() !== comparison.code) return;
   const owner = generation;
   busyOwner = owner; updateActions();
   try {
-    if (await loadMetadata(owner)) message("资料已找到，请确认人物和目录。");
+    if (await loadMetadata(owner, detailUrl)) message("资料已找到，请确认人物和目录。");
   } catch (error) { if (owner === generation) message(error.message, true); }
   finally { if (busyOwner === owner) busyOwner = -1; updateActions(); }
+}
+$("fetchMeta").addEventListener("click", () => fetchMetadataForSelection());
+$("metadataUrlForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const detailUrl = $("metadataUrl").value.trim();
+  if (detailUrl) void fetchMetadataForSelection(detailUrl);
 });
 for (const id of ["replace", "keep", "addNew", "discard", "discardBoth"]) {
   $(id).addEventListener("click", () => prepareAction(id === "addNew" ? "new" : id));
@@ -802,10 +1583,36 @@ $("discardFilter").addEventListener("change", () => void refreshDiscardStats());
 $("onlyLtx").addEventListener("change", () => void refreshDiscardStats());
 $("discardPrev").addEventListener("click", () => void refreshDiscardStats(discardPage - 1));
 $("discardNext").addEventListener("click", () => void refreshDiscardStats(discardPage + 1));
+if (dedicatedSubtitle) {
+  const bench = $("bench");
+  bench.dataset.dedicatedSubtitle = "";
+  document.body.classList.add("subtitle-workbench");
+  $("reviewPane").setAttribute("role", "dialog");
+  $("reviewPane").setAttribute("aria-label", "字幕处理与播放确认");
+  $("subtitleDrawerBar").hidden = false;
+  $("closeSubtitleDrawer").addEventListener("click", closeSubtitleDrawer);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && bench.dataset.subtitleDrawer && !document.querySelector("dialog[open]")) closeSubtitleDrawer();
+  });
+  $("libraryCardStyles").media = "all";
+  bench.prepend($("librarySearch"));
+  $("librarySearch").querySelector("header").prepend(node("h1", "字幕工作台", "subtitle-workbench-title"));
+  $("librarySearchActions").hidden = $("libraryBrowseTools").hidden = false;
+  $("libraryPeople").hidden = false;
+  $("libraryPeoplePanel").open = !matchMedia("(max-width: 720px)").matches;
+  $("libraryLocalFiles").append($("dropArea").querySelector(".drop-controls"));
+  $("libraryQueueTitle").append(" ", $("queueCount"));
+  $("libraryQueue").append($("queue"));
+  switchReviewMode("subtitle");
+  librarySearch.browse();
+}
 renderQueue();
 try {
   const config = await api("config");
   discardReasons = config.discardReasons || {};
+  subtitleRemoval = config.subtitleRemoval === true;
+  libraryVideoDeletion = config.libraryVideoDeletion === true;
+  updateLibraryDeleteButtons();
   for (const [key, label] of [["", "全部原因"], ...Object.entries(discardReasons), ["unrecorded", "未记录原因"]]) {
     const option = node("option", label);
     option.value = key;

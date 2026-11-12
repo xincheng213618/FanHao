@@ -35,7 +35,9 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
   const ratingValues = new Map();
   const ratingSubmissions = [];
   let queuePlaylistSaveEnabled = false;
+  let selectedPlaylistSaveEnabled = false;
   const queuePlaylistSaves = [];
+  const selectedPlaylistSaves = [];
   let playlistState = null;
   let historyState = null;
   const progressSessions = new Map(), progressHeads = new Map();
@@ -47,6 +49,8 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
   const connectionSnapshot = () => ({ created: connectionsCreated, closed: connectionsCreated - activeSockets.size, active: activeSockets.size, peak: peakConnections, errors: socketErrors.slice() });
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, "http://fixture"), key = `${url.pathname}${url.search}`;
+    const testOwner = req.headers["x-fixture-owner"];
+    if (testOwner && url.pathname.startsWith("/api/")) res.setHeader("X-FanHao-Account-Owner", testOwner);
     requests.set(key, (requests.get(key) || 0) + 1);
     if (req.method === "GET" && url.pathname === "/modules/music/music-page.js") musicModuleRequests++;
     methodRequests.push({ method: req.method, path: url.pathname });
@@ -56,25 +60,31 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       const ratingWrite = req.method === "POST" && /^\/api\/music\/tracks\/([^/]+)\/rating$/.exec(url.pathname);
       const favoriteWrite = req.method === "POST" && /^\/api\/music\/tracks\/[^/]+\/favorite$/.test(url.pathname);
       const queuePlaylistCreate = queuePlaylistSaveEnabled && req.method === "POST" && url.pathname === "/api/music/playlists";
+      const selectedPlaylistCreate = selectedPlaylistSaveEnabled && req.method === "POST" && url.pathname === "/api/music/playlists";
       const playlistEdit = req.method === "PUT" && url.pathname === "/api/music/playlists/new";
       const playlistAdd = req.method === "POST" && url.pathname === "/api/music/playlists/new/tracks";
       const playlistRemove = req.method === "DELETE" && url.pathname === "/api/music/playlists/new/tracks/P";
+      const playlistBatchRemove = req.method === "POST" && url.pathname === "/api/music/playlists/new/tracks/remove";
       const playlistDelete = req.method === "DELETE" && url.pathname === "/api/music/playlists/new";
       const playlistOrder = req.method === "PUT" && url.pathname === "/api/music/playlists/new/tracks/order";
-      const playlistMutation = playlistEdit || playlistAdd || playlistRemove || playlistDelete || playlistOrder;
+      const playlistMutation = playlistEdit || playlistAdd || playlistRemove || playlistBatchRemove || playlistDelete || playlistOrder;
       const historyDelete = req.method === "DELETE" && url.pathname === "/api/music/history";
-      assert(req.method === "GET" || progressWrite || progressClaim || ratingWrite || favoriteWrite || queuePlaylistCreate || (playlistState && playlistMutation) || (historyState && historyDelete), `unexpected synthetic mutation: ${req.method} ${key}`);
+      assert(req.method === "GET" || progressWrite || progressClaim || ratingWrite || favoriteWrite || queuePlaylistCreate || selectedPlaylistCreate || (playlistState && playlistMutation) || (historyState && historyDelete), `unexpected synthetic mutation: ${req.method} ${key}`);
       const body = ["POST", "PUT"].includes(req.method) ? JSON.parse(await readBody(req)) : null;
       if (ratingWrite) ratingSubmissions.push({ id: decodeURIComponent(ratingWrite[1]), rating: body.rating });
       if (favoriteWrite) assert.deepEqual(Object.keys(body), ["favorite"]);
       if (queuePlaylistCreate) { assert.deepEqual(Object.keys(body).sort(), ["description", "name", "trackIds"]); queuePlaylistSaves.push(body); }
+      if (selectedPlaylistCreate) { assert.deepEqual(Object.keys(body).sort(), ["name", "trackIds"]); selectedPlaylistSaves.push(body); }
       if (historyDelete) assert.equal(await readBody(req), "", "history DELETE must not send a body");
       if (playlistMutation) {
         assert(playlistState?.has("new"), "playlist mutation requires its private case state");
         if (playlistAdd || playlistRemove) assert.equal(url.searchParams.get("return"), "receipt", "Web playlist membership writes request compact receipts");
         if (playlistEdit) assert.deepEqual(body, { name: "Renamed playlist", description: "Edited in fixture" });
-        else if (playlistAdd) assert.deepEqual(body, { trackId: "B" });
-        else if (playlistOrder) {
+        else if (playlistAdd) {
+          if (Array.isArray(body.trackIds)) assert.deepEqual(Object.keys(body), ["trackIds"]);
+          else assert.deepEqual(body, { trackId: "B" });
+        }
+        else if (playlistOrder || playlistBatchRemove) {
           assert.deepEqual(Object.keys(body), ["trackIds"]);
           assert(body.trackIds.length > 0 && new Set(body.trackIds).size === body.trackIds.length);
           assert(body.trackIds.every(id => ["P", "A", "B"].includes(id)));
@@ -90,8 +100,8 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       }
       if (url.pathname === "/probe") { sendText(res, harness(url.searchParams.has("queue-search-shell")), "text/html; charset=utf-8"); return; }
       if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
-      if (queuePlaylistCreate) {
-        const playlist = { ...body, id: "queue-saved" }; playlistState.set(playlist.id, playlist);
+      if (queuePlaylistCreate || selectedPlaylistCreate) {
+        const playlist = { ...body, id: selectedPlaylistCreate ? "selection-saved" : "queue-saved" }; playlistState.set(playlist.id, playlist);
         sendJson(res, { playlist: playlistSummary(playlist) }); return;
       }
       if (historyState && url.pathname === "/api/music/history") {
@@ -101,6 +111,21 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       }
       if (playlistMutation) {
         const playlist = playlistState.get("new");
+        if (playlistBatchRemove) {
+          const before = playlist.trackIds.length;
+          playlist.trackIds = playlist.trackIds.filter(id => !body.trackIds.includes(id));
+          const removedCount = before - playlist.trackIds.length;
+          sendJson(res, { ok: true, removedCount, alreadyAbsentCount: body.trackIds.length - removedCount }); return;
+        }
+        if (playlistAdd && Array.isArray(body.trackIds)) {
+          const receipt = { ok: true, addedCount: 0, alreadyPresentCount: 0, unavailableCount: 0 };
+          for (const id of body.trackIds) {
+            if (playlist.trackIds.includes(id)) receipt.alreadyPresentCount++;
+            else if (id === "L121") receipt.unavailableCount++;
+            else { playlist.trackIds.push(id); receipt.addedCount++; }
+          }
+          sendJson(res, receipt); return;
+        }
         if (playlistEdit) Object.assign(playlist, body);
         else if (playlistAdd && !playlist.trackIds.includes(body.trackId)) playlist.trackIds.push(body.trackId);
         else if (playlistRemove) playlist.trackIds = playlist.trackIds.filter(id => id !== "P");
@@ -136,6 +161,7 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
         sendJson(res, { ok: true }); return;
       }
       const trackMatch = /^\/api\/music\/tracks\/([^/]+)$/.exec(url.pathname);
+      if (testOwner && trackMatch?.[1] === "removed-track") { sendJson(res, { error: "synthetic track missing" }, 404); return; }
       if (trackMatch) { const id = decodeURIComponent(trackMatch[1]); sendJson(res, { track: { ...track(id), rating: ratingValues.get(id) || 0 }, lyrics: lyrics(id), prevId: "", nextId: "" }); return; }
       if (url.pathname === "/api/music/tracks") {
         const data = trackList(url); data.tracks = data.tracks.map(track => ({ ...track, rating: ratingValues.get(track.id) || 0 }));
@@ -150,7 +176,7 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
       if (url.pathname === "/api/modules") { sendJson(res, { product: { id: "suite" }, modules: [] }); return; }
       if (url.pathname.startsWith("/api/")) { unexpected.push(key); sendJson(res, { error: "unmodelled synthetic API" }, 404); return; }
       if (url.pathname.startsWith("/synthetic/audio/")) { unexpected.push(key); sendJson(res, { error: "controlled Audio must not fetch stream" }, 500); return; }
-      if (url.pathname.startsWith("/synthetic/") || url.pathname === "/assets/music/turntable-dark-v1.png") {
+      if (url.pathname.startsWith("/synthetic/") || (testOwner && url.pathname.startsWith("/media/music-cover/")) || url.pathname === "/assets/music/turntable-dark-v1.png") {
         sendText(res, '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300"><rect width="300" height="300" fill="#729b7c"/></svg>', "image/svg+xml", "public, max-age=86400"); return;
       }
       if (overrides.has(url.pathname)) { sendText(res, overrides.get(url.pathname), url.pathname.endsWith(".css") ? "text/css" : "text/javascript"); return; }
@@ -191,6 +217,8 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
   try {
     browser = await chromium.launch({ executablePath, headless: true });
     await verifyQueueSearch();
+    await verifyTrackSelection();
+    await verifyPlaybackQueueResume();
     await verifySearchDuplicateSessions();
     for (const ignoreAbort of [true, false]) {
       const transport = ignoreAbort ? "ignore-abort" : "normal";
@@ -916,6 +944,117 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
           assert.deepEqual(faults.slice(faultsBefore), [], "invalid account ownership checks must return inactive without producing a page error");
         } finally { pending?.release(); await page.evaluate(() => { __fanhaoWebAccountContext.invalid = false; }); await page.close(); }
       });
+      await run(`scoped music search finds a manual playlist track without changing its play order ${transport}`, async () => {
+        playlistState = new Map([["new", { id: "new", name: "New playlist", description: "", trackIds: ["P", "A", "B"] }]]);
+        const page = await newPage({ real: true, ignoreAbort, route: "/music/playlist/new?q=Artist+A" });
+        const input = page.getByRole("searchbox", { name: "搜索当前歌单" });
+        const rows = page.locator(".music-track-table .music-track-row:not(.head)");
+        const ids = () => rows.evaluateAll(nodes => nodes.map(node => node.dataset.musicTrackId));
+        try {
+          await rows.first().waitFor();
+          assert.equal(await input.inputValue(), "Artist A");
+          assert.deepEqual(await ids(), ["A"]);
+          assert.equal(await rows.first().locator(":scope > span").first().textContent(), "02");
+          const reads = countRequests(url => url.pathname === "/api/music/playlists/new");
+          await input.focus();
+          await input.evaluate(node => {
+            window.__scopeInput = node;
+            node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+            node.value = "Track B";
+            node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+          });
+          assert.deepEqual(await ids(), ["A"]);
+          assert.equal(new URL(page.url()).searchParams.get("q"), "Artist A");
+          await input.dispatchEvent("compositionend", { bubbles: true });
+          await page.waitForURL(url => url.searchParams.get("q") === "Track B");
+          assert.deepEqual(await ids(), ["B"]);
+          assert(await input.evaluate(node => node === __scopeInput && node === document.activeElement));
+          assert.equal(countRequests(url => url.pathname === "/api/music/playlists/new"), reads);
+          await input.fill("Track A");
+          await rows.first().press("Enter");
+          await page.waitForFunction(() => __audios[0].src.endsWith("/synthetic/audio/A") && !__audios[0].paused);
+          assert.deepEqual((await playlistPlaybackState(page)).queue, ["P", "A", "B"]);
+          await page.evaluate(() => __audios[0].dispatchEvent(new Event("ended")));
+          await page.waitForFunction(() => __audios[0].src.endsWith("/synthetic/audio/B"));
+          const playback = await audioState(page);
+          await input.fill("nothing here");
+          assert.equal(await rows.count(), 0);
+          assert.match(await page.locator(".music-panel-heading [role=status]").textContent(), /匹配 0 \/ 共 3 首/);
+          await input.fill("");
+          assert.deepEqual(await ids(), ["P", "A", "B"]);
+          assert.equal(new URL(page.url()).searchParams.has("q"), false);
+          assert.deepEqual(await audioState(page), playback);
+          assert.equal(countRequests(url => url.pathname === "/api/music/playlists/new"), reads);
+        } finally { await page.close(); playlistState = null; }
+      });
+
+      await run(`scoped music search keeps history filters in the route and finds by filename ${transport}`, async () => {
+        historyState = { trackIds: ["B", "A", "P"], cleared: 0 };
+        const page = await newPage({ real: true, ignoreAbort, route: "/music/history" });
+        const input = page.getByRole("searchbox", { name: "搜索最近播放" });
+        const rows = page.locator(".music-track-table .music-track-row:not(.head)");
+        try {
+          await rows.first().waitFor();
+          await page.setViewportSize({ width: 320, height: 760 });
+          await input.fill("Ｐ．ｍｐ３");
+          assert.deepEqual(await rows.evaluateAll(nodes => nodes.map(node => node.dataset.musicTrackId)), ["P"]);
+          const route = page.url();
+          assert.equal(new URL(route).searchParams.get("q"), "Ｐ．ｍｐ３");
+          assert(await input.evaluate(node => {
+            const box = node.getBoundingClientRect();
+            return box.width > 120 && box.left >= 0 && box.right <= innerWidth;
+          }));
+          await page.reload();
+          await rows.first().waitFor();
+          assert.equal(page.url(), route);
+          assert.equal(await input.inputValue(), "Ｐ．ｍｐ３");
+          assert.deepEqual(await rows.evaluateAll(nodes => nodes.map(node => node.dataset.musicTrackId)), ["P"]);
+          assert.equal(historyState.cleared, 0);
+        } finally { await page.close(); historyState = null; }
+      });
+
+      await run(`scoped music search pages the matching smart playlist and drops retired reads ${transport}`, async () => {
+        const matches = (query, offset = "0") => url => url.pathname === "/api/music/tracks"
+          && url.searchParams.get("smart") === "new-smart" && url.searchParams.get("q") === query
+          && (url.searchParams.get("offset") || "0") === offset;
+        const data = (ids, total = ids.length, offset = 0) => ({ tracks: ids.map(track), summary: summary(),
+          smartPlaylist: { id: "new-smart", name: "New smart", trackCount: total }, total, offset, hasMore: offset + ids.length < total });
+        const initial = hold(matches("initial"), "", data(["P"]));
+        const obsolete = hold(matches("obsolete"), "", data(["X"]));
+        const fresh = hold(matches("fresh"), "", data(["A", "B"], 3));
+        const more = hold(matches("fresh", "2"), "", data(["Q"], 3, 2));
+        const wrongScope = hold(matches("wrong"), "", { ...data(["X"]), smartPlaylist: null });
+        const recovered = hold(matches("wrong"), "", data(["A"]));
+        const smartDetail = (offset = "0") => url => url.pathname === "/api/music/smart-playlists/new-smart"
+          && (url.searchParams.get("offset") || "0") === offset;
+        const unfiltered = hold(smartDetail(), "", data(["P", "A"], 3));
+        const unfilteredMore = hold(smartDetail("2"), "", data(["B"], 3, 2));
+        const page = await newPage({ real: true, ignoreAbort, route: "/music/smart/new-smart?q=initial", waitReady: false });
+        const input = page.getByRole("searchbox", { name: "搜索当前歌单" });
+        const rows = page.locator(".music-track-table .music-track-row:not(.head)");
+        const ids = () => rows.evaluateAll(nodes => nodes.map(node => node.dataset.musicTrackId));
+        try {
+          await requested(initial); await settle(page, initial);
+          await input.fill("obsolete"); await input.press("Enter"); await requested(obsolete);
+          await input.fill("fresh"); await input.press("Enter"); await requested(fresh); await settle(page, fresh);
+          await finishOld(page, obsolete, ignoreAbort);
+          assert.deepEqual(await ids(), ["A", "B"]);
+          assert.equal(new URL(page.url()).searchParams.get("q"), "fresh");
+          assert.match(await page.locator(".music-panel-heading [role=status]").textContent(), /匹配 3 首/);
+          await page.locator(".music-load-more").click(); await requested(more); await settle(page, more);
+          assert.deepEqual(await ids(), ["A", "B", "Q"]);
+          assert.equal(await page.locator(".music-load-more").count(), 0);
+          await input.fill("wrong"); await input.press("Enter"); await requested(wrongScope); await settle(page, wrongScope);
+          assert.deepEqual(await ids(), []);
+          await page.locator(".music-list-read-error .music-list-retry").click(); await requested(recovered); await settle(page, recovered);
+          assert.deepEqual(await ids(), ["A"]);
+          await input.fill(""); await input.press("Enter"); await requested(unfiltered); await settle(page, unfiltered);
+          assert.equal(new URL(page.url()).searchParams.has("q"), false);
+          await page.locator(".music-load-more").click(); await requested(unfilteredMore); await settle(page, unfilteredMore);
+          assert.deepEqual(await ids(), ["P", "A", "B"]);
+        } finally { for (const gate of [initial, obsolete, fresh, more, wrongScope, recovered, unfiltered, unfilteredMore]) { gate.release(); held.delete(gate); } await page.close(); }
+      });
+
       for (const target of ["all songs", "favorites", "artist", "album", "genre"]) await run(`browse navigation ${target} leaves an unrelated empty search ${transport}`, async () => {
         const page = await newPage({ ignoreAbort });
         const query = `No matching fixture song ${target} ${transport}`;
@@ -3542,7 +3681,602 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
 
   function countRequests(match) { return [...requests].filter(([url]) => match(new URL(url, base))).reduce((sum, [, count]) => sum + count, 0); }
   function countMethodRequests(method, pathname) { return methodRequests.filter(request => request.method === method && request.path === pathname).length; }
+  async function verifyPlaybackQueueResume() {
+    const owner = "fixture-queue-owner";
+    const key = `fanhao.music.queue.v1:${owner}`;
+    const clear = '[data-music-queue-action="clear"]';
+    const row = id => `.music-queue-row[data-music-track-id="${id}"]`;
+    const trackDetailCount = () => countRequests(url => /^\/api\/music\/tracks\/[^/]+$/.test(url.pathname));
+    await run("playback queue resume keeps the account order and active song paused", async () => {
+      const page = await newPage({ real: true, accountOwner: owner });
+      try {
+        page.on("dialog", dialog => dialog.accept());
+        await startPausedSortAudio(page);
+        await page.locator(clear).click();
+        for (const id of ["B", "A"]) await page.getByRole("button", { name: `加入队列 Track ${id}`, exact: true }).click();
+        await page.locator(row("A")).getByRole("button", { name: "上移", exact: true }).click();
+        assert.deepEqual(await queueSearchRowIds(page), ["P", "A", "B"]);
+        const beforeReload = trackDetailCount();
+        await page.reload();
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P"));
+        assert.equal(await page.evaluate(() => __audios[0].paused), true);
+        assert.deepEqual(await queueSearchRowIds(page), ["P", "A", "B"]);
+        assert.equal(trackDetailCount() - beforeReload, 1, "restore verifies the active track without requesting each queued song");
+        await page.locator(row("A")).getByRole("button", { name: "Track A - Artist A" }).click();
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/A") && !__audios[0].paused);
+        await page.goto(`${base}/music/track/A`);
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/A"));
+        assert.equal(await page.evaluate(() => __audios[0].paused), true);
+        assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).tracks.map(track => track.id), key), ["P", "A", "B"]);
+        await page.setExtraHTTPHeaders({ "X-Fixture-Owner": "another-queue-owner" });
+        await page.goto(`${base}/music/library`);
+        await page.locator('.music-track-table [data-music-track-id="P"]').waitFor();
+        assert.equal(await page.evaluate(() => __audios[0].src), "");
+        assert.equal(await page.locator(".music-queue-row.active").count(), 0);
+        assert.ok((await queueSearchRowIds(page)).length > 3);
+      } finally { await page.close(); }
+    });
+    await run("playback queue resume preserves idle and empty queues and removes a missing current track", async () => {
+      const page = await newPage({ real: true, accountOwner: owner });
+      try {
+        page.on("dialog", dialog => dialog.accept());
+        await page.locator(clear).click();
+        await page.getByRole("button", { name: "加入队列 Track B", exact: true }).click();
+        await page.reload();
+        await page.locator(row("B")).waitFor();
+        assert.deepEqual(await queueSearchRowIds(page), ["B"]);
+        assert.equal(await page.evaluate(() => __audios[0].src), "");
+        await page.evaluate(key => {
+          const saved = JSON.parse(localStorage.getItem(key));
+          saved.currentId = "removed-track";
+          saved.tracks.unshift({ id: "removed-track", title: "Removed" });
+          localStorage.setItem(key, JSON.stringify(saved));
+        }, key);
+        await page.reload();
+        await page.waitForFunction(key => JSON.parse(localStorage.getItem(key))?.currentId === "", key);
+        await page.locator(row("B")).waitFor();
+        assert.deepEqual(await queueSearchRowIds(page), ["B"]);
+        assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).currentId, key), "");
+        await page.locator(clear).click();
+        await page.reload();
+        await page.locator(".music-now-empty").waitFor();
+        assert.deepEqual(await queueSearchRowIds(page), []);
+        assert.deepEqual(await page.evaluate(key => JSON.parse(localStorage.getItem(key)), key), { tracks: [], currentId: "" });
+      } finally { await page.close(); }
+    });
+    await run("playback queue resume leaves the catalogue usable during a slow track read", async () => {
+      const page = await newPage({ real: true, accountOwner: owner });
+      const delayed = hold(url => url.pathname === "/api/music/tracks/P");
+      try {
+        await page.evaluate(key => localStorage.setItem(key, JSON.stringify({ currentId: "P", tracks: [{ id: "P", title: "Track P" }] })), key);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await requested(delayed);
+        await page.locator('.music-track-table [data-music-track-id="B"] .music-track-title').click({ timeout: 5000 });
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/B") && !__audios[0].paused);
+        await settle(page, delayed);
+        assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).currentId, key), "B");
+        assert.equal(await page.evaluate(() => new URL(__audios[0].src, location.href).pathname), "/synthetic/audio/B");
+      } finally { delayed.release(); held.delete(delayed); await page.close(); }
+    });
+    await run("playback queue resume keeps playlist sorting scoped to its source playlist", async () => {
+      playlistState = new Map([["new", { id: "new", name: "New playlist", description: "", trackIds: ["P", "A", "B"] }]]);
+      const page = await newPage({ real: true, route: "/music/playlist/new", accountOwner: owner });
+      const orderPath = "/api/music/playlists/new/tracks/order";
+      try {
+        await page.evaluate(({ key, tracks }) => localStorage.setItem(key, JSON.stringify({ tracks, currentId: "P" })), { key, tracks: ["P", "A", "B"].map(track) });
+        await page.reload();
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P"));
+        const writes = countMethodRequests("PUT", orderPath);
+        await page.locator(row("B")).getByRole("button", { name: "上移", exact: true }).click();
+        assert.deepEqual(await queueSearchRowIds(page), ["P", "B", "A"]);
+        assert.equal(countMethodRequests("PUT", orderPath), writes);
+        await page.locator('.music-track-table [data-music-track-id="P"] .music-track-title').click();
+        assert.deepEqual(await queueSearchRowIds(page), ["P", "A", "B"]);
+        assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).playlistId, key), "new");
+        await page.reload();
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P"));
+        const saved = page.waitForResponse(response => new URL(response.url()).pathname === orderPath && response.ok());
+        await page.locator(row("B")).getByRole("button", { name: "上移", exact: true }).click();
+        await saved;
+        assert.deepEqual(playlistState.get("new").trackIds, ["P", "B", "A"]);
+      } finally { await page.close(); playlistState = null; }
+    });
+  }
+  async function verifyTrackSelection() {
+    await run("bulk queue: selected songs across pages append once without interrupting playback", async () => {
+      const page = await newPage({ queueSearchShell: true });
+      try {
+        await loadList(page, "");
+        await startPausedSortAudio(page);
+        page.on("dialog", dialog => dialog.accept());
+        await page.locator('[data-music-queue-action="clear"]').click();
+        await page.getByRole("button", { name: "加入队列 Track B", exact: true }).click();
+        const before = await playbackState(page);
+        assert.deepEqual(before.queue, ["P", "B"]);
+        await page.getByRole("button", { name: "多选", exact: true }).press("Enter");
+        const toolbar = page.locator(".music-track-selection");
+        const all = toolbar.getByRole("checkbox", { name: "全选已加载 (120)" });
+        assert.equal(await all.evaluate(node => node === document.activeElement), true);
+        assert.equal(await toolbar.getByRole("button", { name: "加入队列" }).isDisabled(), true);
+        await page.getByRole("checkbox", { name: "选择 Track B", exact: true }).press("Space");
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).press("Space");
+        assert.equal(await all.evaluate(node => node.indeterminate), true);
+        await page.locator(".music-load-more").press("Enter");
+        const next = page.getByRole("checkbox", { name: "选择 Track L121", exact: true });
+        await next.waitFor({ timeout: 5000 });
+        assert.equal(await next.evaluate(node => node === document.activeElement), true, "loading more must focus the first newly loaded checkbox");
+        assert.equal(await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).isChecked(), true);
+        await next.press("Space");
+        const reads = countRequests(url => url.pathname.startsWith("/api/music/"));
+        await toolbar.getByRole("button", { name: "加入队列" }).press("Enter");
+        assert.deepEqual(await playbackState(page), { ...before, queue: ["P", "B", "A", "L121"] },
+          "queue order is preserved and selected, previously absent songs append in list order");
+        assert.equal(countRequests(url => url.pathname.startsWith("/api/music/")), reads, "adding loaded selections requires no new track request or playlist write");
+        assert.equal(await page.locator(".music-track-selection-feedback").textContent(), "已加入 2 首 · 1 首已在队列");
+        assert.equal(await page.getByRole("button", { name: "多选", exact: true }).evaluate(node => node === document.activeElement), true);
+      } finally { await page.close(); }
+    });
+    await run("bulk queue: idle users can build a queue across pages and searches before playback", async () => {
+      const page = await newPage();
+      try {
+        await loadList(page, "");
+        page.on("dialog", dialog => dialog.accept());
+        await page.locator('[data-music-queue-action="clear"]').click();
+        const before = await playbackState(page);
+        assert.equal(before.current, null);
+        assert.deepEqual(before.queue, []);
+        await page.getByRole("button", { name: "多选", exact: true }).click();
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await page.locator(".music-load-more").press("Enter");
+        const next = page.getByRole("checkbox", { name: "选择 Track L121", exact: true });
+        await next.waitFor({ timeout: 5000 });
+        assert.deepEqual(await playbackState(page), before, "loading another page cannot repopulate an explicitly cleared queue");
+        assert.equal(await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).isChecked(), true);
+        await next.check();
+        await page.locator('[data-music-select-control="add"]').click();
+        const firstBatch = { ...before, queue: ["A", "L121"] };
+        assert.deepEqual(await playbackState(page), firstBatch);
+        await loadList(page, "Later");
+        assert.deepEqual(await playbackState(page), firstBatch, "browsing a different search preserves the manually queued songs before playback");
+        await page.getByRole("button", { name: "多选", exact: true }).click();
+        await page.getByRole("checkbox", { name: "选择 Track Later-2", exact: true }).check();
+        await page.locator('[data-music-select-control="add"]').click();
+        assert.deepEqual(await playbackState(page), { ...before, queue: ["A", "L121", "Later-2"] });
+        await page.locator('[data-music-queue-action="clear"]').click();
+        await loadList(page, "Latest");
+        assert.equal((await playbackState(page)).queue[0], "Latest-1", "explicitly clearing the idle queue releases its ownership to later list reads");
+      } finally { await page.close(); }
+    });
+    await run("bulk queue: merged search versions keep selection and stale controls cannot commit", async () => {
+      const page = await newPage();
+      const version = { ...track("V1"), title: "Synthetic versions", artist: "Synthetic" };
+      const better = { ...version, id: "V2", fileName: "V2.flac" };
+      const first = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("q") === "Versions", "",
+        { ...trackList(), tracks: [version], total: 2, hasMore: true });
+      const append = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("q") === "Versions" && url.searchParams.get("offset") === "1", "",
+        { ...trackList(), tracks: [better], total: 2, hasMore: false });
+      try {
+        await loadList(page, "");
+        await startPausedSortAudio(page);
+        page.on("dialog", dialog => dialog.accept());
+        await page.locator('[data-music-queue-action="clear"]').click();
+        await launchList(page, "Versions");
+        await requested(first); await settle(page, first);
+        await page.getByRole("button", { name: "多选", exact: true }).click();
+        await page.getByRole("checkbox", { name: "选择 Synthetic versions" }).check();
+        await page.locator(".music-load-more").click();
+        await requested(append); await settle(page, append);
+        const selected = page.locator('.music-track-row[data-music-track-id="V2"]').getByRole("checkbox");
+        await selected.waitFor({ timeout: 5000 });
+        assert.equal(await selected.isChecked(), true, "a selected search group stays selected when a later page supplies a better version");
+        await page.locator('[data-music-select-control="add"]').click();
+        const playback = await playbackState(page);
+        assert.deepEqual(playback.queue, ["P", "V2"]);
+
+        await page.getByRole("button", { name: "多选", exact: true }).click();
+        await page.locator('[data-music-select-control="all"]').check();
+        await page.locator('[data-music-select-control="add"]').evaluate(node => { window.__retiredBatchAdd = node; });
+        await loadList(page, "Latest");
+        await page.evaluate(() => __retiredBatchAdd.click());
+        assert.deepEqual(await playbackState(page), playback, "leaving the list retires its selection and action");
+        assert.equal(await page.locator(".music-track-selection").count(), 0);
+        await page.getByRole("button", { name: "多选", exact: true }).click();
+        await page.locator('[data-music-select-control="all"]').check();
+        await page.evaluate(async () => {
+          const { publishWebAccountChange } = await import("/platform/accounts/session-context.js");
+          publishWebAccountChange("account:replacement");
+          document.querySelector('[data-music-select-control="add"]').click();
+        });
+        assert.deepEqual(await playbackState(page), playback, "an old account cannot apply a mounted selection to the current queue");
+      } finally { first.release(); append.release(); await page.close(); }
+    });
+    await run("bulk queue: narrow keyboard selection and cancel preserve the queue", async () => {
+      const page = await newPage({ real: true, touch: true });
+      try {
+        await page.setViewportSize({ width: 320, height: 800 });
+        await startPausedSortAudio(page);
+        const before = await audioState(page), queue = await queueSearchRowIds(page);
+        const start = page.getByRole("button", { name: "多选", exact: true });
+        await start.press("Enter");
+        const toolbar = page.locator(".music-track-selection");
+        const all = toolbar.getByRole("checkbox", { name: "全选已加载 (120)" });
+        await all.press("Space");
+        assert.equal(await page.locator("[data-music-select-track]:checked").count(), 120);
+        await page.getByRole("checkbox", { name: "选择 Track L100", exact: true }).scrollIntoViewIfNeeded();
+        await tick(page);
+        assert.equal(await toolbar.getByRole("button", { name: "加入队列" }).evaluate(node => {
+          const rect = node.getBoundingClientRect();
+          const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+          return rect.height >= 44 && rect.left >= 0 && rect.right <= innerWidth && hit === node;
+        }), true, "batch actions remain reachable while scrolling a narrow track list");
+        const save = toolbar.getByRole("button", { name: "新建歌单" });
+        assert.equal(await save.evaluate(node => {
+          const rect = node.getBoundingClientRect();
+          return rect.height >= 44 && rect.left >= 0 && rect.right <= innerWidth
+            && document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2) === node;
+        }), true, "saving a selection must fit and remain reachable on a 320px screen");
+        await save.press("Enter");
+        await page.getByRole("dialog", { name: "新建歌单" }).waitFor();
+        await page.getByPlaceholder("歌单名称").press("Escape");
+        assert.equal(await save.evaluate(node => node === document.activeElement), true);
+        await all.press("Escape");
+        assert.equal(await page.locator(".music-track-selection").count(), 0);
+        assert.equal(await start.evaluate(node => node === document.activeElement), true);
+        assert.deepEqual(await audioState(page), before);
+        assert.deepEqual(await queueSearchRowIds(page), queue);
+      } finally { await page.close(); }
+    });
+    await run("bulk playlist: ordered cross-page selection survives a failed save and leaves playback untouched", async () => {
+      const page = await newPage({ queueSearchShell: true });
+      selectedPlaylistSaveEnabled = true; playlistState = new Map();
+      const isSave = (url, method) => method === "POST" && url.pathname === "/api/music/playlists";
+      const first = hold(isSave, "Synthetic save failed");
+      const second = hold(isSave);
+      try {
+        await loadList(page, "");
+        await startPausedSortAudio(page);
+        const before = await playbackState(page), url = page.url();
+        const start = page.getByRole("button", { name: "多选", exact: true });
+        await start.press("Enter");
+        const save = page.locator('.music-track-selection [data-music-select-control="playlist"]');
+        assert.equal(await save.isDisabled(), true);
+        await page.getByRole("checkbox", { name: "选择 Track B", exact: true }).check();
+        await page.locator(".music-load-more").press("Enter");
+        await page.getByRole("checkbox", { name: "选择 Track L121", exact: true }).check();
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await save.press("Enter");
+        const modal = page.getByRole("dialog", { name: "新建歌单" });
+        const name = modal.getByPlaceholder("歌单名称");
+        assert.equal(await name.evaluate(node => node === document.activeElement), true);
+        assert.equal(await modal.getByText("保存已选的 3 首歌曲").count(), 1);
+        await name.fill("Fixture selection");
+        await name.press("Enter");
+        await requested(first);
+        const submissions = selectedPlaylistSaves.length;
+        await modal.locator("form").evaluate(form => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+        await page.keyboard.press("Escape");
+        assert.equal(await modal.getByRole("button", { name: "正在创建" }).isDisabled(), true);
+        assert.equal(selectedPlaylistSaves.length, submissions, "pending confirmation cannot submit a duplicate write");
+        await settle(page, first);
+        await modal.getByRole("alert").getByText("Synthetic save failed").waitFor();
+        assert.equal(await name.inputValue(), "Fixture selection");
+        assert.equal(await page.locator("[data-music-select-track]:checked").count(), 3);
+        await name.press("Enter");
+        await requested(second);
+        const expected = { name: "Fixture selection", trackIds: ["A", "B", "L121"] };
+        assert.deepEqual(selectedPlaylistSaves.slice(-2), [expected, expected], "only selected songs in list order belong in the new playlist");
+        await settle(page, second);
+        await page.getByText("已新建「Fixture selection」，保存 3 首", { exact: true }).waitFor();
+        assert.equal(await modal.count(), 0);
+        assert.equal(await start.evaluate(node => node === document.activeElement), true);
+        const saved = page.locator(".music-sidebar").getByText("Fixture selection", { exact: true }).first();
+        assert.equal(await saved.count(), 1);
+        assert.equal(await page.locator('.music-track-row[data-music-track-id="L121"]').count(), 1);
+        assert.deepEqual(await playbackState(page), before);
+        assert.equal(page.url(), url);
+        await page.getByRole("button", { name: "查看歌单", exact: true }).click();
+        await page.waitForFunction(() => fixture.state.music.activePlaylist?.id === "selection-saved" && !fixture.state.music.loading);
+        assert.deepEqual(await visiblePlaylistTracks(page), expected.trackIds);
+        assert.deepEqual(await playbackState(page), before);
+      } finally { first.release(); second.release(); await page.close(); playlistState = null; selectedPlaylistSaveEnabled = false; }
+    });
+    await run("bulk playlist: an obsolete save completion leaves a newer list in place", async () => {
+      const page = await newPage();
+      selectedPlaylistSaveEnabled = true; playlistState = new Map();
+      const write = hold((url, method) => method === "POST" && url.pathname === "/api/music/playlists");
+      try {
+        await loadList(page, "");
+        await page.getByRole("button", { name: "多选", exact: true }).press("Enter");
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await page.locator('[data-music-select-control="playlist"]').press("Enter");
+        const name = page.getByPlaceholder("歌单名称");
+        await name.fill("Old selection");
+        await name.press("Enter");
+        await requested(write);
+        await launchRoute(page, { musicMode: "library", musicQuery: "Latest" });
+        await page.getByText("Track Latest-1", { exact: true }).first().waitFor();
+        await capturePlaylistDestination(page);
+        const before = await playbackState(page);
+        await settle(page, write);
+        await assertPlaylistDestination(page);
+        assert.deepEqual(await playbackState(page), before);
+        assert.equal(await page.locator(".music-playlist-dialog-backdrop, .music-track-selection-feedback").count(), 0);
+      } finally { write.release(); await page.close(); playlistState = null; selectedPlaylistSaveEnabled = false; }
+    });
+    await run("bulk existing playlist: ordered selection retries once and reports added, existing and unavailable songs", async () => {
+      const page = await newPage({ queueSearchShell: true });
+      playlistState = new Map([["new", { id: "new", name: "New playlist", description: "", trackIds: ["P", "A"] }]]);
+      const path = "/api/music/playlists/new/tracks";
+      const isWrite = (url, method) => method === "POST" && url.pathname === path;
+      const first = hold(isWrite, "Synthetic add failed"), second = hold(isWrite);
+      let list;
+      try {
+        await loadList(page, "");
+        await startPausedSortAudio(page);
+        await page.waitForFunction(() => fixture.state.music.playlistsLoadedAt > 0);
+        const before = await playbackState(page), url = page.url();
+        await page.getByRole("button", { name: "多选", exact: true }).press("Enter");
+        const open = page.locator('[data-music-select-control="existing-playlist"]');
+        assert.equal(await open.isDisabled(), true);
+        await page.getByRole("checkbox", { name: "选择 Track B", exact: true }).check();
+        await page.locator(".music-load-more").press("Enter");
+        await page.getByRole("checkbox", { name: "选择 Track L121", exact: true }).check();
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await page.evaluate(() => { fixture.state.music.playlistsLoadedAt = 0; });
+        list = hold((url, method) => method === "GET" && url.pathname === "/api/music/playlists", "Synthetic list failed");
+        await open.press("Enter");
+        const modal = page.getByRole("dialog", { name: "加入已有歌单" });
+        await requested(list);
+        await modal.getByText("正在加载歌单", { exact: true }).waitFor();
+        await settle(page, list);
+        await modal.getByRole("alert").getByText("Synthetic list failed").waitFor();
+        await modal.getByRole("button", { name: "重试加载" }).click();
+        const target = modal.getByRole("button", { name: /New playlist/ });
+        const count = countMethodRequests("POST", path);
+        await target.click();
+        await requested(first);
+        assert.equal(await target.isDisabled(), true);
+        await page.keyboard.press("Escape");
+        assert.equal(countMethodRequests("POST", path), count + 1);
+        await settle(page, first);
+        await modal.getByRole("alert").getByText("Synthetic add failed").waitFor();
+        assert.equal(await page.locator("[data-music-select-track]:checked").count(), 3);
+        assert.equal(await target.evaluate(node => node === document.activeElement), true);
+        await target.press("Enter");
+        await requested(second);
+        assert.deepEqual(playlistMutations.slice(-2).map(write => write.body),
+          [{ trackIds: ["A", "B", "L121"] }, { trackIds: ["A", "B", "L121"] }]);
+        await settle(page, second);
+        await page.getByText("「New playlist」新增 1 首 · 1 首已在歌单 · 1 首不可用", { exact: true }).waitFor();
+        assert.equal(await modal.count(), 0);
+        assert.equal(await page.locator("[data-music-select-track]").count(), 0);
+        assert.deepEqual(await playbackState(page), before);
+        assert.equal(page.url(), url);
+        await page.getByRole("button", { name: "查看歌单", exact: true }).click();
+        await page.waitForFunction(() => fixture.state.music.activePlaylist?.id === "new" && !fixture.state.music.loading);
+        assert.deepEqual(await visiblePlaylistTracks(page), ["P", "A", "B"]);
+        assert.deepEqual(await playbackState(page), before);
+      } finally { list?.release(); first.release(); second.release(); await page.close(); playlistState = null; }
+    });
+    await run("bulk playlist removal: confirmation, retry, current song and queue stay in place", async () => {
+      const page = await newPlaylistPage("remove", false);
+      const path = "/api/music/playlists/new/tracks/remove";
+      const isWrite = (url, method) => method === "POST" && url.pathname === path;
+      const first = hold(isWrite, "Synthetic remove failed"), second = hold(isWrite);
+      let accept = false, confirmation = "";
+      page.on("dialog", dialog => { confirmation = dialog.message(); return accept ? dialog.accept() : dialog.dismiss(); });
+      try {
+        const before = await playlistPlaybackState(page), url = page.url();
+        const reads = countMethodRequests("POST", path);
+        await page.getByRole("button", { name: "多选", exact: true }).press("Enter");
+        const remove = page.getByRole("button", { name: "移出当前歌单", exact: true });
+        assert.equal(await remove.isDisabled(), true);
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await page.getByRole("checkbox", { name: "选择 Track P", exact: true }).check();
+        await remove.click();
+        assert.match(confirmation, /选中的 2 首歌曲移出「New playlist」/);
+        assert.equal(countMethodRequests("POST", path), reads, "canceling confirmation does not write");
+        accept = true;
+        await remove.click(); await requested(first);
+        assert.equal(await remove.isDisabled(), true);
+        assert.equal(await page.locator("[data-music-select-track]:disabled").count(), 2);
+        assert.deepEqual(await visiblePlaylistTracks(page), ["P", "A"], "the playlist must not change before acknowledgement");
+        assert.deepEqual(await playlistPlaybackState(page), before);
+        await settle(page, first);
+        await page.getByText(/Synthetic remove failed/).waitFor();
+        assert.equal(await page.locator("[data-music-select-track]:checked").count(), 2);
+        assert.equal(await remove.isDisabled(), false);
+        assert.equal(await remove.evaluate(button => document.activeElement === button), true, "failure restores the retry control");
+        await remove.click(); await requested(second);
+        assert.equal(countMethodRequests("POST", path) - reads, 2);
+        assert.deepEqual(playlistMutations.slice(-2).map(write => write.body), [{ trackIds: ["P", "A"] }, { trackIds: ["P", "A"] }]);
+        playlistState.get("new").trackIds = ["P"];
+        await settle(page, second);
+        await page.getByText("已从「New playlist」移出 1 首 · 1 首已不在歌单", { exact: true }).waitFor();
+        assert.equal(await page.locator(".music-track-selection-feedback [role=status]").evaluate(status => status === document.activeElement), true,
+          "after removing the last songs, focus should land on the saved result");
+        assert.equal(await page.locator("[data-music-select-track]").count(), 0);
+        assert.deepEqual(await visiblePlaylistTracks(page), []);
+        assert.deepEqual(await playlistPlaybackState(page), before, "removing the current song must keep audio, position and queue");
+        assert.equal(page.url(), url);
+      } finally { first.release(); second.release(); await page.close(); playlistState = null; }
+    });
+    await run("bulk playlist removal: a late acknowledgement leaves a newer playlist in place", async () => {
+      const page = await newPlaylistPage("remove", true);
+      const write = hold((url, method) => method === "POST" && url.pathname === "/api/music/playlists/new/tracks/remove");
+      page.on("dialog", dialog => dialog.accept());
+      try {
+        await page.getByRole("button", { name: "多选", exact: true }).press("Enter");
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await page.getByRole("button", { name: "移出当前歌单", exact: true }).click(); await requested(write);
+        await navigateRoute(page, "/music/playlist/other");
+        await page.waitForFunction(() => document.querySelector(".music-panel-heading strong")?.textContent === "Other playlist");
+        const before = await playlistPlaybackState(page), reads = countMethodRequests("GET", "/api/music/playlists/other");
+        await settle(page, write);
+        assert.deepEqual(playlistState.get("new").trackIds, ["P"]);
+        assert.deepEqual(await visiblePlaylistTracks(page), ["B"]);
+        assert.equal(countMethodRequests("GET", "/api/music/playlists/other"), reads);
+        assert.equal(await page.locator(".music-track-selection-feedback").count(), 0);
+        assert.deepEqual(await playlistPlaybackState(page), before);
+      } finally { write.release(); await page.close(); playlistState = null; }
+    });
+    await run("bulk playlist removal: a committed write with a failed refresh retries only the read", async () => {
+      const page = await newPlaylistPage("remove", false);
+      const path = "/api/music/playlists/new/tracks/remove";
+      const write = hold((url, method) => method === "POST" && url.pathname === path);
+      let refresh;
+      page.on("dialog", dialog => dialog.accept());
+      try {
+        const before = await playlistPlaybackState(page);
+        await page.getByRole("button", { name: "多选", exact: true }).press("Enter");
+        await page.getByRole("checkbox", { name: "选择 Track A", exact: true }).check();
+        await page.getByRole("button", { name: "移出当前歌单", exact: true }).click(); await requested(write);
+        refresh = hold((url, method) => method === "GET" && url.pathname === "/api/music/playlists/new", "Synthetic refresh failed");
+        await settle(page, write); await requested(refresh); await settle(page, refresh);
+        await page.getByText("已从「New playlist」移出 1 首", { exact: true }).waitFor();
+        await page.locator(".music-list-read-error").getByText("Synthetic refresh failed", { exact: true }).waitFor();
+        assert.equal(await page.locator("[data-music-select-track]").count(), 0);
+        const writes = countMethodRequests("POST", path);
+        await page.locator(".music-list-read-error .music-list-retry").click();
+        await page.locator('.music-track-table [data-music-track-id="P"]').waitFor();
+        assert.deepEqual(await visiblePlaylistTracks(page), ["P"]);
+        assert.equal(countMethodRequests("POST", path), writes);
+        assert.deepEqual(await playlistPlaybackState(page), before);
+      } finally { write.release(); refresh?.release(); await page.close(); playlistState = null; }
+    });
+  }
+
   async function verifyQueueSearch() {
+    await run("queue position uses complete filtered indices and preset on a narrow screen", async () => {
+      const page = await newQueueSearchPage(320);
+      const dialog = page.getByRole("dialog", { name: "调整队列位置" });
+      const position = dialog.getByRole("textbox", { name: /队列位置/ });
+      const move = page.locator('.music-queue-row[data-music-track-id="Q1901"]').getByRole("button", { name: "移到指定位置" });
+      try {
+        const audio = await audioState(page);
+        await queueSearchInput(page).fill("fullwidth hero");
+        await move.press("Enter");
+        await dialog.waitFor();
+        const bounds = await dialog.boundingBox();
+        assert(bounds.x >= 0 && bounds.x + bounds.width <= 320);
+        assert.equal(await position.inputValue(), "1901");
+        assert.equal(await position.evaluate(node => document.activeElement === node && node.selectionEnd - node.selectionStart === 4), true);
+        await position.fill("1.5");
+        await position.press("Enter");
+        assert.equal(await position.getAttribute("aria-invalid"), "true");
+        assert.equal(await page.evaluate(() => fixture.state.music.queue[1900].id), "Q1901");
+        await position.fill("２００１");
+        await position.press("Enter");
+        await dialog.waitFor({ state: "detached" });
+        assert.equal(await page.evaluate(() => fixture.state.music.queue[2000].id), "Q1901");
+        assert.equal(await queueSearchInput(page).inputValue(), "fullwidth hero");
+        assert.equal(await move.evaluate(node => document.activeElement === node), true);
+
+        await move.press("Enter");
+        await dialog.getByRole("button", { name: "当前曲后", exact: true }).click();
+        assert.equal(await position.inputValue(), "2");
+        await dialog.getByRole("button", { name: "移动", exact: true }).click();
+        assert.deepEqual(await page.evaluate(() => fixture.state.music.queue.slice(0, 2).map(item => item.id)), ["P", "Q1901"]);
+        await move.press("Enter");
+        await dialog.getByRole("button", { name: "队尾", exact: true }).click();
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "detached" });
+        assert.equal(await page.evaluate(() => fixture.state.music.queue[1].id), "Q1901");
+        assert.equal(await move.evaluate(node => document.activeElement === node), true);
+        assert.deepEqual(await audioState(page), audio);
+      } finally { await page.close(); }
+    });
+    await run("queue position moves across a fully mounted 2400-song queue with stable rows", async () => {
+      const page = await newQueueSearchPage();
+      const dialog = page.getByRole("dialog", { name: "调整队列位置" });
+      try {
+        await page.evaluate(() => {
+          fixture.state.music.queueVisibleLimit = 2400;
+          fixture.page.renderView();
+          window.originalQueueRows = [...document.querySelectorAll(".music-queue-row")];
+        });
+        const audio = await audioState(page);
+        const row = id => page.locator(`.music-queue-row[data-music-track-id="${id}"]`);
+        const move = row("P").getByRole("button", { name: "移到指定位置" });
+        await move.press("Enter");
+        assert.equal(await dialog.getByRole("button", { name: "当前曲后" }).isDisabled(), true);
+        await dialog.getByRole("button", { name: "队尾" }).click();
+        await dialog.getByRole("button", { name: "移动", exact: true }).click();
+        assert.equal(await row("P").getByRole("button", { name: "下移" }).isDisabled(), true);
+        assert.equal(await row("Q2").getByRole("button", { name: "上移" }).isDisabled(), true);
+        assert.equal(await move.evaluate(node => document.activeElement === node), true);
+        assert.equal(await move.evaluate(node => {
+          const bounds = node.getBoundingClientRect(), list = node.closest(".music-queue-list").getBoundingClientRect();
+          return bounds.top >= list.top - 1 && bounds.bottom <= list.bottom + 1;
+        }), true, "the moved song must be visible within the queue");
+        assert.deepEqual(await page.evaluate(() => {
+          const rows = [...document.querySelectorAll(".music-queue-row")];
+          return [originalQueueRows.filter(row => row.isConnected).length, rows[0].dataset.musicTrackId, rows.at(-1).dataset.musicTrackId,
+            rows.every((row, index) => row.dataset.musicTrackId === fixture.state.music.queue[index].id)];
+        }), [2400, "Q2", "P", true]);
+        assert.deepEqual(await audioState(page), audio);
+      } finally { await page.close(); }
+    });
+    await run("queue position persists a playlist move, rolls back and rejects a changed queue", async () => {
+      playlistState = new Map([["new", { id: "new", name: "New playlist", description: "", trackIds: ["P", "A", "B"] }]]);
+      const page = await newPage({ queueSearchShell: true });
+      const order = (url, method) => method === "PUT" && url.pathname === "/api/music/playlists/new/tracks/order";
+      const failed = hold(order, "Synthetic position save failure");
+      const dialog = page.getByRole("dialog", { name: "调整队列位置" });
+      const move = page.locator('.music-queue-row[data-music-track-id="B"]').getByRole("button", { name: "移到指定位置" });
+      try {
+        await page.evaluate(() => {
+          fixture.state.music.mode = "playlist";
+          fixture.state.music.activePlaylistId = "new";
+          return fixture.page.loadMusic({ skipRoute: true, restoreLast: false });
+        });
+        await page.locator('.music-track-table [data-music-track-id="P"] .music-track-title').click();
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P") && !__audios[0].paused);
+        const audio = await audioState(page);
+        await move.press("Enter");
+        await dialog.getByRole("button", { name: "队首" }).click();
+        await dialog.getByRole("button", { name: "移动", exact: true }).click();
+        await requested(failed);
+        assert.deepEqual(playlistMutations.at(-1).body.trackIds, ["B", "P", "A"]);
+        assert.deepEqual((await playlistPlaybackState(page)).queue, ["B", "P", "A"]);
+        await settle(page, failed);
+        await page.waitForFunction(() => [...document.querySelectorAll(".music-queue-row")].map(row => row.dataset.musicTrackId).join(",") === "P,A,B");
+        assert.deepEqual((await playlistPlaybackState(page)).queue, ["P", "A", "B"]);
+        const writes = countMethodRequests("PUT", "/api/music/playlists/new/tracks/order");
+        await move.press("Enter");
+        await dialog.getByRole("button", { name: "队首" }).click();
+        await page.evaluate(() => { fixture.state.music.queue = [...fixture.state.music.queue]; });
+        await dialog.getByRole("button", { name: "移动", exact: true }).click();
+        await dialog.getByText("队列已变化，请关闭后重新选择位置。", { exact: true }).waitFor();
+        assert.equal(countMethodRequests("PUT", "/api/music/playlists/new/tracks/order"), writes);
+        await dialog.getByRole("button", { name: "取消", exact: true }).click();
+        assert.deepEqual((await playlistPlaybackState(page)).queue, ["P", "A", "B"]);
+        assert.deepEqual(await audioState(page), audio);
+      } finally { failed.release(); await page.close(); playlistState = null; }
+    });
+    await run("queue position saves from the standalone playlist and survives reload", async () => {
+      playlistState = new Map([["new", { id: "new", name: "New playlist", description: "", trackIds: ["P", "A", "B"] }]]);
+      const page = await newPage({ real: true, route: "/music/playlist/new" });
+      const order = hold((url, method) => method === "PUT" && url.pathname === "/api/music/playlists/new/tracks/order");
+      try {
+        await page.locator('.music-track-table [data-music-track-id="P"] .music-track-title').click();
+        await page.waitForFunction(() => __audios[0]?.src.endsWith("/synthetic/audio/P") && !__audios[0].paused);
+        const dialog = page.getByRole("dialog", { name: "调整队列位置" });
+        await page.locator('.music-queue-row[data-music-track-id="B"]').getByRole("button", { name: "移到指定位置" }).click();
+        await dialog.getByRole("textbox", { name: /队列位置/ }).fill("1");
+        await dialog.getByRole("button", { name: "移动", exact: true }).click();
+        await requested(order);
+        assert.deepEqual(playlistMutations.at(-1).body.trackIds, ["B", "P", "A"]);
+        await settle(page, order);
+        assert.deepEqual(playlistState.get("new").trackIds, ["B", "P", "A"]);
+        assert.equal((await audioState(page)).paused, false);
+        await page.reload();
+        await page.locator('.music-track-table [data-music-track-id="B"] .music-track-title').waitFor();
+        const orderAfterReload = await page.locator(".music-track-table .music-track-title").evaluateAll(titles =>
+          titles.map(title => title.closest("[data-music-track-id]").dataset.musicTrackId));
+        assert.deepEqual(orderAfterReload, ["B", "P", "A"]);
+      } finally { order.release(); await page.close(); playlistState = null; }
+    });
     await run("queue search: complete local queue matches normalized title artist and album", async () => {
       const page = await newQueueSearchPage();
       try {
@@ -3586,7 +4320,7 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
         console.log('QUEUE_SEARCH_APPEND', JSON.stringify({ ...creation, ...append }));
         assert.equal(append.retained, 120, "appending queue matches must retain the existing matching song rows");
         assert.equal(append.removed, 0, "appending queue matches must not remove previously mounted result rows");
-        assert(creation.elements <= 750 && creation.fullRenders === 0, "appending queue matches must only create the next bounded page and its continuation control");
+        assert(creation.elements <= 120 * 7 + 30 && creation.fullRenders === 0, "appending queue matches must only create the next bounded page and its continuation control");
         assert.equal(await page.locator('.music-queue-row').count(), 240);
         assert.match(await page.locator('.music-queue-search-count').textContent(), /已显示\s*240(?:\D|$)/, "the match status must report its current filtered page size");
         assert.equal(await page.locator('.music-queue-row').nth(120).locator('.music-queue-play').evaluate(node => node === document.activeElement), true,
@@ -4141,8 +4875,8 @@ export async function runMusicReaderFixture({ legacyMusic = false, legacyHost = 
     });
     await tick(page); return page;
   }
-  async function newPage({ real = false, ignoreAbort = true, route = "/music/library", waitReady = true, initialBack = false, saved = "", touch = false, queueSearchShell = false } = {}) {
-    const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, hasTouch: touch }); page.on("pageerror", error => faults.push(error.message));
+  async function newPage({ real = false, ignoreAbort = true, route = "/music/library", waitReady = true, initialBack = false, saved = "", touch = false, queueSearchShell = false, accountOwner = "" } = {}) {
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, hasTouch: touch, ...(accountOwner ? { extraHTTPHeaders: { "X-Fixture-Owner": accountOwner } } : {}) }); page.on("pageerror", error => faults.push(error.message));
     browserPages++; totalBrowserPages++;
     const moduleRequestsAtStart = musicModuleRequests;
     const startupFailures = [], startupFaults = faults.length;

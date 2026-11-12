@@ -77,7 +77,7 @@ function pageFixture({ honorAbort = true, deadline = true, actualAdjacent = fals
   f.env.document.createTextNode = document.createTextNode;
   f.env.els.workGrid.append = node => nodes.push(node);
   let functions = ["contextualShortVideoDetail", "cancelShortVideoNavigation", "beginShortVideoNavigation", "isCurrentShortVideoNavigation",
-    "hydratePromotedShortVideo", "prefetchAdjacentNavigation", "renderBrowserTop", "renderBrowserLoading", "showHome", "handleShortVideoPageHide", "handleShortVideoPageShow",
+    "hydratePromotedShortVideo", "prefetchAdjacentNavigation", "renderBrowserTop", "renderBrowserLoading", "showHome", "resetShortVideoViewerForHome", "handleShortVideoPageHide", "handleShortVideoPageShow",
     ...(actualAdjacent ? ["loadAdjacentVideos"] : [])].map(list.take).join("\n");
   if (!preserveInvalidated) functions = functions.replace("if (data.shortVideoNavigationInvalidated === true)", "if (false)");
   vm.runInContext(functions, f.env);

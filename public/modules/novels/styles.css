@@ -3036,6 +3036,20 @@ button.novel-book-latest:focus-visible {
   color: #c6ccd4;
 }
 
+.novel-toolbar-button[aria-pressed="true"].novel-auto-scroll {
+  background: #a23d3d;
+  border-color: #a23d3d;
+  color: #fff;
+}
+
+@media (min-width: 901px) and (max-height: 640px) {
+  .novel-reader-toolbar {
+    top: 84px;
+    gap: 4px;
+  }
+  .novel-toolbar-button { min-height: 46px; }
+}
+
 .novel-reader-drawer {
   position: fixed;
   inset: 0;
@@ -3097,6 +3111,8 @@ button.novel-book-latest:focus-visible {
   display: grid;
   gap: 14px;
   width: min(320px, calc(100vw - 32px));
+  max-height: calc(100dvh - 184px);
+  overflow: auto;
   padding: 18px;
   border-radius: 8px;
   background: #fffaf0;
@@ -3112,6 +3128,16 @@ button.novel-book-latest:focus-visible {
   color: #6e6255;
   font-size: 13px;
   font-weight: 700;
+}
+
+.novel-auto-scroll-speed {
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid #ded5c5;
+  border-radius: 4px;
+  background: #fffdf8;
+  color: #52483c;
+  font: inherit;
 }
 
 .novel-theme-buttons,
@@ -3613,27 +3639,35 @@ button.novel-book-latest:focus-visible {
     padding: 32px 20px;
   }
 
-  .novel-reader-toolbar {
-    top: auto;
-    right: 12px;
-    bottom: 16px;
-    grid-template-columns: repeat(6, 1fr);
-  }
-
-  .novel-toolbar-button {
-    width: 54px;
-  }
-
   .novel-reader-drawer-panel {
     top: 72px;
     right: 12px;
     bottom: 16px;
+  }
+}
+
+@media (max-width: 900px), (max-height: 540px) {
+  .novel-reader-toolbar {
+    top: auto;
+    right: 12px;
+    bottom: 16px;
+    width: min(414px, calc(100vw - 24px));
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .novel-toolbar-button {
+    width: 100%;
+    min-width: 0;
+    padding-inline: 2px;
   }
 
   .novel-settings-panel {
     top: auto;
     right: 12px;
     bottom: 88px;
+    max-height: calc(100dvh - 104px);
   }
 }
 

@@ -12,7 +12,10 @@ if (!negativeOnly) {
   if (!pattern) assert.equal(current.checks, 7);
 }
 if (!pattern) {
-  const source = fs.readFileSync(new URL("../public/modules/photos/manga-page.js", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const pagePath = "/modules/photos/manga-page.js";
+  const pickerPath = "/modules/photos/manga-chapter-picker.js";
+  const sources = new Map([pagePath, pickerPath].map(path => [path,
+    fs.readFileSync(new URL(`../public${path}`, import.meta.url), "utf8").replaceAll("\r\n", "\n")]));
   for (const negative of [
     {
       name: "retained directory during progress polling",
@@ -23,8 +26,9 @@ if (!pattern) {
     },
     {
       name: "normalized title and chapter identity",
-      marker: 'function normalizeChapterQuery(value) { return String(value || "").normalize("NFKC").toLocaleLowerCase().trim(); }',
-      replacement: 'function normalizeChapterQuery(value) { return String(value || "").toLocaleLowerCase().trim(); }',
+      path: pickerPath,
+      marker: 'return String(value || "").normalize("NFKC").toLocaleLowerCase().trim();',
+      replacement: 'return String(value || "").toLocaleLowerCase().trim();',
       casePattern: "directory search: a thousand",
       failure: /directory search must match normalized titles and the real chapter index/
     },
@@ -50,9 +54,10 @@ if (!pattern) {
       failure: /retired directory search and row controls must preserve the new route, reader, progress and focus/
     }
   ]) {
+    const path = negative.path || pagePath, source = sources.get(path);
     assert.equal(source.split(negative.marker).length, 2, `negative must alter only ${negative.name}`);
     await assert.rejects(() => runMangaReaderFixture({ casePattern: negative.casePattern,
-      sourceOverrides: { "/modules/photos/manga-page.js": source.replace(negative.marker, negative.replacement) }
+      sourceOverrides: { [path]: source.replace(negative.marker, negative.replacement) }
     }), { name: "AssertionError", message: negative.failure });
     console.log(`PASS negative control detects missing ${negative.name}`);
   }

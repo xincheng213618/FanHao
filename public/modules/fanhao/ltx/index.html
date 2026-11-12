@@ -8,8 +8,8 @@
   <title>LTX 资源库 · FanHao</title>
   <link rel="icon" href="/app-icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/modules/fanhao/ltx/source-ui.css">
-  <link rel="stylesheet" href="/modules/fanhao/ltx/styles.css">
-  <script type="module" src="/modules/fanhao/ltx/page.js"></script>
+  <link rel="stylesheet" href="/modules/fanhao/ltx/styles.css?v=20261113-ltx-filter-views-01">
+  <script type="module" src="/modules/fanhao/ltx/page.js?v=20261113-ltx-filter-views-01"></script>
 </head>
 <body>
   <div id="app" class="ready">
@@ -28,14 +28,22 @@
           <kbd class="kbd" data-v-db15c80d>/</kbd>
         </div>
         <div id="sort" class="sort" data-v-276abc24 data-v-db15c80d role="group" aria-label="排序"></div>
+        <label class="fanhao-pill fanhao-local-filter">
+          <span>本地状态</span>
+          <select id="filter" aria-label="本地状态">
+            <option value="all">全部</option>
+            <option value="present">本地有视频</option>
+            <option value="marked">文件已标 LTX</option>
+            <option value="ltx-local">LTX 本地</option>
+            <option value="unmarked">本地有视频，文件未标 LTX</option>
+            <option value="remote-larger">远端 LTX 体积大于本地</option>
+            <option value="missing">当前未发现视频</option>
+          </select>
+        </label>
       </div>
-      <button id="showSelected" class="want" data-v-db15c80d type="button" disabled aria-label="已选链接 0">
-        <span class="label" data-v-db15c80d>已选链接</span><b id="selectedCount" data-v-db15c80d>0</b>
-      </button>
       <nav class="fanhao-header-links" aria-label="FanHao 工具">
         <a class="fanhao-pill" href="/fanhao">番号库</a>
         <a class="fanhao-pill" href="/fanhao/file-workflows/intake">洗版工作站</a>
-        <button id="downloadSettings" class="fanhao-pill fanhao-115" type="button"><span class="fanhao-bridge-dot" aria-hidden="true"></span>下载设置</button>
       </nav>
       <button id="syncCatalog" class="fanhao-pill" type="button" title="从 Jasna-LTX 同步最新目录">更新目录</button>
     </header>
@@ -50,28 +58,29 @@
         <div class="head" data-v-e8550fad>
           <input id="actorSearch" class="filter" data-v-e8550fad type="search" placeholder="筛选人物" aria-label="筛选人物" autocomplete="off">
         </div>
+        <span id="actorCount" class="fanhao-actor-count" role="status"></span>
         <nav id="actors" class="actors" data-v-e8550fad aria-label="人物列表"></nav>
       </aside>
       <main id="catalog" class="main" data-v-ff5b15bf tabindex="-1">
         <h2 class="sr-only">LTX 作品目录</h2>
         <div class="bar" data-v-ff5b15bf>
           <div id="status" class="status" data-v-ff5b15bf role="group" aria-label="资源确认状态"></div>
-          <label class="tool fanhao-local-filter" data-v-ff5b15bf>
-            <span>本地状态</span>
-            <select id="filter" aria-label="本地状态">
-              <option value="all">全部</option>
-              <option value="present">本地有视频</option>
-              <option value="marked">文件已标 LTX</option>
-              <option value="ltx-local">LTX 本地</option>
-              <option value="unmarked">本地有视频，文件未标 LTX</option>
-              <option value="missing">当前未发现视频</option>
+          <span id="localVolume" class="fanhao-local-volume" role="status" hidden></span>
+          <button id="actorChip" class="chip" data-v-ff5b15bf type="button" hidden></button>
+          <label class="tool fanhao-subtitle-filter" data-v-ff5b15bf>
+            <select id="subtitleFilter" aria-label="字幕筛选">
+              <option value="all">全部字幕状态</option>
+              <option value="available">有中文字幕</option>
+              <option value="ltx-c">LTX-C 版本</option>
             </select>
           </label>
-          <button id="actorChip" class="chip" data-v-ff5b15bf type="button" hidden></button>
           <div class="bar-end" data-v-ff5b15bf>
+            <button id="batchLinks" class="tool primary" data-v-ff5b15bf type="button" disabled>批量操作 <b id="batchCount" data-v-ff5b15bf>0</b></button>
             <span id="results" class="result" data-v-ff5b15bf role="status"></span>
             <span id="snapshot" class="updated" data-v-ff5b15bf>正在读取本地快照…</span>
             <button id="reload" class="tool" data-v-ff5b15bf type="button">重读本地状态</button>
+            <button id="openFilterViews" class="tool" data-v-ff5b15bf type="button" aria-haspopup="dialog">筛选视图</button>
+            <button id="displaySettings" class="tool" data-v-ff5b15bf type="button">显示设置</button>
           </div>
         </div>
         <div id="feedback" class="fanhao-feedback" role="status"></div>
@@ -83,44 +92,66 @@
     </div>
   </div>
 
-  <dialog id="linksDialog" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="linksTitle">
+  <dialog id="filterViews" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="filterViewsTitle">
     <div class="inner" data-v-942e16ed>
       <div class="top" data-v-942e16ed>
-        <h2 id="linksTitle" data-v-942e16ed>完整下载链接</h2>
+        <h2 id="filterViewsTitle" data-v-942e16ed>筛选视图</h2>
+        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭筛选视图">×</button></form>
+      </div>
+      <form id="saveFilterView" class="fanhao-view-form">
+        <label>视图名称 <input id="filterViewName" type="text" maxlength="48" autocomplete="off" required></label>
+        <button class="btn primary" data-v-942e16ed type="submit">保存当前筛选</button>
+      </form>
+      <ul id="savedFilterViews" class="fanhao-view-list" aria-label="此浏览器保存的筛选"></ul>
+      <p id="filterViewsEmpty" class="note" data-v-942e16ed>此浏览器还没有保存筛选。</p>
+      <div class="actions fanhao-dialog-actions" data-v-942e16ed>
+        <button id="copyFilterView" class="btn" data-v-942e16ed type="button">复制当前筛选链接</button>
+        <button id="resetFilterView" class="btn" data-v-942e16ed type="button">重置当前筛选</button>
+      </div>
+      <input id="filterViewLink" class="fanhao-view-input" aria-label="当前筛选链接" type="url" readonly hidden>
+      <p id="filterViewsStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
+    </div>
+  </dialog>
+
+  <dialog id="displayDialog" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="displayTitle">
+    <div class="inner" data-v-942e16ed>
+      <div class="top" data-v-942e16ed>
+        <h2 id="displayTitle" data-v-942e16ed>显示设置</h2>
         <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭">×</button></form>
       </div>
-      <p class="note" data-v-942e16ed>可复制完整地址，粘贴到 115 浏览器的地址栏。也可以选中地址后右键「存到 115」。</p>
-      <div id="linksList" class="fanhao-links-list"></div>
-      <p id="dialogStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
-      <div class="actions fanhao-dialog-actions" data-v-942e16ed>
-        <button id="copySelected" class="btn" data-v-942e16ed type="button">复制选中链接</button>
-        <button id="clearSelected" class="btn" data-v-942e16ed type="button">清空勾选</button>
-        <a class="btn" data-v-942e16ed href="https://115.com/?tab=offline&amp;mode=wangpan" target="_blank" rel="noopener noreferrer">打开 115 云下载</a>
-        <button id="addTo115" class="btn primary" data-v-942e16ed type="button">设置 115 下载</button>
+      <div class="fanhao-display-options">
+        <label><input type="checkbox" data-display="original"> 显示日文原标题</label>
+        <label><input type="checkbox" data-display="added"> 显示 LTX 入库时间</label>
+        <label><input type="checkbox" data-display="detail"> 显示详情链接</label>
+        <label><input type="checkbox" data-display="subtitle"> 显示字幕标记和入口</label>
       </div>
     </div>
   </dialog>
-  <dialog id="downloadSettingsDialog" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="downloadSettingsTitle">
+  <dialog id="batchDialog" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="batchTitle">
     <div class="inner" data-v-942e16ed>
       <div class="top" data-v-942e16ed>
-        <h2 id="downloadSettingsTitle" data-v-942e16ed>下载设置</h2>
-        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭下载设置">×</button></form>
+        <h2 id="batchTitle" data-v-942e16ed>批量操作</h2>
+        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭">×</button></form>
       </div>
-      <p id="bridgeStatus" class="note fanhao-bridge-status" data-v-942e16ed role="status"></p>
-      <p class="note" data-v-942e16ed>用同一浏览器已登录的 115 账号提交云下载，支持 eD2k 和磁力。</p>
-      <label class="fanhao-directory">保存目录 ID（选填）
-        <input id="downloadDirectory" inputmode="numeric" maxlength="32" pattern="[0-9]*" autocomplete="off" placeholder="在 115 文件夹地址中找到 cid">
+      <label class="fanhao-batch-field">选取规则
+        <select id="batchMode">
+          <option value="unmarked">本地有视频，未标 LTX</option>
+          <option value="larger">远端 LTX 体积大于本地</option>
+          <option value="missing">本地没有视频</option>
+        </select>
       </label>
-      <p class="note" data-v-942e16ed>在 <a class="link" data-v-942e16ed href="https://www.tampermonkey.net/" target="_blank" rel="noopener noreferrer">Tampermonkey</a> 安装下方 FanHao 专用脚本，再刷新本页。</p>
-      <p id="settingsStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
+      <p class="note" data-v-942e16ed>跳过本地同体积的链接。同一作品优先选体积最大的可用版本。</p>
+      <p class="note" data-v-942e16ed>每隔约 2 秒复制一条链接到剪贴板。请保持本页在前台，并在 115 查看接收结果。</p>
+      <p id="batchSummary" class="note" data-v-942e16ed role="status"></p>
+      <ul id="batchList" class="fanhao-batch-list" aria-label="本批链接预览"></ul>
+      <p id="batchStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
       <div class="actions fanhao-dialog-actions" data-v-942e16ed>
-        <a id="installDownloadScript" class="btn primary" data-v-942e16ed href="/modules/fanhao/ltx/fanhao-ltx-115.user.js" target="_blank" rel="noopener">安装脚本</a>
-        <button id="copyDownloadScript" class="btn" data-v-942e16ed type="button">复制脚本代码</button>
         <a class="btn" data-v-942e16ed href="https://115.com/?tab=offline&amp;mode=wangpan" target="_blank" rel="noopener noreferrer">打开 115 云下载</a>
+        <button id="stopBatch" class="btn" data-v-942e16ed type="button" hidden>停止</button>
+        <button id="submitBatch" class="btn primary" data-v-942e16ed type="button" disabled>逐条添加</button>
       </div>
     </div>
   </dialog>
-  <div id="downloadFeedback" class="fanhao-download-feedback" role="status"></div>
   <dialog id="coverDialog" class="dialog fanhao-dialog fanhao-cover-dialog" data-v-942e16ed aria-labelledby="coverTitle">
     <div class="inner" data-v-942e16ed>
       <div class="top" data-v-942e16ed>

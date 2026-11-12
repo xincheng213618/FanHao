@@ -1,7 +1,8 @@
 import { createApiClient } from "./js/api.js?v=20260812-collection-busy-01";
 import { normalizeRoute, routeFromUrl, routeUrl } from "./modules/short-videos/router.js?v=20260715-dedicated-router-01";
-import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20260813-delete-client-state-02";
+import { createShortVideoPage } from "./modules/short-videos/short-video-page.js?v=20261112-feed-position-01";
 import { allowShortVideoSpeculativePrewarm } from "./modules/short-videos/prewarm-policy.js?v=20261027-prewarm-budget-01";
+import { collectionFeedRouteSignature } from "./modules/short-videos/collection-navigation.js?v=20261027-collection-lifecycle-01";
 
 const formatter = new Intl.NumberFormat("zh-CN");
 const initialParams = new URLSearchParams(window.location.search);
@@ -304,6 +305,7 @@ function currentRouteSnapshot(overrides = {}) {
     shortVideoAuthor: state.shortVideo.author || "all",
     shortVideoMedia: state.shortVideo.media || "all",
     shortVideoQuality: state.shortVideo.quality || "all",
+    shortVideoDeleted: state.shortVideo.deleted || "all",
     shortVideoAuthorAccountStatus: state.shortVideo.authorAccountStatus || "all",
     shortVideoSource: state.shortVideo.source || "liked",
     shortVideoSort: state.shortVideo.sort || "published",
@@ -315,6 +317,11 @@ function writeRoute(route, mode = "push") {
   const next = normalizeRoute(route);
   const url = routeUrl(next);
   const historyState = { fanhaoRoute: next };
+  const previous = window.history.state;
+  if (mode === "replace" && previous?.shortVideoFeedOrigin && previous.fanhaoRoute?.shortVideoId
+    && next.shortVideoId && collectionFeedRouteSignature(previous.fanhaoRoute) === collectionFeedRouteSignature(next)) {
+    historyState.shortVideoFeedOrigin = previous.shortVideoFeedOrigin;
+  }
   if (mode === "replace") window.history.replaceState(historyState, "", url);
   else window.history.pushState(historyState, "", url);
 }
@@ -358,7 +365,9 @@ async function applyShortVideoRoute(route) {
   }
   state.restoringRoute = true;
   try {
+    const previousScope = state.routeReady ? shortVideoPage.listScope() : "";
     shortVideoPage.applyRouteState(next);
+    if (!next.shortVideoId && shortVideoPage.restoreFeedRoute(previousScope)) return;
     shortVideoPage.enter({
       skipRoute: true,
       deferInitialLoad: true
@@ -369,9 +378,12 @@ async function applyShortVideoRoute(route) {
   }
 }
 
-window.addEventListener("popstate", () => {
+window.addEventListener("popstate", (event) => {
   if (!state.routeReady) return;
-  applyShortVideoRoute(routeFromUrl()).catch((error) => console.error(error));
+  const saved = event.state?.fanhaoRoute;
+  const route = event.state?.shortVideoFeedOrigin && saved?.shortVideoId
+    && routeUrl(saved) === window.location.pathname + window.location.search + window.location.hash ? saved : routeFromUrl();
+  applyShortVideoRoute(route).catch((error) => console.error(error));
 });
 
 async function bootShortVideoApp() {

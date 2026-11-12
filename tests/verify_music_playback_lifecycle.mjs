@@ -222,6 +222,37 @@ for (const route of ["player.pause", "native audio.pause", "sleep timer"]) {
   });
 }
 
+for (const check of ["synchronization", "interval"]) {
+  test(`an overdue timed sleep still pauses during ${check}`, t => {
+    const fixture = createFixture(t);
+    const originalNow = Date.now;
+    let time = originalNow();
+    Date.now = () => time;
+    t.after(() => { Date.now = originalNow; });
+    fixture.load("A");
+    fixture.player.setSleepTimer(10);
+    const interval = [...fixture.timers.values()][1];
+    time += 10 * 60000 + 1;
+    if (check === "synchronization") fixture.player.syncSleepTimer();
+    else interval();
+    assert.equal(fixture.audio.paused, true);
+    assert.equal(fixture.state.music.sleepMinutes, 0);
+    assert.equal(fixture.timers.size, 0);
+  });
+}
+
+test("an obsolete minute timeout cannot stop end-of-track sleep", t => {
+  const fixture = createFixture(t);
+  fixture.load("A");
+  fixture.player.setSleepTimer(10);
+  const oldTimeout = fixture.timers.values().next().value;
+  fixture.player.setSleepTimer(-1);
+  oldTimeout();
+  assert.equal(fixture.audio.paused, false);
+  assert.equal(fixture.player.sleepTimerActive(), true);
+  assert.equal(fixture.state.music.sleepMinutes, -1);
+});
+
 test("releasing the source makes an outstanding play promise obsolete", async t => {
   const fixture = createFixture(t);
   fixture.load("A");

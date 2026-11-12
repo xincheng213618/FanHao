@@ -37,7 +37,6 @@
 }
 
 .txt-format-workspace form,
-.txt-format-file,
 .txt-format-workspace fieldset,
 .txt-format-result {
   display: grid;
@@ -45,11 +44,24 @@
   gap: 12px;
 }
 
-.txt-format-workspace input[type="file"] {
-  box-sizing: border-box;
-  width: 100%;
+.txt-format-selection {
+  display: grid;
+  gap: 8px;
   min-width: 0;
-  padding: 10px 0;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.txt-format-selection.is-dragging {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+.txt-format-selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .txt-format-workspace fieldset {
@@ -87,8 +99,11 @@
 .txt-format-submit:disabled,
 .txt-format-submit[aria-disabled="true"],
 .txt-format-download[aria-disabled="true"] { opacity: .6; }
-.txt-format-status.is-error { color: #ad3535; }
-.txt-format-result[hidden] { display: none; }
+.txt-format-cancel,
+.txt-format-secondary { min-height: 44px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: transparent; color: inherit; font: inherit; }
+.txt-format-secondary:disabled { opacity: .6; }
+.txt-format-status.is-error, .txt-format-batch .is-error { color: #ad3535; }
+.txt-format-result[hidden], .txt-format-result [hidden] { display: none; }
 .txt-format-result h4 { margin: 0; overflow-wrap: anywhere; }
 .txt-format-result pre {
   max-height: 280px;
@@ -104,6 +119,16 @@
 }
 
 .txt-format-tool :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+.txt-format-batch { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.txt-format-batch li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; border-top: 1px solid var(--line); padding: 10px 0; }
+.txt-format-batch li > :is(strong, span) { overflow-wrap: anywhere; }
+.txt-format-batch li > span { grid-column: 1; grid-row: 2; font-size: 13px; }
+.txt-format-remove { grid-column: 2; grid-row: 1 / span 2; align-self: center; }
+.txt-format-batch li > div { display: grid; gap: 6px; grid-column: 1 / -1; }
+.txt-format-batch li > div:empty { display: none; }
+.txt-format-batch :is(a, summary) { justify-self: start; }
+.txt-format-batch summary { min-height: 34px; cursor: pointer; }
 
 .game-library {
   display: grid;

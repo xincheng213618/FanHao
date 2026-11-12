@@ -1,7 +1,8 @@
 // 纯展示 / 格式化辅助函数（无闭包依赖，可独立单测）。
 // 这些函数原先位于 music-page.js 尾部，已抽到独立模块以便复用与测试。
 
-const MUSIC_SLEEP_TIMER_OPTIONS = [0, 10, 15, 30, 45, 60, 90];
+import { MUSIC_SLEEP_TIMER_OPTIONS } from "./constants.js?v=20261113-music-track-sleep-01";
+
 const MUSIC_PLAYBACK_SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2];
 
 export function collapseDuplicateTracks(tracks = []) {

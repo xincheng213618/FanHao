@@ -26,6 +26,10 @@ const els = {
   productNav: document.querySelector("#productNav"),
   refreshButton: document.querySelector("#refreshButton"),
   scanStatus: document.querySelector("#scanStatus"),
+  searchFeedback: document.querySelector("#searchFeedback"),
+  searchRetry: document.querySelector("#searchRetry"),
+  searchScope: document.querySelector("#searchScope"),
+  searchStatus: document.querySelector("#searchStatus"),
   treemap: document.querySelector("#treemap"),
   upButton: document.querySelector("#upButton")
 };
@@ -35,8 +39,13 @@ const DIRECT_VIDEO_EXTENSIONS = new Set([".mp4", ".m4v", ".mov", ".webm"]);
 const AUDIO_EXTENSIONS = new Set([".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"]);
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]);
 const MIN_TREEMAP_TILE_AREA = 72;
+const SEARCH_LIMIT = 120;
+const SEARCH_PARALLEL_DRIVES = 3;
 const formatter = new Intl.NumberFormat("zh-CN");
 let treemapPresentation = null;
+let treeRequest = null;
+let searchRequest = null;
+let searchResult = null;
 const highlightedPaths = new Map();
 
 const state = {
@@ -52,8 +61,8 @@ const state = {
   tree: null
 };
 
-await Promise.allSettled([loadNavigation(), loadSummary()]);
 installEvents();
+await Promise.allSettled([loadNavigation(), loadSummary()]);
 
 async function loadNavigation() {
   const modules = await loadModuleCatalog(() => fetchJson("/api/modules"));
@@ -72,15 +81,13 @@ async function loadSummary(options = {}) {
     state.drives = Array.isArray(payload.drives) ? payload.drives : [];
     renderDriveCards();
     if (!state.selectedDriveId && state.drives.length) {
-      const first = state.drives.find((drive) => drive.cache) || state.drives.find((drive) => drive.capacity?.available) || state.drives[0];
-      state.selectedDriveId = first.id;
-      renderDriveCards();
-      await loadTree(first.root);
+      await restoreLocation();
     } else if (state.selectedDriveId) {
       const selected = selectedDrive();
+      if (!treeRequest) updateSearchAvailability();
       renderScanStatus(selected);
-      if (options.reloadChangedCache && selected?.cache?.scanId && selected.cache.scanId !== state.cacheScanId) {
-        await loadTree(state.tree?.path || selected.root, { fallbackToRoot: true });
+      if (options.reloadChangedCache && !treeRequest && selected?.cache?.scanId && selected.cache.scanId !== state.cacheScanId) {
+        await reloadTree(selected);
       }
     }
     syncPolling();
@@ -96,6 +103,7 @@ function renderDriveCards() {
     button.type = "button";
     button.className = "drive-card";
     button.classList.toggle("is-active", drive.id === state.selectedDriveId);
+    button.setAttribute("aria-pressed", String(drive.id === state.selectedDriveId));
     button.classList.toggle("is-offline", !drive.capacity?.available);
     button.classList.toggle("is-scanning", ["scanning", "publishing"].includes(drive.task?.state));
     const capacity = drive.capacity || {};
@@ -127,42 +135,136 @@ function renderDriveCards() {
 }
 
 async function selectDrive(driveId) {
-  if (driveId === state.selectedDriveId && state.tree) return;
-  state.selectedDriveId = driveId;
-  state.tree = null;
-  state.cacheScanId = "";
-  els.pathSearch.value = "";
-  renderDriveCards();
-  const drive = selectedDrive();
-  await loadTree(drive?.root || "");
+  const drive = state.drives.find((entry) => entry.id === driveId);
+  if (!drive || drive.id === state.selectedDriveId && state.tree?.node && !treeRequest) return;
+  await loadTree(drive.root, { drive });
 }
 
-async function loadTree(targetPath, options = {}) {
-  const drive = selectedDrive();
+function restoreLocation() {
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const driveId = params.get("drive");
+  const requested = state.drives.find((drive) => drive.id === driveId);
+  const drive = requested || state.drives.find((entry) => entry.cache)
+    || state.drives.find((entry) => entry.capacity?.available) || state.drives[0];
   if (!drive) return;
+  const path = requested ? params.get("path") || drive.root : drive.root;
+  return loadTree(path, {
+    drive, historyMode: "replace", fallbackToRoot: true,
+    search: { query: params.get("q") || "", scope: params.get("scope") === "all" ? "all" : "drive" },
+    message: driveId && !requested ? "链接中的磁盘当前未被监控，已打开默认磁盘。" : ""
+  });
+}
+
+function writeLocation(drive, path, historyMode) {
+  const url = new URL(window.location.href);
+  const params = new URLSearchParams({ drive: drive.id });
+  if (path !== drive.root) params.set("path", path);
+  if (els.searchScope.value === "all") params.set("scope", "all");
+  const query = els.pathSearch.value.trim();
+  if (query) params.set("q", query);
+  url.hash = params.toString();
+  if (url.href === window.location.href) return;
+  if (historyMode === "replace") history.replaceState(history.state, "", url);
+  else history.pushState(history.state, "", url);
+}
+
+function reloadTree(drive) {
+  return loadTree(state.tree?.path || drive.root, { drive, historyMode: "replace", fallbackToRoot: true, background: true });
+}
+
+function treeLocationKey(background) {
+  const hash = window.location.hash;
+  if (!background) return hash;
+  const params = new URLSearchParams(hash.slice(1));
+  return JSON.stringify([params.get("drive"), params.get("path")]);
+}
+
+async function loadTree(targetPath, { drive = selectedDrive(), historyMode = "push", fallbackToRoot = false, background = false, message = "", search = null } = {}) {
+  if (!drive) return;
+  treeRequest?.abort();
+  const request = new AbortController();
+  const initialLocation = treeLocationKey(background);
+  const isCurrent = () => treeRequest === request && treeLocationKey(background) === initialLocation;
+  let settled = false;
+  treeRequest = request;
   hideContextMenu();
   els.treemap.setAttribute("aria-busy", "true");
+  if (!background) {
+    cancelSearch();
+    els.pathSearch.disabled = true;
+    els.searchScope.disabled = true;
+    els.searchRetry.disabled = true;
+    els.openCurrentButton.disabled = true;
+  }
   try {
+    let tree;
     if (!drive.cache) {
-      state.tree = { cache: null, children: [], drive, node: null, path: drive.root };
+      tree = { cache: null, children: [], drive, node: null, path: drive.root };
+      if (targetPath !== drive.root) message = "此磁盘尚无缓存，暂时无法打开链接中的文件夹。";
     } else {
-      const params = new URLSearchParams({ drive: drive.id, path: targetPath || drive.root, limit: "1400", depth: "7", t: String(Date.now()) });
+      const params = new URLSearchParams({ drive: drive.id, path: targetPath, limit: "1400", depth: "7", t: String(Date.now()) });
       try {
-        state.tree = await fetchJson(`/api/disk-usage/tree?${params}`);
+        tree = await fetchJson(`/api/disk-usage/tree?${params}`, { signal: request.signal });
       } catch (error) {
-        if (!options.fallbackToRoot || targetPath === drive.root) throw error;
+        if (request.signal.aborted || !fallbackToRoot || targetPath === drive.root || ![400, 403, 404].includes(error.status)) throw error;
         params.set("path", drive.root);
-        state.tree = await fetchJson(`/api/disk-usage/tree?${params}`);
+        tree = await fetchJson(`/api/disk-usage/tree?${params}`, { signal: request.signal });
+        message = "当前缓存中已无法打开该文件夹，已返回磁盘根目录。";
       }
     }
-    state.cacheScanId = state.tree.cache?.scanId || "";
+    if (!isCurrent()) return;
+    settled = true;
+    if (state.selectedDriveId !== drive.id) {
+      state.selectedDriveId = drive.id;
+      renderDriveCards();
+    }
+    if (!background && els.previewDialog.open) closePreview();
+    state.tree = tree;
+    state.cacheScanId = tree.cache?.scanId || "";
+    if (!background) {
+      els.pathSearch.value = search?.query || "";
+      if (search) els.searchScope.value = search.scope;
+      resetSearch();
+    }
+    writeLocation(drive, tree.path || drive.root, historyMode);
     renderCurrentView();
+    if (message) showStatus(message);
+    const query = els.pathSearch.value.trim();
+    if (query) {
+      if (!background) setContentView("list");
+      void searchCache(query);
+    }
   } catch (error) {
-    state.tree = { cache: drive.cache, children: [], drive, node: null, path: targetPath || drive.root };
-    renderCurrentView();
+    if (!isCurrent()) return;
+    settled = true;
+    if (!state.tree || historyMode === "replace" && !background) {
+      if (els.previewDialog.open) closePreview();
+      state.selectedDriveId = drive.id;
+      state.cacheScanId = "";
+      state.tree = { cache: drive.cache, children: [], drive, node: null, path: targetPath };
+      els.pathSearch.value = search?.query || "";
+      if (search) els.searchScope.value = search.scope;
+      resetSearch();
+      renderDriveCards();
+      renderCurrentView();
+    }
+    if (!background && els.pathSearch.value.trim()) {
+      setContentView("list");
+      void searchCache(els.pathSearch.value.trim());
+    }
     showStatus(error.message, true);
   } finally {
-    els.treemap.removeAttribute("aria-busy");
+    if (treeRequest === request) {
+      treeRequest = null;
+      els.treemap.removeAttribute("aria-busy");
+      const current = selectedDrive();
+      updateSearchAvailability();
+      els.searchRetry.disabled = false;
+      els.openCurrentButton.disabled = !state.tree?.node;
+      if (settled && current?.id === drive.id && current.cache?.scanId && current.cache.scanId !== drive.cache?.scanId && current.cache.scanId !== state.cacheScanId) {
+        void reloadTree(current);
+      }
+    }
   }
 }
 
@@ -170,7 +272,7 @@ function renderCurrentView() {
   renderBreadcrumb();
   renderFolderSummary();
   renderTreemap();
-  renderEntries(state.tree?.children || [], "当前目录");
+  if (!els.pathSearch.value.trim()) renderEntries(state.tree?.children || [], "当前目录");
   renderScanStatus(selectedDrive());
 }
 
@@ -332,16 +434,19 @@ function renderTreemapEmpty(title, detail) {
   els.treemap.append(empty);
 }
 
-function renderEntries(items, title) {
+function renderEntries(items, title, emptyMessage = "") {
   els.entryTitle.textContent = title;
   els.entryCount.textContent = `${formatter.format(items.length)} 项`;
   els.listViewTab.textContent = title === "搜索结果" ? `搜索结果 ${formatter.format(items.length)}` : "目录列表";
+  const focused = els.entryList.contains(document.activeElement) ? document.activeElement.dataset.searchKey : "";
+  const scrollTop = els.entryList.scrollTop;
+  let nextFocus;
   clearLinkedElements(state.linkedElements.entries);
   els.entryList.replaceChildren();
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "entry-empty";
-    empty.textContent = title === "搜索结果" ? "没有找到匹配的缓存记录。" : "当前目录没有项目。";
+    empty.textContent = emptyMessage || (title === "搜索结果" ? "没有找到匹配的缓存记录。" : "当前目录没有项目。");
     els.entryList.append(empty);
     return;
   }
@@ -351,33 +456,44 @@ function renderEntries(items, title) {
     const row = document.createElement("button");
     row.type = "button";
     row.className = "entry-row";
-    row.setAttribute("aria-label", `第 ${index + 1} 位，${item.name}，${formatBytes(item.size)}`);
+    const sourceName = els.searchScope.value === "all" ? item.searchDrive?.name : "";
+    const sourceLabel = sourceName ? `，${sourceName}` : "";
+    row.setAttribute("aria-label", `第 ${index + 1} 位，${item.name}${sourceLabel}，${formatBytes(item.size)}`);
     const countLabel = item.isDirectory ? `${formatter.format(item.fileCount || 0)} 文件 · ${formatter.format(item.directoryCount || 0)} 文件夹` : (item.extension || "文件").slice(1).toUpperCase() || "文件";
+    const details = sourceName ? `${sourceName} · ${countLabel}` : countLabel;
     row.innerHTML = `
       <span class="entry-bar" style="width:${Math.max(1, Number(item.size || 0) / maxSize * 100).toFixed(2)}%"></span>
       <span class="entry-rank" aria-hidden="true">${index + 1}</span>
-      <span class="entry-main"><span class="entry-name">${escapeHtml(item.name)}</span><span class="entry-meta">${escapeHtml(countLabel)}</span></span>
+      <span class="entry-main"><span class="entry-name">${escapeHtml(item.name)}</span><span class="entry-meta">${escapeHtml(details)}</span></span>
       <span class="entry-size">${formatBytes(item.size)}</span>`;
     row.title = item.path;
+    if (item.searchDrive) {
+      row.dataset.searchKey = JSON.stringify([item.searchDrive.id, item.path]);
+      if (row.dataset.searchKey === focused) nextFocus = row;
+    }
     installNodeEvents(row, item, state.linkedElements.entries);
     fragment.append(row);
   }
   els.entryList.append(fragment);
+  nextFocus?.focus({ preventScroll: true });
+  els.entryList.scrollTop = title === "搜索结果" ? scrollTop : 0;
 }
 
 function installNodeEvents(element, item, group) {
   if (item.aggregate) return;
-  registerLinkedElement(element, item, group);
-  element.addEventListener("click", () => activateNode(item));
+  const drive = item.searchDrive || selectedDrive();
+  if (!drive) return;
+  registerLinkedElement(element, item, drive.id, group);
+  element.addEventListener("click", () => activateNode(item, drive));
   element.addEventListener("contextmenu", (event) => {
     event.preventDefault();
-    showContextMenu(event.clientX, event.clientY, item);
+    showContextMenu(event.clientX, event.clientY, item, drive);
   });
 }
 
-function registerLinkedElement(element, item, group) {
+function registerLinkedElement(element, item, driveId, group) {
   if (item.aggregate || !item.path) return;
-  const key = item.path.toLocaleLowerCase("zh-CN");
+  const key = JSON.stringify([driveId, item.path.toLocaleLowerCase("zh-CN")]);
   const linked = group.get(key) || [];
   linked.push(element);
   group.set(key, linked);
@@ -409,25 +525,24 @@ function clearLinkedElements(group) {
   group.clear();
 }
 
-function activateNode(item) {
+function activateNode(item, drive) {
   if (item.isDirectory) {
-    els.pathSearch.value = "";
-    loadTree(item.path);
+    loadTree(item.path, { drive });
     return;
   }
-  if (previewKind(item) === "video") openVideoPlayer(item);
-  else if (previewKind(item)) openPreview(item);
-  else openSystemPath(item, "open");
+  const kind = previewKind(item);
+  if (kind === "video") openVideoPlayer(item, drive.id);
+  else if (kind) openPreview(item, drive.id);
+  else openSystemPath(item, "open", drive.id);
 }
 
-function showContextMenu(x, y, item) {
-  state.selectedNode = item;
+function showContextMenu(x, y, item, drive) {
   const actions = [];
-  if (item.isDirectory) actions.push(["进入此文件夹", () => loadTree(item.path)]);
-  else if (previewKind(item) === "video") actions.push(["使用番号播放器", () => openVideoPlayer(item)]);
-  else if (previewKind(item)) actions.push(["预览", () => openPreview(item)]);
-  actions.push([item.isDirectory ? "打开文件夹" : "使用系统打开", () => openSystemPath(item, "open")]);
-  actions.push(["在资源管理器中定位", () => openSystemPath(item, "reveal")]);
+  if (item.isDirectory) actions.push(["进入此文件夹", () => loadTree(item.path, { drive })]);
+  else if (previewKind(item) === "video") actions.push(["使用番号播放器", () => openVideoPlayer(item, drive.id)]);
+  else if (previewKind(item)) actions.push(["预览", () => openPreview(item, drive.id)]);
+  actions.push([item.isDirectory ? "打开文件夹" : "使用系统打开", () => openSystemPath(item, "open", drive.id)]);
+  actions.push(["在资源管理器中定位", () => openSystemPath(item, "reveal", drive.id)]);
   actions.push(["复制完整路径", () => copyPath(item.path)]);
 
   els.contextMenu.replaceChildren();
@@ -463,13 +578,13 @@ async function copyPath(targetPath) {
   }
 }
 
-function openPreview(item) {
-  state.selectedNode = item;
+function openPreview(item, driveId) {
+  state.selectedNode = { item, driveId };
   els.previewTitle.textContent = item.name;
   els.previewPath.textContent = item.path;
   els.previewStage.replaceChildren();
   const kind = previewKind(item);
-  const params = new URLSearchParams({ drive: state.selectedDriveId, path: item.path });
+  const params = new URLSearchParams({ drive: driveId, path: item.path });
   if (kind === "video" && !DIRECT_VIDEO_EXTENSIONS.has(item.extension)) params.set("mode", "transcode");
   const source = `/api/disk-usage/media?${params}`;
   let media;
@@ -491,9 +606,9 @@ function openPreview(item) {
   els.previewDialog.showModal();
 }
 
-function openVideoPlayer(item) {
+function openVideoPlayer(item, driveId) {
   const params = new URLSearchParams({
-    drive: state.selectedDriveId,
+    drive: driveId,
     path: item.path,
     redirect: "1"
   });
@@ -501,6 +616,7 @@ function openVideoPlayer(item) {
 }
 
 function closePreview() {
+  state.selectedNode = null;
   const media = els.previewStage.querySelector("video, audio, img");
   if (media) {
     media.pause?.();
@@ -511,11 +627,11 @@ function closePreview() {
   if (els.previewDialog.open) els.previewDialog.close();
 }
 
-async function openSystemPath(item, action) {
+async function openSystemPath(item, action, driveId = state.selectedDriveId) {
   try {
     await fetchJson("/api/disk-usage/open", {
       method: "POST",
-      body: JSON.stringify({ action, driveId: state.selectedDriveId, path: item.path }),
+      body: JSON.stringify({ action, driveId, path: item.path }),
       headers: { "Content-Type": "application/json" }
     });
     showStatus(action === "reveal" ? `已定位：${item.name}` : `已打开：${item.name}`);
@@ -535,12 +651,14 @@ async function refreshSelectedDrive() {
       body: JSON.stringify({ driveId: drive.id }),
       headers: { "Content-Type": "application/json" }
     });
-    drive.task = payload.task;
+    const current = state.drives.find((entry) => entry.id === drive.id);
+    if (!current) return;
+    current.task = payload.task;
     renderDriveCards();
-    renderScanStatus(drive);
+    if (current.id === state.selectedDriveId) renderScanStatus(current);
     syncPolling();
   } catch (error) {
-    showStatus(error.message, true);
+    if (drive.id === state.selectedDriveId) showStatus(error.message, true);
   }
 }
 
@@ -582,6 +700,7 @@ function syncPolling() {
 }
 
 function installEvents() {
+  window.addEventListener("hashchange", restoreLocation);
   els.upButton.addEventListener("click", navigateUp);
   els.refreshButton.addEventListener("click", refreshSelectedDrive);
   els.mapViewTab.addEventListener("click", () => setContentView("map"));
@@ -590,23 +709,22 @@ function installEvents() {
     const node = state.tree?.node || { isDirectory: true, name: selectedDrive()?.name || "磁盘", path: state.tree?.path || selectedDrive()?.root };
     if (node.path) openSystemPath(node, "open");
   });
-  els.pathSearch.addEventListener("input", () => {
-    clearTimeout(state.searchTimer);
-    const query = els.pathSearch.value.trim();
-    if (!query) {
-      renderEntries(state.tree?.children || [], "当前目录");
-      return;
-    }
-    setContentView("list");
-    state.searchTimer = setTimeout(() => searchCache(query), 280);
+  els.pathSearch.addEventListener("input", (event) => {
+    if (!event.isComposing) updateSearch({ debounce: true });
   });
+  els.pathSearch.addEventListener("compositionend", () => updateSearch({ debounce: true }));
+  els.searchScope.addEventListener("change", () => updateSearch());
+  els.searchRetry.addEventListener("click", () => searchCache(els.pathSearch.value.trim(), { retry: true }));
   els.previewClose.addEventListener("click", closePreview);
   els.previewDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
     closePreview();
   });
-  els.previewOpen.addEventListener("click", () => state.selectedNode && openSystemPath(state.selectedNode, "open"));
-  els.previewReveal.addEventListener("click", () => state.selectedNode && openSystemPath(state.selectedNode, "reveal"));
+  for (const [button, action] of [[els.previewOpen, "open"], [els.previewReveal, "reveal"]]) {
+    button.addEventListener("click", () => {
+      if (state.selectedNode) openSystemPath(state.selectedNode.item, action, state.selectedNode.driveId);
+    });
+  }
   document.addEventListener("pointerdown", (event) => {
     if (!els.contextMenu.hidden && !els.contextMenu.contains(event.target)) hideContextMenu();
   });
@@ -617,7 +735,7 @@ function installEvents() {
   });
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Backspace" || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-    if (["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable) return;
+    if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName) || document.activeElement?.isContentEditable) return;
     if (!state.tree?.node?.parentPath || els.previewDialog.open) return;
     event.preventDefault();
     navigateUp();
@@ -640,20 +758,113 @@ function setContentView(view) {
 function navigateUp() {
   const parentPath = state.tree?.node?.parentPath || "";
   if (!parentPath) return;
-  els.pathSearch.value = "";
   loadTree(parentPath);
 }
 
-async function searchCache(query) {
+function cancelSearch() {
+  clearTimeout(state.searchTimer);
+  searchRequest?.abort();
+  searchRequest = null;
+}
+
+function searchDrives(scope = els.searchScope.value) {
+  return (scope === "all" ? state.drives : [selectedDrive()]).filter((drive) => drive?.cache);
+}
+
+function updateSearchAvailability() {
+  els.searchScope.disabled = !searchDrives("all").length;
+  els.pathSearch.disabled = !searchDrives().length;
+}
+
+function resetSearch() {
+  searchResult = null;
+  els.searchFeedback.hidden = true;
+  els.searchRetry.hidden = true;
+  els.searchStatus.textContent = "";
+}
+
+function updateSearch({ debounce = false } = {}) {
+  cancelSearch();
+  resetSearch();
+  hideContextMenu();
+  updateSearchAvailability();
   const drive = selectedDrive();
-  if (!drive?.cache || query !== els.pathSearch.value.trim()) return;
+  if (drive) writeLocation(drive, state.tree?.path || drive.root, "replace");
+  const query = els.pathSearch.value.trim();
+  if (!query) {
+    renderEntries(state.tree?.children || [], "当前目录");
+    return;
+  }
+  setContentView("list");
+  if (debounce && query.length >= 2 && searchDrives().length) {
+    renderEntries([], "搜索结果", "正在搜索缓存…");
+    state.searchTimer = setTimeout(() => searchCache(query), 280);
+  } else {
+    void searchCache(query);
+  }
+}
+
+function renderSearchResult(result) {
+  const completed = [...result.outcomes.values()];
+  const failed = completed.filter((outcome) => outcome.failed);
+  const available = completed.filter((outcome) => !outcome.failed);
+  const pending = completed.length < result.drives.length;
+  const items = available.flatMap(({ items }) => items);
+  items.sort((left, right) => right.size - left.size
+    || left.name.localeCompare(right.name, "zh-CN")
+    || left.searchDrive.id.localeCompare(right.searchDrive.id)
+    || left.path.localeCompare(right.path, "zh-CN"));
+  const capped = items.length > SEARCH_LIMIT || available.some((outcome) => outcome.items.length === SEARCH_LIMIT);
+  const status = [pending ? `已读取 ${available.length}/${result.drives.length} 块磁盘缓存，搜索中…` : `已读取 ${available.length}/${result.drives.length} 块磁盘缓存`];
+  if (failed.length) status.push(`读取失败：${failed.map(({ drive }) => drive.name).join("、")}`);
+  if (capped) status.push(`最多显示 ${SEARCH_LIMIT} 项`);
+  els.searchFeedback.hidden = false;
+  els.searchStatus.textContent = status.join(" · ");
+  els.searchRetry.hidden = pending || !failed.length;
+  renderEntries(items.slice(0, SEARCH_LIMIT), "搜索结果",
+    pending ? "正在搜索缓存…" : failed.length ? "已读取的缓存中没有匹配结果。" : "");
+}
+
+async function searchCache(query, { retry = false } = {}) {
+  if (query !== els.pathSearch.value.trim()) return;
+  const scope = els.searchScope.value;
+  const drives = searchDrives(scope);
+  cancelSearch();
+  if (query.length < 2 || !drives.length) {
+    resetSearch();
+    renderEntries([], "搜索结果", query.length < 2 ? "请输入至少两个字符。" : "所选范围没有可搜索的磁盘缓存。");
+    return;
+  }
+  const canRetry = retry && searchResult?.query === query && searchResult.scope === scope;
+  const result = canRetry ? searchResult : { query, scope, drives, outcomes: new Map() };
+  const targets = canRetry ? result.drives.filter((drive) => result.outcomes.get(drive.id)?.failed) : drives;
+  for (const drive of targets) result.outcomes.delete(drive.id);
+  searchResult = result;
+  const request = new AbortController();
+  searchRequest = request;
+  renderSearchResult(result);
   try {
-    const params = new URLSearchParams({ drive: drive.id, q: query, limit: "120", t: String(Date.now()) });
-    const payload = await fetchJson(`/api/disk-usage/search?${params}`);
-    if (query !== els.pathSearch.value.trim()) return;
-    renderEntries(payload.items || [], "搜索结果");
-  } catch (error) {
-    showStatus(error.message, true);
+    let nextDrive = 0;
+    async function readNextDrive() {
+      while (searchRequest === request && nextDrive < targets.length) {
+        const drive = targets[nextDrive++];
+        const params = new URLSearchParams({ drive: drive.id, q: query, limit: String(SEARCH_LIMIT), t: String(Date.now()) });
+        let outcome;
+        try {
+          const payload = await fetchJson(`/api/disk-usage/search?${params}`, { signal: request.signal });
+          const items = (payload.items || []).map((item) => ({ ...item, searchDrive: drive }));
+          outcome = { drive, items };
+        } catch {
+          outcome = { drive, failed: true };
+        }
+        if (searchRequest !== request) return;
+        result.outcomes.set(drive.id, outcome);
+        renderSearchResult(result);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(targets.length, SEARCH_PARALLEL_DRIVES) }, readNextDrive));
+  } finally {
+    if (searchRequest === request) searchRequest = null;
   }
 }
 
@@ -774,7 +985,7 @@ function showStatus(message, isError = false) {
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(payload.error || `请求失败：${response.status}`), { status: response.status });
   return payload;
 }
 

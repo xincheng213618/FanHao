@@ -1,4 +1,5 @@
 import { createApiClient } from "../../../js/api.js";
+import { createTasteEvidenceDialog } from "./evidence.js?v=20261113-taste-evidence-01";
 
 const api = createApiClient();
 const $ = (id) => document.getElementById(id);
@@ -10,6 +11,7 @@ function workLink(work) {
   if (!work.code) return node("span", "未识别番号");
   const link = node("a", work.code); link.href = `/fanhao?q=${encodeURIComponent(work.code)}`; return link;
 }
+const evidence = createTasteEvidenceDialog({ api, byId: $, makeNode: node, workLink, refresh: load });
 function statistic(label, value, detail, highlighted = false) {
   const card = node("article", "", `stat${highlighted ? " highlight" : ""}`);
   card.append(node("span", label), node("strong", value), node("small", detail)); return card;
@@ -37,7 +39,16 @@ function renderDimension() {
     lift.append(node("small", item.support === "repeated" ? "多次标记" : "样本较少", "support"));
     const examples = document.createElement("td"), links = node("div", "", "examples");
     for (const example of item.examples) links.append(workLink(example));
-    examples.append(links); row.append(feature, samples, lift, examples); fragment.append(row);
+    examples.append(links);
+    if (profile.snapshot) {
+      const open = node("button", "查看作品", "evidence-open");
+      open.type = "button";
+      open.setAttribute("aria-label", `查看「${item.name}」的作品`);
+      open.setAttribute("aria-haspopup", "dialog");
+      open.addEventListener("click", () => evidence.open({ ...item, snapshot: profile.snapshot, dimension: dimension.key, label: dimension.label }));
+      examples.append(open);
+    }
+    row.append(feature, samples, lift, examples); fragment.append(row);
   }
   if (!rows.length) {
     const row = document.createElement("tr"), cell = node("td", "目前没有足够的重复样本支持这类偏好。可以切换维度，或查看 [A] 中出现最多的特征。", "empty");
@@ -70,7 +81,7 @@ async function load() {
   controller?.abort(); const request = new AbortController(); controller = request;
   $("refresh").disabled = true; $("export").disabled = true; $("content").hidden = true;
   $("status").textContent = "正在读取馆藏索引并比较 [A] 样本…"; $("status").classList.remove("error");
-  try { const value = await api("/api/fanhao/taste", { signal: request.signal }); if (!request.signal.aborted) render(value); }
+  try { const value = await api("/api/fanhao/taste", { signal: request.signal, cache: "no-store" }); if (!request.signal.aborted) render(value); }
   catch (error) { if (!request.signal.aborted) { $("status").textContent = error.message; $("status").classList.add("error"); } }
   finally { if (controller === request) $("refresh").disabled = false; }
 }
@@ -82,5 +93,8 @@ $("export").addEventListener("click", () => {
   const link = document.createElement("a"); link.href = url; link.download = `FanHao口味分析-${profile.generatedAt.slice(0, 10)}.json`;
   document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
-window.addEventListener("pagehide", () => controller?.abort());
+window.addEventListener("pagehide", () => {
+  controller?.abort();
+  evidence.close();
+});
 load();

@@ -46,6 +46,22 @@ th:first-child, td:first-child { padding-left: 0; width: 46%; min-width: 180px; 
 .numeric { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .support { display: block; font-size: 11px; color: var(--taste-muted); }
 .examples { display: flex; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; }
+.evidence-open { min-height: 30px; margin-top: 7px; padding: 3px 8px; color: var(--taste-green); font-size: 12px; }
+.evidence-dialog {
+  width: min(640px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: 20px;
+  border: 1px solid var(--taste-line); border-radius: 14px; background: var(--taste-panel); color: var(--taste-ink);
+}
+.evidence-dialog::backdrop { background: rgba(12, 30, 22, .64); }
+.evidence-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.evidence-header h2 { min-width: 0; overflow-wrap: anywhere; }
+.evidence-header button { white-space: nowrap; }
+.evidence-scopes, .evidence-footer { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.evidence-works { max-height: 52dvh; overflow: auto; padding: 0; margin: 0; list-style: none; }
+.evidence-works:empty { display: none; }
+.evidence-works li { display: flex; flex-wrap: wrap; gap: 3px 12px; padding: 9px 2px; border-bottom: 1px solid var(--taste-line); overflow-wrap: anywhere; }
+.evidence-works a { font-weight: 650; }
+.evidence-works li span { min-width: 0; color: var(--taste-muted); font-size: 13px; }
+.evidence-footer { justify-content: flex-end; }
 .caption { margin-top: 16px; font-size: 12px; line-height: 1.8; }
 .recommendations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
 .recommendation { border: 1px solid var(--taste-line); border-radius: 10px; padding: 17px; min-width: 0; }

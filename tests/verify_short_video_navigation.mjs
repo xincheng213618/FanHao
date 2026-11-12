@@ -20,7 +20,7 @@ function sourceFunction(text, name) {
 }
 const implementation = [source.slice(ownerStart, ownerEnd), ...[
   "promoteAdjacentMedia", "hydratePromotedShortVideo", "loadAdjacentVideos",
-  "syncCurrentNavigationDom", "renderBrowserNav", "showHome"
+  "syncCurrentNavigationDom", "renderBrowserNav", "showHome", "resetShortVideoViewerForHome"
 ].map((name) => sourceFunction(source, name))].join("\n");
 
 function deferred() {

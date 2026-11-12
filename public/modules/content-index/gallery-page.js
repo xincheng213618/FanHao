@@ -4,6 +4,7 @@ import { addQueryParam } from "../../js/api.js?v=20260701-gallery-merge-01";
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const IMAGE_LIBRARY_PAGE_LIMIT = 5000;
 const IMAGE_LIBRARY_REBASE_ATTEMPTS = 3;
+const PHOTO_LIST_BATCH = 80;
 const PHOTO_READER_LIMITS = {
   local: 160,
   lan: 160,
@@ -43,6 +44,7 @@ export function createGalleryPage(deps) {
   let readerStatusRequest = null;
   let photoPageRequest = null;
   let photoFullRequest = null;
+  let photoAdjacentRequest = null;
 
   function enter(options = {}) {
     if (state.gallery.mode === "cache") state.gallery.mode = "photo";
@@ -78,6 +80,7 @@ export function createGalleryPage(deps) {
     state.gallery.subCategory = route.gallerySubCategory || "all";
     state.gallery.person = route.galleryPerson || "all";
     state.gallery.seriesKey = ["media", "tv"].includes(state.gallery.mode) ? route.gallerySeriesKey || "" : "";
+    state.gallery.episodeQuery = route.galleryEpisodeQuery || "";
     state.gallery.photoDate = route.galleryPhotoDate || "all";
     state.gallery.photoSite = route.galleryPhotoSite || "";
     state.gallery.sort = state.gallery.query ? "updated"
@@ -252,6 +255,7 @@ export function createGalleryPage(deps) {
     const query = String(state.gallery.query || "").trim();
     const scope = query ? {} : state.gallery;
     const photoView = effectivePhotoView(query);
+    const episodeQuery = selectedSeries(scope) ? scope.episodeQuery : "";
     return JSON.stringify({
       mode: state.gallery.mode,
       mediaKind: state.gallery.mode === "media" ? scope.mediaKind || "all" : "",
@@ -264,6 +268,7 @@ export function createGalleryPage(deps) {
       date: state.gallery.mode === "photo" ? scope.photoDate || "all" : "",
       ...(photoView && scope.photoSite ? { site: scope.photoSite } : {}),
       query,
+      ...(episodeQuery ? { episodeQuery } : {}),
       sort: query ? "relevance" : photoView === "people" ? photoPeopleSort(state.gallery.sort)
         : ["photo", "media", "movie"].includes(state.gallery.mode) ? state.gallery.sort || "updated" : "",
       ...(!query && photoView && state.gallery.sortDirection ? { sortDirection: state.gallery.sortDirection } : {})
@@ -274,14 +279,15 @@ export function createGalleryPage(deps) {
     const query = String(state.gallery.query || "").trim();
     const scope = query ? {} : state.gallery;
     const photoView = effectivePhotoView(query);
-    const selectedSeries = ["media", "tv"].includes(state.gallery.mode) && (scope.seriesKey || scope.person && scope.person !== "all");
+    const episodic = selectedSeries(scope);
     const params = new URLSearchParams({
       mode: state.gallery.mode,
       limit: String(Math.max(1, Number(options.limit || state.gallery.visibleLimit || 80))),
       offset: String(Math.max(0, Number(options.offset || 0))),
-      sort: query ? "relevance" : selectedSeries ? "title" : state.gallery.sort || "updated"
+      sort: query ? "relevance" : episodic ? "title" : state.gallery.sort || "updated"
     });
     if (query) params.set("q", query);
+    if (episodic && scope.episodeQuery) params.set("q", scope.episodeQuery);
     if (state.gallery.mode === "photo") {
       params.set("photoView", photoView);
       if (photoView === "people") params.set("sort", photoPeopleSort(state.gallery.sort));
@@ -307,6 +313,10 @@ export function createGalleryPage(deps) {
       }
     }
     return `/api/image-library/items?${params.toString()}`;
+  }
+
+  function selectedSeries(scope) {
+    return ["media", "tv"].includes(state.gallery.mode) && Boolean(scope.seriesKey || scope.person && scope.person !== "all");
   }
 
   function imageLibraryListNeedsLoad() {
@@ -372,15 +382,15 @@ export function createGalleryPage(deps) {
 
   async function loadImageLibraryItems(options = {}) {
     const key = imageLibraryListKey();
-    if (!key) return null;
+    if (!key || options.signal?.aborted) return null;
     const currentList = state.gallery.list?.key === key ? state.gallery.list : null;
-    const targetCount = Math.max(1, Number(state.gallery.visibleLimit || 80));
+    const targetCount = Math.max(1, Number(options.targetCount || state.gallery.visibleLimit || PHOTO_LIST_BATCH));
     const loadedCount = Array.isArray(currentList?.items) ? currentList.items.length : 0;
     const rawLoaded = Math.max(loadedCount, Number(currentList?.rawLoaded || 0));
     const knownTotal = Number(currentList?.total || 0);
     const hasKnownTotal = currentList && Number.isFinite(Number(currentList.total));
     if (!options.force && currentList && (loadedCount >= targetCount || currentList.hasMore === false || (hasKnownTotal && rawLoaded >= knownTotal))) return currentList;
-    if (!options.force && state.gallery.listLoadingKey === key) return null;
+    if (!options.force && !options.signal && state.gallery.listLoadingKey === key) return null;
 
     const offset = options.force ? 0 : rawLoaded;
     const requestLimit = Math.min(IMAGE_LIBRARY_PAGE_LIMIT, Math.max(1, targetCount - (options.force ? 0 : loadedCount)));
@@ -389,6 +399,8 @@ export function createGalleryPage(deps) {
     imageListRequest?.controller.abort();
     const requestVersion = ++imageListRequestVersion;
     const request = { controller: new AbortController(), key, version: requestVersion };
+    const cancel = () => request.controller.abort();
+    options.signal?.addEventListener("abort", cancel, { once: true });
     imageListRequest = request;
     const isCurrent = () => imageListRequest === request && requestVersion === imageListRequestVersion
       && !request.controller.signal.aborted && key === imageLibraryListKey() && state.activeView === "gallery";
@@ -446,7 +458,11 @@ export function createGalleryPage(deps) {
       if (!listRefreshHandler?.({ loading: false }) && !hasUnsubmittedGallerySearchDraft()) renderGalleryView({ preserveScroll: true });
       return null;
     } finally {
-      if (imageListRequest === request) imageListRequest = null;
+      options.signal?.removeEventListener("abort", cancel);
+      if (imageListRequest === request) {
+        imageListRequest = null;
+        state.gallery.listLoadingKey = "";
+      }
     }
   }
 
@@ -470,6 +486,7 @@ export function createGalleryPage(deps) {
   }
 
   function beginReaderRequest(type, id) {
+    cancelPhotoAdjacentRequest();
     readerOwner?.controller.abort();
     const owner = { generation: ++readerGeneration, mode: state.gallery.mode, type, id, controller: new AbortController() };
     readerOwner = owner;
@@ -498,6 +515,7 @@ export function createGalleryPage(deps) {
   }
 
   function resetReader() {
+    cancelPhotoAdjacentRequest();
     readerOwner?.controller.abort();
     readerGeneration += 1;
     readerOwner = null;
@@ -537,19 +555,83 @@ export function createGalleryPage(deps) {
       const data = await api(photoSetPath(albumId, { imageLimit: photoReaderInitialLimit() }), { signal: owner.controller.signal });
       if (!readerRequestCurrent(owner)) return null;
       const album = photoReaderAlbum(data, albumId);
-      clearReaderState();
-      state.gallery.album = album;
-      state.gallery.cache = data.cache || state.gallery.cache;
       clearReaderRequestStatus(owner, owner);
-      renderGalleryStats();
-      renderGalleryView();
-      syncRouteAfterNavigation(owner.pendingPhotoRoute ? { skipRoute: true } : options);
+      const routeOptions = owner.pendingPhotoRoute ? { skipRoute: true } : options;
       owner.pendingPhotoRoute = false;
-      window.scrollTo({ top: 0, behavior: "instant" });
-      return state.gallery.album;
+      return showPhotoSet(album, data.cache, routeOptions);
     } catch (error) {
       if (readerRequestCurrent(owner)) setReaderRequestStatus(owner, owner, error.message || "套图读取失败");
       return null;
+    }
+  }
+
+  function showPhotoSet(album, cache, routeOptions) {
+    clearReaderState();
+    state.gallery.album = album;
+    state.gallery.cache = cache || state.gallery.cache;
+    renderGalleryStats();
+    renderGalleryView();
+    syncRouteAfterNavigation(routeOptions);
+    window.scrollTo({ top: 0, behavior: "instant" });
+    return album;
+  }
+
+  function photoReaderNeighbors(albumId) {
+    if (!readerRequestCurrent(readerOwner, albumId)) return null;
+    const list = state.gallery.list;
+    if (!list || list.key !== imageLibraryListKey()) return null;
+    const index = list.items.findIndex(item => item.type === "photo" && String(item.id) === albumId);
+    if (index < 0) return null;
+    const previous = list.items[index - 1];
+    const next = list.items[index + 1];
+    return {
+      previous: previous?.type === "photo" && previous.id ? previous : null,
+      next: next?.type === "photo" && next.id ? next : null,
+      canLoadNext: Boolean(list.hasMore && index === list.items.length - 1)
+    };
+  }
+
+  function cancelPhotoAdjacentRequest() {
+    photoAdjacentRequest?.abort();
+    photoAdjacentRequest = null;
+  }
+
+  async function openAdjacentPhotoSet(albumId, direction) {
+    const from = readerOwner;
+    let neighbors = photoReaderNeighbors(albumId);
+    if (!neighbors || photoAdjacentRequest) return null;
+    const request = new AbortController();
+    photoAdjacentRequest = request;
+    const key = imageLibraryListKey();
+    const isCurrent = () => photoAdjacentRequest === request && !request.signal.aborted
+      && readerRequestCurrent(from, albumId) && key === imageLibraryListKey();
+    try {
+      if (direction === "next" && !neighbors.next && neighbors.canLoadNext) {
+        const list = await loadImageLibraryItems({
+          targetCount: state.gallery.list.items.length + PHOTO_LIST_BATCH, signal: request.signal, renderStart: false
+        });
+        if (!isCurrent()) return null;
+        if (!list) throw new Error(state.gallery.listError || "下一页套图读取失败");
+        neighbors = photoReaderNeighbors(albumId);
+        if (!neighbors) throw new Error("原套图已不在当前列表，请返回列表查看");
+      }
+      const item = direction === "previous" ? neighbors.previous : neighbors.next;
+      if (!item) return null;
+      const id = String(item.id);
+      const data = await api(photoSetPath(id, { imageLimit: photoReaderInitialLimit() }), { signal: request.signal });
+      if (!isCurrent()) return null;
+      const album = photoReaderAlbum(data, id);
+      photoAdjacentRequest = null;
+      const owner = beginReaderRequest("photo", id);
+      owner.listReturn = from.listReturn;
+      setStatus("");
+      // Replace the album entry so one Back still reaches the originating list.
+      return showPhotoSet(album, data.cache, { replaceRoute: true });
+    } catch (error) {
+      if (isCurrent()) throw error;
+      return null;
+    } finally {
+      if (photoAdjacentRequest === request) photoAdjacentRequest = null;
     }
   }
 
@@ -598,9 +680,14 @@ export function createGalleryPage(deps) {
     const album = data?.album;
     if (album?.id !== id || !Array.isArray(album.images)) throw new Error("套图读取响应无效");
     const revision = photoImageRevision(album);
-    if (!revision) return album;
-    return { ...album, images: album.images.map(image => typeof image?.url === "string" && image.url
-      ? { ...image, url: addQueryParam(image.url, "archive", revision) } : image) };
+    const previewThreshold = Number(album.previewThresholdBytes) || 0;
+    if (!revision && !previewThreshold) return album;
+    return { ...album, images: album.images.map(image => {
+      if (typeof image?.url !== "string" || !image.url) return image;
+      const url = revision ? addQueryParam(image.url, "archive", revision) : image.url;
+      const preview = previewThreshold > 0 && Number(image.bytes) > previewThreshold;
+      return { ...image, url, ...(preview ? { previewUrl: addQueryParam(url, "preview", "1") } : {}) };
+    }) };
   }
 
   function replacePhotoReaderArchive(owner, album, cache) {
@@ -815,6 +902,8 @@ export function createGalleryPage(deps) {
     openMangaChapter,
     openMangaComic,
     openPhotoSet,
+    photoReaderNeighbors,
+    openAdjacentPhotoSet,
     closePhotoSet,
     openRouteTarget,
     resetReader,

@@ -12,7 +12,7 @@ import {
   normalizePlaybackSpeed,
   normalizeRepeat,
   normalizeSleepTimerMinutes
-} from "./format.js";
+} from "./format.js?v=20261113-music-track-sleep-01";
 
 const MUSIC_MODES = ["home", "library", "artists", "albums", "history", "playlist", "smart", "report"];
 const ALBUM_SORTS = ["updated", "title", "year", "tracks"];

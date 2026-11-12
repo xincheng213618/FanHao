@@ -2,7 +2,59 @@
 import { normalizePlaybackSpeed } from "./format.js";
 
 const MUSIC_LAST_TRACK_KEY = "fanhao.music.lastTrack";
+const MUSIC_QUEUE_KEY = "fanhao.music.queue.v1:";
 const MUSIC_PLAYBACK_SPEED_KEY = "fanhao.music.playbackSpeed";
+
+export function readMusicQueuePreference(owner) {
+  if (!owner) return null;
+  try {
+    const saved = JSON.parse(window.localStorage?.getItem(MUSIC_QUEUE_KEY + owner) || "null");
+    if (!Array.isArray(saved?.tracks) || typeof saved.currentId !== "string") return null;
+    const seen = new Set();
+    const tracks = [];
+    for (const item of saved.tracks) {
+      if (typeof item?.id !== "string" || !item.id || seen.has(item.id)) continue;
+      const track = queueTrackSnapshot(item);
+      try {
+        const id = encodeURIComponent(track.id);
+        track.coverUrl = track.hasCover ? `/media/music-cover/${id}` : "";
+        track.downloadUrl = track.hasDownload ? `/media/music-download/${id}` : "";
+      } catch { continue; }
+      seen.add(item.id);
+      tracks.push(track);
+    }
+    return { tracks, currentId: seen.has(saved.currentId) ? saved.currentId : "",
+      playlistId: typeof saved.playlistId === "string" ? saved.playlistId : "" };
+  } catch {
+    return null;
+  }
+}
+
+export function writeMusicQueuePreference(owner, tracks, currentId, playlistId) {
+  if (!owner) return false;
+  try {
+    const record = { tracks: tracks.map(queueTrackSnapshot), currentId };
+    if (playlistId) record.playlistId = playlistId;
+    window.localStorage.setItem(MUSIC_QUEUE_KEY + owner, JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function queueTrackSnapshot(track) {
+  return {
+    id: track.id,
+    title: typeof track.title === "string" ? track.title : "",
+    artist: typeof track.artist === "string" ? track.artist : "",
+    album: typeof track.album === "string" ? track.album : "",
+    durationMs: Number.isFinite(track.durationMs) ? Math.max(0, track.durationMs) : 0,
+    favorite: Boolean(track.favorite),
+    rating: Number.isInteger(track.rating) ? Math.max(0, Math.min(5, track.rating)) : 0,
+    hasCover: Boolean(track.coverUrl || track.hasCover),
+    hasDownload: Boolean(track.downloadUrl || track.hasDownload)
+  };
+}
 
 export function readLastTrackPreference() {
   try {

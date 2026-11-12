@@ -95,13 +95,15 @@ try {
   assert.equal(source.id, sameIdBeta.id, "fixture makes equal folder IDs in separate accounts");
   await api("/api/favorites/101", { token: alpha.token, body: { folderId: source.id } });
   await api("/api/favorites/102", { token: beta.token, body: { folderId: source.id } });
-  await api("/api/favorite-folders", { token: alpha.token, body: { name: "已看" } });
+  const mergeTarget = (await api("/api/favorite-folders", { token: alpha.token, body: { name: "已看" } })).folder;
   const context = await browser.newContext({ viewport: { width: 1180, height: 780 } });
   await context.addCookies([{ name: "fanhao_web_auth", value: alpha.token, url: origin }]);
   const page = await mount(context);
   assert.equal(await page.locator('[data-folder-mutation="delete"]').count(), 0, "all folders has no delete action");
+  assert.equal(await page.locator('[data-folder-mutation="merge"]').count(), 0, "all folders has no merge action");
   await select(page, "默认收藏");
   assert.equal(await page.locator('[data-folder-mutation="rename"]').count(), 0, "default folder cannot be renamed");
+  assert.equal(await page.locator('[data-folder-mutation="merge"]').count(), 0, "default folder cannot be a merge source");
   await select(page, "待观看");
   await page.evaluate(async () => {
     folderFixture.state.library.works = structuredClone(folderFixture.state.works);
@@ -159,6 +161,47 @@ try {
   await page.evaluate(() => folderFixture.page.loadFavorites());
   assert.equal(await page.getByRole("button", { name: /^保留记录 / }).count(), 0);
 
+  const mergeSource = (await api("/api/favorite-folders", { token: alpha.token, body: { name: "合并源" } })).folder;
+  await api("/api/favorites/101/folder", { token: alpha.token, method: "PUT", body: { folderId: mergeSource.id } });
+  await page.evaluate(() => { folderFixture.page.invalidatePrefetches(); return folderFixture.page.loadFavorites(); });
+  await select(page, mergeSource.name);
+  await page.evaluate(() => { folderFixture.state.currentWork = structuredClone(folderFixture.state.works[0]); });
+  let merges = 0;
+  const mergeUrl = `${origin}/api/favorite-folders/${encodeURIComponent(mergeSource.id)}/merge`;
+  await page.route(mergeUrl, async (route) => {
+    merges++;
+    if (merges === 1) return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "测试合并失败" }) });
+    return route.continue();
+  });
+  const openMerge = page.locator('[data-folder-mutation="merge"]');
+  const mergeDialog = page.getByRole("dialog", { name: "合并收藏夹" });
+  const mergeSelect = mergeDialog.getByRole("combobox", { name: "目标收藏夹" });
+  const mergeSubmit = mergeDialog.getByRole("button", { name: "合并并删除源收藏夹" });
+  await page.setViewportSize({ width: 390, height: 820 });
+  await openMerge.click();
+  assert.equal(await mergeSubmit.isDisabled(), true);
+  assert.equal(await mergeSelect.locator(`option[value="${mergeSource.id}"]`).count(), 0);
+  const bounds = await mergeDialog.boundingBox();
+  assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390);
+  await page.keyboard.press("Escape");
+  await mergeDialog.waitFor({ state: "hidden" });
+  assert.equal(merges, 0, "closing the merge dialog must not write");
+  await openMerge.click();
+  await mergeSelect.selectOption(mergeTarget.id);
+  await mergeSubmit.click();
+  await mergeDialog.getByText("测试合并失败").waitFor();
+  assert.equal(await mergeSelect.inputValue(), mergeTarget.id);
+  await mergeSubmit.click();
+  await mergeDialog.waitFor({ state: "hidden" });
+  await page.getByText("已将 1 部收藏合并到「已看」").waitFor();
+  assert.equal(merges, 2);
+  assert.equal(await page.getByRole("button", { name: /^合并源 / }).count(), 0);
+  assert.match(await page.locator(".fixture-work").textContent(), /ABC-101 · 已看/);
+  assert.equal(await page.evaluate(() => folderFixture.state.currentWork.favoriteFolderId), mergeTarget.id);
+  assert.equal(await page.evaluate(() => document.activeElement.dataset.favoriteFolder), mergeTarget.id);
+  await page.unroute(mergeUrl);
+  await page.setViewportSize({ width: 1180, height: 780 });
+
   // Account assertion rejects a stale page even when another login only changed the Cookie.
   await select(page, "已看");
   const betaFolder = (await api("/api/favorite-folders", { token: beta.token, body: { name: "已看" } })).folder;
@@ -170,7 +213,7 @@ try {
   await page.waitForLoadState("load");
   assert((await api("/api/favorite-folders", { token: beta.token })).folders.some(folder => folder.id === betaFolder.id));
   assert.deepEqual(errors, []);
-  console.log("Web personal folders passed: rename/delete UI, account isolation, retained favorites, validation, stale prefetch and stale identity.");
+  console.log("Web personal folders passed: rename/delete/merge UI, account isolation, retained favorites, validation, stale prefetch and stale identity.");
 } finally {
   await browser.close();
   await fixture.close();

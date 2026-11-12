@@ -61,6 +61,13 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
         plan?.arrived?.(); if (plan?.wait) await plan.wait;
         json(res, { people: [person], works: [], totals: {}, user: {}, access: { mode: "local" } }); return;
       }
+      if (url.pathname === "/api/favorite-folders" && req.method === "GET") {
+        const plan = current.directFolderLookup;
+        current.directFolderReads++;
+        plan?.arrived?.(); if (plan?.wait) await plan.wait;
+        if (plan?.error) { json(res, { error: plan.error }, 503); return; }
+        json(res, { folders: folderDtos(current) }); return;
+      }
       if (url.pathname === "/api/people/favorite-person") {
         const offset = Number(url.searchParams.get("offset") || 0), limit = Number(url.searchParams.get("limit") || 64);
         const favoriteOnly = (url.searchParams.get("filter") || "").split(",").includes("favorite");
@@ -79,12 +86,15 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
         if (await failMarkerRead(url, res)) return;
         if (query === "new-error") { json(res, { error: "Synthetic current query failure" }, 503); return; }
         const queried = url.pathname === "/api/favorites" ? current.works.filter(work => current.favorites.has(work.id)
-          && (!url.searchParams.get("folder") || (current.folderIds.get(work.id) || "default") === url.searchParams.get("folder")))
+          && (!url.searchParams.get("folder") || (current.folderIds.get(work.id) || "default") === url.searchParams.get("folder"))
+          && (!query || work.title.toLowerCase().includes(query.toLowerCase())))
           : query === "same-id" ? current.works.slice(0, 1) : current.works;
         const all = filterFixtureMarkerRows(url.pathname === "/api/search" && (url.searchParams.get("filter") || "").split(",").includes("favorite")
           ? queried.filter(work => current.favorites.has(work.id)) : queried, url);
         const payload = { works: all.slice(offset, offset + limit).map(work => fixtureWorkDto(work)), people: [], total: all.length, offset, limit, facets: { all: all.length }, folders: folderDtos(current), selectedFolderId: folder };
-        const plan = url.pathname === "/api/favorites" && current.favoriteRead?.folder === folder && !current.favoriteRead.used ? current.favoriteRead : null;
+        if (url.pathname === "/api/favorites" && query && !current.noFavoriteQueryEcho) payload.query = query;
+        const plan = url.pathname === "/api/favorites" && current.favoriteRead?.folder === folder && !current.favoriteRead.used
+          && (current.favoriteRead.query === undefined || current.favoriteRead.query === query) ? current.favoriteRead : null;
         if (plan) { plan.used = true; plan.arrived?.(); if (plan.wait) await plan.wait; if (plan.error) { json(res, { error: plan.error }, 503); return; } }
         await holdMarkerRead(url, payload); json(res, payload); return;
       }
@@ -102,6 +112,36 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
         if (payload.enabled) current.markers.add(id); else current.markers.delete(id);
         json(res, response); return;
       }
+      if (url.pathname === "/api/favorites/batch-move" && req.method === "PUT") {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const { workIds, folderId } = JSON.parse(body);
+        assert(current.batchWrites && workIds.every(id => current.favorites.has(id)) && folderId === "later");
+        current.batchWrites.push({ workIds, folderId });
+        const plan = current.mutation;
+        plan?.arrived?.();
+        if (plan?.wait) await plan.wait;
+        if (plan?.error) { json(res, { error: plan.error }, 503); return; }
+        for (const id of workIds) current.folderIds.set(id, folderId);
+        json(res, { ok: true, workIds, folderId, folders: folderDtos(current) }); return;
+      }
+      if (url.pathname === "/api/favorites/batch-remove" && req.method === "PUT") {
+        let body = "";
+        for await (const chunk of req) body += chunk;
+        const { workIds } = JSON.parse(body);
+        assert(current.batchRemoveWrites && Array.isArray(workIds) && workIds.length && workIds.every(id => current.works.some(work => work.id === id)));
+        current.batchRemoveWrites.push(workIds);
+        const plan = current.mutation;
+        plan?.arrived?.();
+        if (plan?.wait) await plan.wait;
+        if (plan?.error) { json(res, { error: plan.error }, 503); return; }
+        let removedCount = 0;
+        for (const id of workIds) {
+          if (current.favorites.delete(id)) removedCount++;
+          current.folderIds.delete(id);
+        }
+        json(res, { ok: true, workIds, removedCount, folders: folderDtos(current), user: { favoriteCount: current.favorites.size } }); return;
+      }
       if (/^\/api\/favorites\/f\d+\/folder$/.test(url.pathname) && req.method === "PUT") {
         let body = ""; for await (const chunk of req) body += chunk;
         const { folderId } = JSON.parse(body), id = url.pathname.split("/").at(-2), plan = current.mutation;
@@ -109,6 +149,21 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
         if (plan?.error) { json(res, { error: plan.error }, 503); return; }
         current.folderIds.set(id, folderId);
         json(res, { favorite: { folderId, folderName: folderId === "later" ? "稍后" : "默认" }, folders: folderDtos(current), user: {} }); return;
+      }
+      if (/^\/api\/favorites\/f\d+$/.test(url.pathname) && req.method === "PUT") {
+        let body = ""; for await (const chunk of req) body += chunk;
+        const { folderId } = JSON.parse(body), workId = url.pathname.split("/").at(-1), plan = current.directFolderMutation;
+        assert(current.works.some(work => work.id === workId));
+        assert(["default", "later"].includes(folderId));
+        current.directFolderWrites.push({ workId, folderId });
+        plan?.arrived?.(); if (plan?.wait) await plan.wait;
+        if (!plan?.error || plan.commitBeforeError) {
+          current.favorites.add(workId);
+          current.folderIds.set(workId, folderId);
+        }
+        if (plan?.error) { json(res, { error: plan.error }, plan.status || 503); return; }
+        json(res, { ok: true, workId, favorite: true, favoriteFolder: { folderId, folderName: folderId === "later" ? "稍后" : "默认" },
+          folders: folderDtos(current), user: { favoriteCount: current.favorites.size } }); return;
       }
       if (/^\/api\/favorites\/f\d+$/.test(url.pathname) && req.method === "POST") {
         const id = url.pathname.split("/").at(-1), plan = current.mutation;
@@ -133,6 +188,111 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
   const run = async (name, task) => { if (casePattern && !name.includes(casePattern)) return; await task(); checks++; console.log(`PASS ${name}`); };
   try {
     browser = await chromium.launch({ executablePath, headless: true });
+    if (!baseline) await run("direct favorite folder saves from the search card and keeps its 390px surface", async () => {
+      const page = await newPage(5, false, 390);
+      try {
+        await openSearch(page, "direct-folder");
+        const card = page.locator('.work-card[data-work-id="f0000"]');
+        const trigger = card.getByRole("button", { name: /选择收藏夹/ });
+        const picker = page.getByRole("dialog", { name: "选择收藏夹" });
+        await card.evaluate(node => { window.directFavoriteCard = node; });
+        const url = page.url(), reads = runtime.reads.length;
+        await trigger.press("Enter");
+        const select = picker.getByRole("combobox", { name: "收藏夹" });
+        await select.selectOption("later");
+        assert.equal(await picker.evaluate(node => {
+          const box = node.getBoundingClientRect();
+          return box.left >= 0 && box.right <= innerWidth && node.scrollWidth <= node.clientWidth;
+        }), true);
+        await picker.getByRole("button", { name: "保存", exact: true }).click();
+        await picker.waitFor({ state: "hidden" });
+        assert.deepEqual(runtime.directFolderWrites, [{ workId: "f0000", folderId: "later" }]);
+        assert.equal(runtime.directFolderReads, 1);
+        assert.equal(runtime.posts, 0);
+        assert.equal(runtime.reads.length, reads);
+        assert.equal(await star(page, "f0000").getAttribute("aria-label"), "取消收藏");
+        assert.match(await trigger.getAttribute("title"), /稍后/);
+        assert.equal(await trigger.evaluate(node => node === document.activeElement && node.closest(".work-card") === directFavoriteCard), true);
+        assert.equal(page.url(), url);
+        await page.goto(`${base}/fanhao/favorites?folder=later`);
+        await card.waitFor();
+        assert.equal(await card.getByRole("combobox", { name: "移动到收藏夹" }).inputValue(), "later");
+      } finally { await page.close(); }
+    });
+    if (!baseline) await run("direct favorite folder preserves the draft after errors and retries the same explicit save", async () => {
+      const page = await newPage(3);
+      try {
+        runtime.directFolderLookup = { error: "Synthetic folder lookup failure" };
+        await openSearch(page, "direct-folder");
+        const trigger = page.locator('.work-card[data-work-id="f0000"]').getByRole("button", { name: /选择收藏夹/ });
+        const picker = page.getByRole("dialog", { name: "选择收藏夹" });
+        const select = picker.getByRole("combobox"), save = picker.getByRole("button", { name: "保存", exact: true });
+        await trigger.click();
+        await picker.getByRole("status").getByText("Synthetic folder lookup failure").waitFor();
+        assert.equal(await save.isDisabled(), true);
+        runtime.directFolderLookup = null;
+        await picker.getByRole("button", { name: "重新读取收藏夹" }).click();
+        await select.selectOption("later");
+        runtime.directFolderMutation = { error: "Synthetic acknowledgement lost", commitBeforeError: true };
+        await save.click();
+        await picker.getByRole("status").getByText("Synthetic acknowledgement lost").waitFor();
+        assert.equal(await select.inputValue(), "later");
+        assert.equal(runtime.favorites.has("f0000"), true);
+        assert.equal(await star(page, "f0000").getAttribute("aria-label"), "收藏");
+        runtime.directFolderMutation = null;
+        await save.click();
+        await picker.waitFor({ state: "hidden" });
+        assert.deepEqual(runtime.directFolderWrites, ["later", "later"].map(folderId => ({ workId: "f0000", folderId })));
+        assert.equal(runtime.favorites.size, 1);
+        await trigger.click();
+        await select.selectOption("default");
+        await save.click();
+        await picker.waitFor({ state: "hidden" });
+        assert.equal(runtime.folderIds.get("f0000"), "default");
+        assert.equal(runtime.favorites.size, 1);
+      } finally { await page.close(); }
+    });
+    if (!baseline) await run("direct favorite folder retires its dialog on Back and reconciles a late save in the destination", async () => {
+      const page = await newPage(3), lookup = deferred(), saving = deferred();
+      const moveRoute = (route) => page.evaluate(route => {
+        history.pushState(null, "", route); dispatchEvent(new PopStateEvent("popstate"));
+      }, route);
+      try {
+        const trigger = page.locator('.work-card[data-work-id="f0000"]').getByRole("button", { name: /选择收藏夹/ });
+        const picker = page.getByRole("dialog", { name: "选择收藏夹" });
+        await openSearch(page, "direct-folder");
+        runtime.directFolderLookup = lookup;
+        await trigger.click();
+        await lookup.requested;
+        await page.goBack();
+        await page.locator(".person-index-card").waitFor();
+        lookup.release();
+        assert.equal(await picker.count(), 0);
+        assert.equal(runtime.directFolderWrites.length, 0);
+        runtime.directFolderLookup = null;
+        await openSearch(page, "direct-folder");
+        await trigger.click();
+        await picker.getByRole("combobox").selectOption("later");
+        runtime.directFolderMutation = saving;
+        await picker.getByRole("button", { name: "保存", exact: true }).click();
+        await saving.requested;
+        await picker.getByRole("button", { name: "关闭" }).press("Escape");
+        await picker.waitFor({ state: "hidden" });
+        assert.equal(await star(page, "f0000").isDisabled(), true);
+        await trigger.click();
+        await picker.getByRole("combobox").selectOption("default");
+        await picker.getByRole("button", { name: "保存", exact: true }).click();
+        await picker.getByRole("status").getByText("作品的收藏正在更新，请稍后重试").waitFor();
+        assert.deepEqual(runtime.directFolderWrites, [{ workId: "f0000", folderId: "later" }]);
+        await moveRoute("/fanhao/favorites?folder=later");
+        await page.locator('[data-favorite-folder="later"]').waitFor();
+        assert.equal(await picker.count(), 0);
+        saving.release();
+        await page.locator('.work-card[data-work-id="f0000"]').waitFor();
+        assert.equal(await page.locator('.work-card[data-work-id="f0000"] .favorite-folder-select').inputValue(), "later");
+        assert.equal(new URL(page.url()).searchParams.get("folder"), "later");
+      } finally { lookup.release(); saving.release(); await page.close(); }
+    });
     for (const failed of [false, true]) await run(`${baseline ? "baseline measures" : "1000-card favorite"} ${failed ? "rollback" : "success"}${baseline ? " on 1000 cards" : " retains the live grid"}`, async () => {
       const page = await newPage(1000); runtime.mutation = failed ? { error: "Synthetic favorite failure" } : null;
       try {
@@ -177,7 +337,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       for (const failed of [false, true]) await run(`late favorite ${failed ? "failure" : "success"} cannot replace a new query error`, async () => {
         const page = await newPage(3), pending = deferred(); runtime.mutation = { ...pending, error: failed ? "Synthetic obsolete favorite failure" : "" };
         try {
-          await openSearch(page, "small"); await star(page, "f0000").click(); await pending.requested;
+          await openSearch(page, "small"); await clickStar(page, "f0000"); await pending.requested;
           await openSearch(page, "new-error"); await page.locator(".search-error-state").waitFor();
           await page.locator("#workSearch").fill("后来的中文草稿"); await page.locator("#workSearch").evaluate(input => input.setSelectionRange(1, 4));
           const before = await querySurface(page); await releaseMutation(page, pending);
@@ -188,7 +348,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       await run("favorite completion synchronizes the same ID in a replacement grid", async () => {
         const page = await newPage(3), pending = deferred(); runtime.mutation = pending;
         try {
-          await openSearch(page, "small"); await star(page, "f0000").click(); await pending.requested;
+          await openSearch(page, "small"); await clickStar(page, "f0000"); await pending.requested;
           await openSearch(page, "same-id");
           await page.evaluate(() => { window.__replacementCard = document.querySelector('[data-work-id="f0000"]'); });
           await page.locator("#workSearch").focus(); await releaseMutation(page, pending);
@@ -199,7 +359,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       await run("favorite completion respects a newer input focus in the same grid", async () => {
         const page = await newPage(3), pending = deferred(); runtime.mutation = pending;
         try {
-          await openSearch(page, "small"); await star(page, "f0000").click(); await pending.requested;
+          await openSearch(page, "small"); await clickStar(page, "f0000"); await pending.requested;
           await page.locator("#workSearch").fill("未提交草稿"); await page.locator("#workSearch").evaluate(input => input.setSelectionRange(1, 3));
           await releaseMutation(page, pending);
           assert.deepEqual(await page.locator("#workSearch").evaluate(input => [input.value, input.selectionStart, input.selectionEnd, input === document.activeElement]), ["未提交草稿", 1, 3, true]);
@@ -220,7 +380,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       await run("ordinary unfavorite completion reconciles a newer mobile favorites grid", async () => {
         const page = await newPage(60, true, 390), pending = deferred(); runtime.mutation = pending;
         try {
-          await openSearch(page, "small"); await star(page, "f0000").click(); await pending.requested;
+          await openSearch(page, "small"); await clickStar(page, "f0000"); await pending.requested;
           await page.locator("#fanhaoNavigationButton").click(); await page.locator('[data-view="favorites"]').click();
           await star(page, "f0000").waitFor(); await star(page, "f0001").focus();
           await page.evaluate(() => { window.__favoriteRetained = document.querySelector('[data-work-id="f0001"]'); window.__favoriteFocus = document.activeElement; });
@@ -259,7 +419,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
           await page.goto(`${base}/fanhao?q=small`); await star(page, "f0000").waitFor(); await library.requested;
           const filtered = page.waitForResponse(response => new URL(response.url()).pathname === "/api/search" && new URL(response.url()).searchParams.get("filter") === "favorite");
           await page.locator('[data-work-filter="favorite"]').click(); await (await filtered).finished();
-          await star(page, "f0000").click(); await pending.requested;
+          await clickStar(page, "f0000"); await pending.requested;
           await page.evaluate(() => { window.__favoriteBeforeHistory = document.querySelector('[data-work-id="f0000"] .favorite-button'); });
           if (replaced) await openSearch(page, "same-id");
           await page.goBack({ waitUntil: "commit" });
@@ -278,7 +438,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       await run("favorite completion refreshes a genuinely replaced filtered grid", async () => {
         const page = await newPage(3, true), pending = deferred(); runtime.mutation = pending;
         try {
-          await openSearch(page, "small"); await star(page, "f0000").click(); await pending.requested;
+          await openSearch(page, "small"); await clickStar(page, "f0000"); await pending.requested;
           await openSearch(page, "same-id");
           const filtered = page.waitForResponse(response => new URL(response.url()).pathname === "/api/search" && new URL(response.url()).searchParams.get("filter") === "favorite");
           await page.locator('[data-work-filter="favorite"]').click(); await (await filtered).finished();
@@ -302,6 +462,91 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       });
     }
     if (!baseline) {
+      await run("favorite search finds deep matches, pages within its folder and restores the route", async () => {
+        const page = await newPage(145, true, 320);
+        for (const work of runtime.works.slice(65, 139)) {
+          work.title += " 合成专题";
+          runtime.folderIds.set(work.id, "later");
+        }
+        runtime.works[135].title += " 深处目标";
+        runtime.works[143].title += " 深处目标";
+        const search = page.getByRole("searchbox", { name: "收藏内查找" });
+        try {
+          await page.goto(`${base}/fanhao/favorites?folder=later&q=${encodeURIComponent("深处目标")}`);
+          await page.locator('.work-card[data-work-id="f0135"]').waitFor();
+          assert.equal(await page.locator(".work-card").count(), 1);
+          assert.equal(await search.inputValue(), "深处目标");
+          assert.equal(await page.locator("#currentPath").textContent(), "稍后 · 1 部匹配");
+          assert.deepEqual(runtime.reads.filter(read => read.path === "/api/favorites").map(({ folder, query, offset }) => [folder, query, offset]), [["later", "深处目标", 0]]);
+          assert(await search.evaluate(node => node.getBoundingClientRect().right <= innerWidth && document.documentElement.scrollWidth <= innerWidth + 1));
+          await page.locator('.favorite-folder-controls [data-favorite-folder="all"]').click();
+          await page.locator('.work-card[data-work-id="f0143"]').waitFor();
+          assert.equal(await page.locator(".work-card").count(), 2);
+          await search.fill("未提交的草稿");
+          await page.goBack();
+          await page.waitForFunction(() => document.querySelectorAll(".work-card").length === 1);
+          assert.equal(new URL(page.url()).searchParams.get("folder"), "later");
+          assert.equal(await search.inputValue(), "深处目标");
+          await search.fill("合成专题");
+          await search.evaluate(node => { window.__favoriteSearchInput = node; });
+          await search.press("Enter");
+          await page.locator('.work-card[data-work-id="f0065"]').waitFor();
+          assert(await search.evaluate(node => node === __favoriteSearchInput && node === document.activeElement));
+          await loadAll(page, 74);
+          assert.deepEqual(runtime.reads.filter(read => read.path === "/api/favorites" && read.query === "合成专题").map(({ folder, offset }) => [folder, offset]), [["later", 0], ["later", 48]]);
+          await page.getByRole("button", { name: "清除搜索", exact: true }).press("Enter");
+          await page.waitForFunction(() => !new URL(location.href).searchParams.has("q") && document.querySelectorAll(".work-card").length > 0);
+          assert.equal(new URL(page.url()).searchParams.get("folder"), "later");
+          assert.equal(await search.inputValue(), "");
+          assert.equal(runtime.reads.some(read => read.path === "/api/search"), false);
+          assert.equal(runtime.posts + runtime.puts, 0);
+        } finally { await page.close(); }
+      });
+
+      await run("favorite search ignores retired reads and lets old services clear the filter", async () => {
+        const page = await newPage(30, true, 1280, true), old = deferred();
+        runtime.favoriteRead = { ...old, folder: "all", query: "Synthetic 0001" };
+        const search = page.getByRole("searchbox", { name: "收藏内查找" });
+        try {
+          await page.goto(`${base}/fanhao/favorites`);
+          await page.locator('.work-card[data-work-id="f0000"]').waitFor();
+          await search.fill("Synthetic 0001"); await search.press("Enter"); await old.requested;
+          await search.fill("Synthetic 0028"); await search.press("Enter");
+          await page.locator('.work-card[data-work-id="f0028"]').waitFor();
+          old.release();
+          await page.waitForFunction(() => __favoriteReadSettled.some(url => new URL(url, location.href).searchParams.get("q") === "Synthetic 0001"));
+          assert.deepEqual(await page.locator(".work-card").evaluateAll(rows => rows.map(row => row.dataset.workId)), ["f0028"]);
+          runtime.noFavoriteQueryEcho = true;
+          await search.fill("Synthetic 0029"); await search.press("Enter");
+          await page.getByText("当前服务未返回收藏搜索结果，清除搜索可继续浏览。").waitFor();
+          assert.equal(await page.locator(".work-card").count(), 0);
+          await page.getByRole("button", { name: "清除搜索", exact: true }).click();
+          await page.locator('.work-card[data-work-id="f0000"]').waitFor();
+          assert.equal(await search.inputValue(), "");
+        } finally { old.release(); await page.close(); }
+      });
+
+      await run("favorite search keeps its query and result count after removing the final match", async () => {
+        const page = await newPage(3, true);
+        try {
+          await page.goto(`${base}/fanhao/favorites?q=Synthetic+0002`);
+          const match = star(page, "f0002");
+          await match.waitFor();
+          await postClick(page, match);
+          await page.getByText("当前收藏中没有匹配的作品。", { exact: true }).waitFor();
+          assert.equal(await page.locator("#currentPath").textContent(), "全部收藏 · 0 部匹配");
+          assert.equal(await page.getByRole("searchbox", { name: "收藏内查找" }).inputValue(), "Synthetic 0002");
+          assert.equal(new URL(page.url()).searchParams.get("q"), "Synthetic 0002");
+          await page.getByRole("button", { name: "清除搜索", exact: true }).click();
+          await loadAll(page, 2);
+        } finally { await page.close(); }
+      });
+      await run("favorite batch move keeps cross-page selection through failure and retry", verifyFavoriteBatchRetry);
+      await run("favorite batch move receipt leaves a newer search in place", verifyFavoriteBatchNavigation);
+      await run("favorite batch removal confirms once and retries without losing cross-page selection", verifyFavoriteBatchRemoval);
+      for (const failure of [false, true]) {
+        await run(`favorite batch removal ${failure ? "failure" : "receipt"} settles the same work without replacing a newer search`, () => verifyFavoriteBatchRemovalNavigation(failure));
+      }
       await run("favorite folder destination loaded empty refreshes after the confirmed move", async () => {
         const page = await newPage(3, true), pending = deferred(); runtime.mutation = pending;
         try {
@@ -427,6 +672,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
   async function newPage(count, favorites = false, width = 1280, ignoreFavoriteAbort = false) {
     runtime = { works: Array.from({ length: count }, (_, index) => ({ id: `f${String(index).padStart(4, "0")}`, title: `Synthetic ${String(index).padStart(4, "0")}`, remoteCoverUrl: `/fixture-cover/${index}.svg`, videoCount: 1, playableCount: 1 })), favorites: new Set(), coverRequests: 0, lastCoverAt: 0, reads: [], posts: 0, mutation: null, libraryRead: null };
     runtime.folderIds = new Map(); runtime.puts = 0; runtime.folderWrites = [];
+    runtime.directFolderWrites = []; runtime.directFolderReads = 0;
     if (favorites) runtime.works.forEach(work => runtime.favorites.add(work.id));
     const page = await browser.newPage({ viewport: { width, height: 900 } }); page.on("pageerror", error => faults.push(error.message));
     await page.addInitScript(({ ignoreFavoriteAbort }) => {
@@ -450,12 +696,147 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
     }, { ignoreFavoriteAbort });
     return page;
   }
+  async function verifyFavoriteBatchRetry() {
+    const page = await newPage(51, true, 390);
+    runtime.batchWrites = [];
+    runtime.mutation = { error: "Synthetic batch persistence failure" };
+    const cardSelect = id => page.locator(`[data-favorite-batch-work="${id}"]`);
+    const control = key => page.locator(`[data-favorite-batch="${key}"]`);
+    try {
+      await page.goto(`${base}/fanhao/favorites`);
+      await page.locator('[data-favorite-folder="default"]').click();
+      await control("open").click();
+      await cardSelect("f0000").check();
+      await control("target").evaluate(node => { window.fixtureBatchTarget = node; });
+      await loadAll(page, 51);
+      assert.equal(await control("target").evaluate(node => node === window.fixtureBatchTarget), true, "loading more cards must retain the native batch controls");
+      assert.equal(await cardSelect("f0000").isChecked(), true, "appending a page discarded the earlier selection");
+      await cardSelect("f0050").check();
+      await control("target").selectOption("later");
+      await control("move").click();
+      await page.getByText("Synthetic batch persistence failure", { exact: true }).waitFor();
+      assert.equal(await cardSelect("f0000").isChecked(), true);
+      assert.equal(await cardSelect("f0050").isChecked(), true);
+      assert.equal(await control("target").inputValue(), "later");
+      assert.equal(runtime.folderIds.size, 0);
+      runtime.mutation = null;
+      await control("move").click();
+      await page.getByText("已将 2 部作品归入「稍后」", { exact: true }).waitFor();
+      assert.equal(await cardSelect("f0000").count(), 0);
+      assert.equal(await control("move").isVisible(), false);
+      const write = { workIds: ["f0000", "f0050"], folderId: "later" };
+      assert.deepEqual(runtime.batchWrites, [write, write]);
+      assert.equal(runtime.puts, 0, "the batch must not make one request per work");
+      await page.locator('[data-favorite-folder="later"]').click();
+      await page.locator('.work-card[data-work-id="f0050"]').waitFor();
+      assert.equal(await page.locator(".work-card").count(), 2);
+    } finally { await page.close(); }
+  }
+  async function verifyFavoriteBatchNavigation() {
+    const page = await newPage(3, true), pending = deferred();
+    runtime.batchWrites = [];
+    runtime.mutation = pending;
+    const control = key => page.locator(`[data-favorite-batch="${key}"]`);
+    try {
+      await page.goto(`${base}/fanhao/favorites`);
+      await control("open").click();
+      await control("all").click();
+      await control("target").selectOption("later");
+      await control("move").click();
+      await pending.requested;
+      assert.equal(await control("move").isDisabled(), true);
+      await openSearch(page, "same-id");
+      const surface = await querySurface(page);
+      await releaseMutation(page, pending, "PUT");
+      assert.deepEqual(await querySurface(page), surface);
+      assert.equal(await control("move").count(), 0);
+      assert.equal(runtime.batchWrites.length, 1);
+      assert.equal(runtime.batchWrites[0].workIds.length, 3);
+    } finally { pending.release(); await page.close(); }
+  }
+  async function verifyFavoriteBatchRemoval() {
+    const page = await newPage(51, true, 320);
+    runtime.batchRemoveWrites = [];
+    runtime.defaultFolderOnly = true;
+    const control = key => page.locator(`[data-favorite-batch="${key}"]`);
+    const selected = id => page.locator(`[data-favorite-batch-work="${id}"]`);
+    const card = id => page.locator(`.work-card[data-work-id="${id}"]`);
+    const confirmations = [];
+    let allow = false;
+    page.on("dialog", dialog => {
+      confirmations.push(dialog.message());
+      return allow ? dialog.accept() : dialog.dismiss();
+    });
+    try {
+      await page.goto(`${base}/fanhao/favorites?folder=default`);
+      await control("open").click();
+      assert.equal(await control("move").isVisible(), false, "batch management must work with a single default folder");
+      assert.equal(await control("remove").isDisabled(), true);
+      await selected("f0000").check();
+      await loadAll(page, 51);
+      assert.equal(await selected("f0000").isChecked(), true);
+      await selected("f0050").check();
+      await control("clear").click();
+      assert.equal(await control("summary").textContent(), "已选 0 部");
+      await selected("f0000").check(); await selected("f0050").check();
+      await control("remove").click();
+      assert.deepEqual(confirmations, ["取消收藏选中的 2 部作品？"]);
+      assert.deepEqual(runtime.batchRemoveWrites, []);
+      assert.equal(await selected("f0050").isChecked(), true);
+      allow = true;
+      runtime.mutation = { error: "Synthetic batch removal failure" };
+      await control("remove").click();
+      await page.getByText("Synthetic batch removal failure", { exact: true }).waitFor();
+      assert.equal(await selected("f0000").isChecked(), true);
+      assert.equal(await selected("f0050").isChecked(), true);
+      await card("f0001").evaluate(node => { window.fixtureRetainedFavorite = node; });
+      const reads = runtime.reads.length;
+      runtime.mutation = null;
+      await control("remove").press("Enter");
+      await page.getByText("已取消收藏 2 部作品", { exact: true }).waitFor();
+      assert.deepEqual(runtime.batchRemoveWrites, [["f0000", "f0050"], ["f0000", "f0050"]]);
+      assert.equal(runtime.posts, 0, "batch removal must use the explicit atomic action");
+      assert.equal(runtime.reads.length, reads, "confirmed removal must retain the loaded collection without a replacement read");
+      assert.equal(await page.locator(".work-card").count(), 49);
+      assert.equal(await card("f0000").count(), 0);
+      assert.equal(await card("f0050").count(), 0);
+      assert.equal(await card("f0001").evaluate(node => node === window.fixtureRetainedFavorite), true);
+      await page.waitForFunction(() => document.activeElement?.dataset.favoriteBatch === "open");
+    } finally { await page.close(); }
+  }
+  async function verifyFavoriteBatchRemovalNavigation(failure) {
+    const page = await newPage(3, true), pending = deferred();
+    runtime.batchRemoveWrites = [];
+    runtime.mutation = pending;
+    if (failure) pending.error = "Synthetic late batch removal failure";
+    page.on("dialog", dialog => dialog.accept());
+    const control = key => page.locator(`[data-favorite-batch="${key}"]`);
+    try {
+      await page.goto(`${base}/fanhao/favorites`);
+      await control("open").click();
+      await page.locator('[data-favorite-batch-work="f0000"]').check();
+      await control("remove").click(); await pending.requested;
+      await openSearch(page, "Synthetic");
+      const surface = await querySurface(page);
+      assert.equal(await star(page, "f0000").isDisabled(), true, "in-flight batch work owns the same star in a newer view");
+      await releaseMutation(page, pending, "PUT");
+      assert.deepEqual(await querySurface(page), surface);
+      assert.equal(await star(page, "f0000").getAttribute("aria-label"), failure ? "取消收藏" : "收藏");
+      assert.equal(await star(page, "f0000").isDisabled(), false);
+      assert.equal(await star(page, "f0001").getAttribute("aria-label"), "取消收藏");
+      assert.equal(await control("remove").count(), 0);
+    } finally { pending.release(); await page.close(); }
+  }
   function deferred() {
     let release, arrived;
     const pending = { requested: new Promise(resolve => { arrived = resolve; }), wait: new Promise(resolve => { release = resolve; }), arrived: () => arrived(), release: () => { gates.delete(pending); release(); } };
     gates.add(pending); return pending;
   }
   function star(page, id) { return page.locator(`.work-card[data-work-id="${id}"] .favorite-button`); }
+  async function clickStar(page, id) {
+    await page.locator(`.work-card[data-work-id="${id}"] .work-cover`).hover();
+    await star(page, id).click();
+  }
   async function openSearch(page, query) {
     if (page.url() === "about:blank") { await page.goto(`${base}/fanhao`); await page.locator(".person-index-card").waitFor(); }
     await page.locator("#workSearch").fill(query); await page.locator("#workSearch").press("Enter");
@@ -1506,7 +1887,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
           assert.equal(await empty.evaluate(node => node.isConnected), false);
           assert.equal(await marker(page).getAttribute("aria-pressed"), "true"); assert.equal(await marker(page).getAttribute("aria-label"), "移除 A 标记");
           if (kind === "query") assert.equal(await page.locator("#statsRow .stat").filter({ hasText: "当前筛选" }).locator("strong").textContent(), "1");
-          else assert.match(await page.locator(".browse-result-summary").textContent(), /1/);
+          else assert.equal(await page.locator("#workGrid .load-more-row").count(), 0);
           assert.equal(page.url(), before.url, "accepted empty refresh must retain its committed canonical destination");
           assert.deepEqual(await input.evaluate(node => [node.value, node.selectionStart, node.selectionEnd, node.selectionDirection, node === document.activeElement]), beforeInput, "accepted empty refresh must preserve the newer raw draft, caret and native focus");
           assert.deepEqual(await page.evaluate(() => __alerts), []);
@@ -1532,7 +1913,11 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
         else await page.locator('[data-work-filter="localMarkedA"]').click();
         const first = await completed; await first.finished(); const old = await first.json();
         for (let attempt = 0; attempt < 80 && await page.locator("#workGrid .work-card").count() < 48; attempt++) {
-          await page.evaluate(() => document.querySelector("#workGrid .work-render-sentinel")?.scrollIntoView({ block: "center" }));
+          // Let the render lookahead append its batch without scrolling to the end of the loaded page.
+          await page.evaluate(() => {
+            const sentinel = document.querySelector("#workGrid .work-render-sentinel");
+            if (sentinel) window.scrollBy({ top: sentinel.getBoundingClientRect().top - innerHeight - 550, behavior: "instant" });
+          });
           await page.waitForTimeout(20);
         }
         await page.evaluate(() => window.scrollTo(0, 0)); await pendingResponse(page);
@@ -1594,7 +1979,6 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
           assert.equal(page.url(), before.url);
           assert.deepEqual(await input.evaluate(node => [node.value, node.selectionStart, node.selectionEnd, node.selectionDirection, node === document.activeElement]), inputBefore, "nonempty membership refresh must preserve the later raw draft, caret and native focus");
           if (kind === "query") assert.equal(await page.locator("#statsRow .stat").filter({ hasText: "当前筛选" }).locator("strong").textContent(), "61");
-          else assert.match(await page.locator(".browse-result-summary").textContent(), /61/);
           await loadAll(page, 61);
           const ids = await page.locator("#workGrid .work-card").evaluateAll(nodes => nodes.map(node => node.dataset.workId));
           assert.equal(new Set(ids).size, 61); assert.deepEqual([...ids].sort(), runtime.works.map(work => work.id).sort());
@@ -2001,6 +2385,7 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
           assert.equal(await marker(page).getAttribute("aria-disabled"), "true", "a same-ID replacement button must reflect the pending marker write");
           const writes = runtime.markerWrites.length; await marker(page).evaluate(node => node.click()); await pendingResponse(page);
           assert.equal(runtime.markerWrites.length, writes);
+          await page.locator('.work-card[data-work-id="f0000"] .work-cover').hover();
           await postClick(page, star(page, "f0000"));
           await page.locator("#workSearch").fill("更晚的中文草稿"); await page.locator("#workSearch").evaluate(node => node.setSelectionRange(1, 5, "backward"));
           await page.evaluate(() => { globalThis.__markerReplacement = document.querySelector('.work-card[data-work-id="f0000"]'); });
@@ -2064,13 +2449,12 @@ export async function runFanhaoFavoriteUpdates({ casePattern = "", sourceOverrid
       const reads = runtime.markerApiCalls.slice(before).filter(read => read.method === "GET" && memberScope(new URL(`${read.path}${read.query}`, base)));
       assert.deepEqual(reads.map(read => Number(new URL(`${read.path}${read.query}`, base).searchParams.get("offset") || 0)), [0, 48], "pending marker membership must refresh once from zero and continue at its raw prefix");
       if (kind === "query") assert.equal(await page.locator("#statsRow .stat").filter({ hasText: "当前筛选" }).locator("strong").textContent(), "59");
-      else assert.match(await page.locator(".browse-result-summary").textContent(), /59/);
       assert.equal(runtime.markerWrites.length, 1); await markerSafety(page);
     } finally { pending.release(); reading.release(); await page.close(); }
   }
 }
 function folderDtos(runtime) {
-  return [["default", "默认"], ["later", "稍后"]].map(([id, name]) => ({ id, name,
+  return (runtime.defaultFolderOnly ? [["default", "默认"]] : [["default", "默认"], ["later", "稍后"]]).map(([id, name]) => ({ id, name,
     count: [...runtime.favorites].filter(workId => (runtime.folderIds.get(workId) || "default") === id).length }));
 }
 function respond(res, body, type, status = 200) { if (!res.destroyed) { res.writeHead(status, { "Content-Type": type, "Cache-Control": "no-store" }); res.end(body); } }
@@ -2104,7 +2488,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       { name: "favorite-folder retry viewport ownership", casePattern: "favorite folder retry cleanup respects newer viewport intent", folderRetryMode: "wheel", marker: "clearFavoriteFolderError(control, ownsOrigin, !newerRecoveryViewportGesture);", replacement: "clearFavoriteFolderError(control, ownsOrigin, true);", failure: /new viewport intent must survive successful folder retry cleanup/ },
       { name: "favorite-folder repeated retry pointer ownership", casePattern: "favorite folder retry cleanup respects newer viewport intent", folderRetryMode: "repeated-pointer", marker: 'if (event.type === "pointerdown" && folderRetry.contains(event.target)) return;', replacement: "", failure: /restored folder retry control must be fully visible below the sticky header/ },
       { name: "favorite-folder in-place update", casePattern: "favorite folder update retains", marker: 'if (kind === "folder" && !removedWorkIds.length && foldersSynced) return true;', replacement: "if (false) return true;", failure: /a favorite-folder update must retain all 1000 existing work cards/ },
-      { name: "favorite-folder pending replacement control", casePattern: "favorite folder pending follows", marker: "select.disabled = isFavoriteFolderPending(work.id);", replacement: "select.disabled = false;", failure: /a replacement folder select must reflect the outstanding same-work write/ },
+      { name: "favorite-folder pending replacement control", casePattern: "favorite folder pending follows", marker: 'select.disabled = isFavoriteFolderPending(work.id);\n  select.addEventListener("click"', replacement: 'select.disabled = false;\n  select.addEventListener("click"', failure: /a replacement folder select must reflect the outstanding same-work write/ },
       { name: "pending history URL ownership", casePattern: "favorite completion yields to history waiting for the initial library after grid replacement", marker: 'if (state.activeView !== "search" || (route.view === "search" && route.q === state.searchQuery)) {\n            refreshFavoriteFilteredWorks();\n          }', replacement: "refreshFavoriteFilteredWorks();", failure: /an obsolete visible favorite control must not restart its old filtered search during history navigation/ },
       { name: "raw history query normalization", casePattern: "favorite completion refreshes a genuinely replaced filtered grid", marker: 'const route = normalizeRoute(routeFromUrl());\n          if (state.activeView !== "search"', replacement: 'const route = routeFromUrl();\n          if (state.activeView !== "search"', failure: /a genuinely new filtered grid must still refresh its changed membership/ },
       { name: "pending destination folder shape", source: collectionPage, path: "/modules/fanhao/features/collections/collection-page.js", casePattern: "favorite folder destination held read", marker: "request.favoriteShape = requestShape(path);", replacement: 'request.favoriteShape = "";', failure: /commit must replace the pending destination snapshot with a fresh same-condition read/ },

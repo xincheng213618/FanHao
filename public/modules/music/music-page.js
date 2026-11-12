@@ -3,27 +3,30 @@
 // 把 DOM 事件接到 actions（唯一编排层）；向 actions 提供 view 回调（视图更新）。
 // 所有业务逻辑、HTTP、audio 控制都在其它模块，这里不再重复实现。
 
-import { ensureMusicState } from "./state.js";
-import { createMusicApi } from "./api.js?v=20261004-music-progress-01";
-import { createMusicPlayer } from "./player/engine.js?v=20261004-music-progress-01";
-import { createMusicActions } from "./actions.js?v=20261004-music-list-02";
+import { ensureMusicState } from "./state.js?v=20261113-music-track-sleep-01";
+import { createMusicApi } from "./api.js?v=20261113-music-batch-remove-01";
+import { createMusicPlayer } from "./player/engine.js?v=20261113-music-track-sleep-01";
+import { createMusicActions } from "./actions.js?v=20261113-music-track-sleep-01";
+import { isLocalTrackSearch, matchingTrackPositions } from "./list-search.js";
 import { createComponents } from "./views/components.js";
 import { createLyricFinder } from "./views/lyric-finder.js";
 import { createMusicHome } from "./views/home.js";
 import { captureWebAccount } from "../../platform/accounts/session-context.js";
-import { formatSeconds, collapseDuplicateTracks } from "./format.js";
+import { formatSeconds, collapseDuplicateTracks } from "./format.js?v=20261113-music-track-sleep-01";
 import {
+  MUSIC_SLEEP_AFTER_CURRENT,
   MUSIC_SLEEP_TIMER_OPTIONS,
   MUSIC_PLAYBACK_SPEED_OPTIONS,
   MUSIC_LIBRARY_SEARCH_DEBOUNCE_MS,
   MUSIC_LIBRARY_CLEAR_DEBOUNCE_MS,
   MUSIC_CATALOG_SEARCH_DEBOUNCE_MS,
   MUSIC_SUGGEST_MIN_CHARACTERS,
+  MUSIC_PLAYLIST_TRACK_LIMIT,
   MUSIC_KEYBOARD_SEEK_SECONDS,
   MUSIC_KEYBOARD_FAST_SEEK_SECONDS,
   DESKTOP_QUEUE_PREVIEW_LIMIT,
   DESKTOP_QUEUE_PAGE_SIZE
-} from "./constants.js";
+} from "./constants.js?v=20261113-music-track-sleep-01";
 
 export function createMusicPage(deps) {
   const {
@@ -82,6 +85,8 @@ export function createMusicPage(deps) {
   let appendViewportRestore = null;
   let playlistDialogEvents = null;
   let queueSearchState = null;
+  let trackSelection = null;
+  let trackSelectionFeedback = null;
   const queueViews = new WeakMap();
 
   // ---- 播放引擎（拥有 audio / 可视化 / MediaSession / 睡眠定时）----
@@ -102,8 +107,13 @@ export function createMusicPage(deps) {
         updateLyricHighlight();
         actions.saveProgressSoon();
       },
-      onEnded: () => {
-        actions.saveProgressSoon(0, { immediate: true });
+      onEnded: ({ stopAfterCurrent }) => {
+        if (stopAfterCurrent && document.hidden) actions.flushProgressKeepalive(0);
+        else actions.saveProgressSoon(0, { immediate: true });
+        if (stopAfterCurrent) {
+          updatePlaybackUi();
+          return;
+        }
         if (state.music.repeat === "one") {
           const audio = player.getAudio();
           audio.currentTime = 0;
@@ -168,6 +178,10 @@ export function createMusicPage(deps) {
   const view = {
     refresh: () => renderView(),
     cancelNavigationTimers,
+    cancelTrackSelection() {
+      trackSelection = null;
+      trackSelectionFeedback = null;
+    },
     setMusicListLoadingState,
     setTrackOpeningState,
     refreshQueueSurface,
@@ -175,6 +189,8 @@ export function createMusicPage(deps) {
     refreshLibrarySidebars,
     refreshSidebarPlaylists,
     refreshPlaylistDialog,
+    trackSelectionPlaylistSaved,
+    trackSelectionPlaylistAdded,
     refreshMusicLibraryContent,
     appendLibraryTrackPage,
     appendSearchTrackPage,
@@ -345,6 +361,7 @@ export function createMusicPage(deps) {
     resetReader();
     trackReturnContext = readTrackReturnHistory(route) || (route.musicTrackId ? { fresh: true } : null);
     if (trackReturnContext?.route) route = { ...route, ...trackReturnContext.route, musicTrackId: route.musicTrackId };
+    state.music.playlistDialogBatch = null;
     state.music.libraryDrawerOpen = false;
     state.music.playlistDialogOpen = false;
     state.music.playlistDialogTrackId = "";
@@ -369,7 +386,7 @@ export function createMusicPage(deps) {
     ensureState();
     const navigation = resetReader();
     if (route.musicTrackId) {
-      const track = await actions.openTrack(route.musicTrackId, { skipRoute: true, autoplay: false, openPage: true });
+      const track = await actions.openTrack(route.musicTrackId, { skipRoute: true, autoplay: false, openPage: true, restoreRouteQueue: true });
       if (!track || !actions.isNavigationCurrent(navigation) || state.music.openingTrackId || track.id !== state.music.current?.id) return;
       if (!state.music.data) actions.loadMusic({ skipRoute: true, background: true, keepCurrent: true, restoreLast: false }).catch(showError);
       return;
@@ -500,7 +517,7 @@ export function createMusicPage(deps) {
     currentTrackIndicatorMap = new Map();
     suggestionBox = null;
     const nextPanel = renderTrackPanel();
-    const retained = retainMusicSortControls(currentPanel, nextPanel);
+    const retained = retainScopedTrackSearch(currentPanel, nextPanel) || retainMusicSortControls(currentPanel, nextPanel);
     if (!retained) currentPanel.replaceWith(nextPanel);
     refreshLibrarySidebars();
     setTrackOpeningState(state.music.openingTrackId);
@@ -532,6 +549,21 @@ export function createMusicPage(deps) {
     // select into a replacement panel dismisses it and blurs keyboard focus.
     for (const child of [...controls.children]) if (child !== sort) child.remove();
     for (const child of [...nextControls.children]) if (child !== nextSort) controls.insertBefore(child, sort);
+    return replaceMusicPanelContent(currentPanel, nextPanel, controls, nextControls);
+  }
+
+  function retainScopedTrackSearch(currentPanel, nextPanel) {
+    const scope = nextPanel.dataset.musicSearchScope;
+    if (!scope || currentPanel.dataset.musicSearchScope !== scope) return false;
+    const controls = currentPanel.querySelector(".music-controls"), nextControls = nextPanel.querySelector(".music-controls");
+    const input = controls?.querySelector("input"), nextInput = nextControls?.querySelector("input");
+    if (!input || !nextInput || (currentPanel.dataset.musicListQuery !== nextPanel.dataset.musicListQuery
+      && input.value.trim() !== nextInput.value)) return false;
+    currentPanel.dataset.musicListQuery = nextPanel.dataset.musicListQuery;
+    return replaceMusicPanelContent(currentPanel, nextPanel, controls, nextControls);
+  }
+
+  function replaceMusicPanelContent(currentPanel, nextPanel, controls, nextControls) {
     for (const child of [...currentPanel.children]) if (child !== controls) child.remove();
     let afterControls = false;
     for (const child of [...nextPanel.children]) {
@@ -555,6 +587,10 @@ export function createMusicPage(deps) {
       const items = musicListItems(input.closest(".music-track-panel"));
       const records = items.map(item => listResultRecords.get(item)).filter(Boolean);
       return { more: more.owner, ids: new Set(records.flatMap(item => [item.id, ...(item.duplicateIds || [])]).filter(Boolean).map(String)), results: new Set(records) };
+    }
+    if (input?.dataset?.musicSelectTrack || input?.dataset?.musicSelectControl) {
+      return { trackSelectionFocus: input.dataset.musicSelectTrack, trackSelectionControl: input.dataset.musicSelectControl,
+        owner: currentListOwner() };
     }
     const alphabet = input?.closest?.(".music-alpha-index");
     if (alphabet && input.matches(".music-alpha-index-item")) return { letter: input.dataset.musicLetter || "", mode: alphabet.dataset.musicAlphaMode };
@@ -596,9 +632,18 @@ export function createMusicPage(deps) {
         target.addEventListener("keydown", event => { if (event.key !== "Escape") event.stopPropagation(); });
         (panel.querySelector(".music-track-table, .music-artist-browser-grid, .music-album-browser-grid") || panel).append(target);
       }
-      target.focus({ preventScroll: true });
+      const selectionInput = target.querySelector("[data-music-select-track]");
+      (selectionInput || target).focus({ preventScroll: true });
       if (!focus.keepViewport) target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
       markAppendPosition(panel);
+      return;
+    }
+    if (focus?.trackSelectionFocus || focus?.trackSelectionControl) {
+      if (!isListOwnerCurrent(focus.owner)) return;
+      const target = focus.trackSelectionFocus
+        ? shell.querySelector(`[data-music-select-track="${CSS.escape(focus.trackSelectionFocus)}"]`)
+        : shell.querySelector(`[data-music-select-control="${focus.trackSelectionControl}"]`);
+      (target || shell.querySelector('[data-music-select-control="all"], [data-music-select-control="open"]'))?.focus({ preventScroll: true });
       return;
     }
     if (focus?.letter !== undefined) {
@@ -1152,20 +1197,44 @@ export function createMusicPage(deps) {
     if (state.music.mode === "artists") return renderArtistPanel();
     if (state.music.mode === "albums") return renderAlbumPanel();
     const failure = actions.getListReadFailure();
+    const tracks = state.music.data?.tracks || [];
+    const mode = state.music.mode;
+    const localSearch = isLocalTrackSearch(mode);
+    const scopedSearch = localSearch || mode === "smart";
+    const query = state.music.query || "";
+    const positions = localSearch && query ? matchingTrackPositions(tracks, query) : null;
+    const visibleTracks = positions ? positions.map(index => tracks[index]) : tracks;
+    const selection = currentTrackSelection();
     const panel = document.createElement("section");
     panel.className = "music-track-panel";
-    panel.dataset.musicListMode = state.music.mode;
-    panel.dataset.musicListQuery = state.music.query || "";
+    panel.dataset.musicListMode = mode;
+    panel.dataset.musicListQuery = query;
+    if (scopedSearch) panel.dataset.musicSearchScope = trackSearchScope();
     const heading = document.createElement("div");
     heading.className = "music-panel-heading";
     const headingText = document.createElement("span");
     const headingTitle = document.createElement("strong");
     headingTitle.textContent = actions.currentMusicTitle();
     const headingMeta = document.createElement("small");
-    headingMeta.textContent = failure ? "列表读取失败" : actions.currentMusicMeta();
+    if (scopedSearch) headingMeta.setAttribute("role", "status");
+    headingMeta.textContent = failure ? "列表读取失败" : positions
+      ? `匹配 ${formatNumber(visibleTracks.length)} / 共 ${formatNumber(tracks.length)} 首`
+      : mode === "smart" && query ? `匹配 ${formatNumber(state.music.data?.total || 0)} 首`
+      : actions.currentMusicMeta();
     headingText.append(headingTitle, headingMeta);
     const headingActions = document.createElement("div");
     headingActions.className = "music-panel-actions";
+    if (visibleTracks.length && !failure && !selection && actions.canSelectListTracks()) {
+      const start = trackSelectionButton("多选", "open");
+      const owner = currentListOwner();
+      start.addEventListener("click", () => {
+        if (!start.isConnected || !isListOwnerCurrent(owner) || !actions.canSelectListTracks()) return;
+        trackSelection = { owner, selected: new Set(), loaded: new Set() };
+        trackSelectionFeedback = null;
+        refreshTrackSelection("all");
+      });
+      headingActions.append(start);
+    }
     if (state.music.mode === "history" && (state.music.data?.tracks || []).length) {
       const clear = document.createElement("button");
       clear.type = "button";
@@ -1195,6 +1264,90 @@ export function createMusicPage(deps) {
       headingActions.append(remove);
     }
     heading.append(headingText, headingActions);
+    const controls = scopedSearch ? renderScopedTrackSearch(panel, mode) : renderLibraryTrackControls();
+    const table = document.createElement("div");
+    table.className = "music-track-table";
+    table.append(h.trackHeader());
+    syncTrackSelectionMembership(selection, visibleTracks);
+    if (failure) table.append(renderListReadRecovery(failure));
+    else if (state.music.loading && !visibleTracks.length) table.append(h.emptyRow("正在读取音乐库"));
+    else if (!visibleTracks.length) table.append(h.emptyRow(query ? "没有匹配的歌曲。" : state.music.status || "没有匹配的歌曲。"));
+    else visibleTracks.forEach((track, index) => table.append(createTrackListRow(track, positions?.[index] ?? index, selection)));
+    const more = !failure && renderTrackLoadMore(tracks.length);
+    if (more) table.append(more);
+    panel.append(heading, controls);
+    if (selection) panel.append(renderTrackSelectionToolbar(selection));
+    const selectionResult = trackSelectionFeedback;
+    if (selectionResult && isListOwnerCurrent(selectionResult.owner)) {
+      const feedback = document.createElement("p");
+      feedback.className = "music-track-selection-feedback";
+      const status = document.createElement("span");
+      status.setAttribute("role", "status");
+      status.textContent = selectionResult.message;
+      feedback.append(status);
+      if (selectionResult.playlistId) {
+        const open = trackSelectionButton("查看歌单", "view-playlist");
+        open.addEventListener("click", () => {
+          if (open.isConnected && selectionResult === trackSelectionFeedback && isListOwnerCurrent(selectionResult.owner)) {
+            actions.selectMusicMode("playlist", { playlistId: selectionResult.playlistId });
+          }
+        });
+        feedback.append(open);
+      }
+      panel.append(feedback);
+    }
+    panel.append(table);
+    return panel;
+  }
+
+  function trackSearchScope() {
+    return JSON.stringify([state.music.mode, state.music.activePlaylistId, state.music.activeSmartPlaylistId]);
+  }
+
+  function renderScopedTrackSearch(panel, mode) {
+    const controls = document.createElement("div");
+    controls.className = "music-controls music-scoped-controls";
+    const search = document.createElement("div");
+    search.className = "music-search";
+    const input = document.createElement("input");
+    input.type = "search";
+    input.dataset.musicSearch = mode;
+    input.placeholder = mode === "history" ? "在最近播放中搜索歌名、歌手或专辑" : "在当前歌单中搜索歌名、歌手或专辑";
+    input.setAttribute("aria-label", mode === "history" ? "搜索最近播放" : "搜索当前歌单");
+    input.setAttribute("enterkeyhint", "search");
+    input.value = state.music.query || "";
+    const local = isLocalTrackSearch(mode);
+    const ownsSearch = () => panel.dataset.musicSearchScope === trackSearchScope();
+    const load = () => {
+      searchTimer = null;
+      if (input.isConnected && ownsSearch()) return actions.loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
+    };
+    const ignoreSearchKey = bindMusicSearchInput(input, () => {
+      const query = input.value.trim();
+      if (query === state.music.query) return;
+      if (!local) resetReader();
+      state.music.query = query;
+      if (local) {
+        panel.dataset.musicListQuery = query;
+        panel.scrollTop = 0;
+        router.replace(router.overrides());
+        if (!refreshMusicLibraryContent()) renderView();
+      } else searchTimer = window.setTimeout(load, MUSIC_LIBRARY_SEARCH_DEBOUNCE_MS);
+    }, { retireOnComposition: !local, ownsSearch });
+    input.addEventListener("keydown", event => {
+      if (ignoreSearchKey(event) || event.key !== "Enter") return;
+      event.preventDefault();
+      if (local || searchTimer === null) return;
+      window.clearTimeout(searchTimer);
+      searchTimer = null;
+      void load();
+    });
+    search.append(input);
+    controls.append(search);
+    return controls;
+  }
+
+  function renderLibraryTrackControls() {
     const controls = document.createElement("div");
     controls.className = "music-controls";
     const search = document.createElement("div");
@@ -1202,7 +1355,7 @@ export function createMusicPage(deps) {
     const input = document.createElement("input");
     input.type = "search";
     input.dataset.musicSearch = "library";
-    input.placeholder = state.music.mode === "library" ? "搜索歌名、歌手、专辑或歌词，找到想听的歌" : "当前列表暂不支持搜索";
+    input.placeholder = "搜索歌名、歌手、专辑或歌词，找到想听的歌";
     input.setAttribute("aria-label", "搜索音乐");
     input.setAttribute("enterkeyhint", "search");
     input.value = state.music.query || "";
@@ -1267,18 +1420,209 @@ export function createMusicPage(deps) {
       loadMusic({ replaceRoute: true, keepCurrent: true }).catch(showError);
     });
     controls.append(search, favorite, sort);
-    const table = document.createElement("div");
-    table.className = "music-track-table";
-    table.append(h.trackHeader());
-    const tracks = state.music.data?.tracks || [];
-    if (failure) table.append(renderListReadRecovery(failure));
-    else if (state.music.loading && !tracks.length) table.append(h.emptyRow("正在读取音乐库"));
-    else if (!tracks.length) table.append(h.emptyRow(state.music.status || "没有匹配的歌曲。"));
-    else tracks.forEach((track, index) => { const row = h.trackRow(track, index); listResultRecords.set(row, track); table.append(row); });
-    const more = !failure && renderTrackLoadMore(tracks.length);
-    if (more) table.append(more);
-    panel.append(heading, controls, table);
-    return panel;
+    return controls;
+  }
+
+  function currentTrackSelection() {
+    return isListOwnerCurrent(trackSelection?.owner) && actions.canSelectListTracks() ? trackSelection : null;
+  }
+
+  function trackSelectionKey(track) {
+    // A better version can become the visible search result on the next page.
+    return String(track.duplicateIds?.[0] || track.id || "");
+  }
+
+  function syncTrackSelectionMembership(selection, tracks) {
+    if (!selection) return;
+    selection.loaded = new Set(tracks.map(trackSelectionKey).filter(Boolean));
+    for (const key of selection.selected) if (!selection.loaded.has(key)) selection.selected.delete(key);
+  }
+
+  function createTrackListRow(track, index, selection) {
+    let checkbox = null;
+    const key = selection ? trackSelectionKey(track) : "";
+    if (selection && key) {
+      checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.dataset.musicSelectTrack = key;
+      checkbox.setAttribute("aria-label", `选择 ${track.title || track.fileName || "歌曲"}`);
+      checkbox.checked = selection.selected.has(key);
+      checkbox.disabled = Boolean(selection.pending);
+      checkbox.addEventListener("change", () => {
+        if (!checkbox.isConnected || currentTrackSelection() !== selection || selection.pending || !selection.loaded.has(key)) return;
+        if (checkbox.checked) selection.selected.add(key);
+        else selection.selected.delete(key);
+        syncTrackSelectionToolbar(checkbox.closest(".music-track-panel"), selection);
+      });
+    }
+    const row = h.trackRow(track, index, checkbox);
+    listResultRecords.set(row, track);
+    return row;
+  }
+
+  function trackSelectionButton(text, control) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "music-inline-button";
+    button.dataset.musicSelectControl = control;
+    button.textContent = text;
+    return button;
+  }
+
+  function renderTrackSelectionToolbar(selection) {
+    const toolbar = document.createElement("div");
+    toolbar.className = "music-track-selection";
+    const label = document.createElement("label");
+    const all = document.createElement("input");
+    all.type = "checkbox";
+    all.dataset.musicSelectControl = "all";
+    const allLabel = document.createElement("span");
+    label.append(all, allLabel);
+    const status = document.createElement("span");
+    status.setAttribute("role", "status");
+    const add = trackSelectionButton("加入队列", "add");
+    const existing = trackSelectionButton("加入已有歌单", "existing-playlist");
+    const playlist = trackSelectionButton("新建歌单", "playlist");
+    const cancel = trackSelectionButton("取消", "cancel");
+    toolbar.append(label, status, add, existing, playlist);
+    const activePlaylist = state.music.mode === "playlist" ? state.music.activePlaylist : null;
+    const current = () => toolbar.isConnected && currentTrackSelection() === selection;
+    const selectedIds = () => (state.music.data?.tracks || [])
+      .filter(track => selection.selected.has(trackSelectionKey(track))).map(track => track.id);
+    all.addEventListener("change", () => {
+      if (!current() || selection.pending) return;
+      selection.selected = all.checked ? new Set(selection.loaded) : new Set();
+      const panel = toolbar.closest(".music-track-panel");
+      for (const checkbox of panel.querySelectorAll("[data-music-select-track]")) {
+        checkbox.checked = selection.selected.has(checkbox.dataset.musicSelectTrack);
+      }
+      syncTrackSelectionToolbar(panel, selection);
+    });
+    cancel.addEventListener("click", () => { if (current() && !selection.pending) closeTrackSelection(); });
+    playlist.addEventListener("click", () => {
+      if (current() && !playlist.disabled) actions.openSelectedTracksPlaylistDialog(selectedIds())?.catch(showError);
+    });
+    existing.addEventListener("click", () => {
+      if (current() && !existing.disabled) actions.openSelectedTracksPlaylistDialog(selectedIds(), { existing: true })?.catch(showError);
+    });
+    add.addEventListener("click", () => {
+      if (!current() || add.disabled) return;
+      const result = actions.appendSelectedTracksToQueue(selectedIds());
+      if (!result) return;
+      const added = `已加入 ${formatNumber(result.added)} 首`;
+      const skipped = `${formatNumber(result.alreadyQueued)} 首已在队列`;
+      trackSelectionFeedback = { owner: selection.owner, message: result.alreadyQueued ? `${added} · ${skipped}` : added };
+      closeTrackSelection();
+    });
+    if (activePlaylist?.id) {
+      const remove = trackSelectionButton("移出当前歌单", "remove-playlist");
+      remove.addEventListener("click", () => {
+        if (current() && !remove.disabled) void removeSelectedPlaylistTracks(selection, activePlaylist, selectedIds());
+      });
+      toolbar.append(remove);
+    }
+    toolbar.append(cancel);
+    updateTrackSelectionToolbar(toolbar, selection);
+    return toolbar;
+  }
+
+  async function removeSelectedPlaylistTracks(selection, playlist, trackIds) {
+    if (!trackIds.length || !window.confirm(`将选中的 ${formatNumber(trackIds.length)} 首歌曲移出「${playlist.name}」？`)) return;
+    const focused = document.activeElement;
+    selection.pending = true;
+    selection.error = "";
+    refreshPendingTrackSelection(selection);
+    try {
+      await actions.removeSelectedTracksFromPlaylist(playlist.id, trackIds, ({ removedCount, alreadyAbsentCount }) => {
+        if (trackSelection !== selection || !isListOwnerCurrent(selection.owner)) return;
+        const skipped = alreadyAbsentCount ? ` · ${formatNumber(alreadyAbsentCount)} 首已不在歌单` : "";
+        trackSelectionFeedback = { owner: selection.owner,
+          message: `已从「${playlist.name}」移出 ${formatNumber(removedCount)} 首${skipped}` };
+        trackSelection = null;
+      });
+    } catch (error) {
+      if (!isListOwnerCurrent(selection.owner)) return;
+      if (trackSelection === selection) {
+        selection.error = error.name === "TimeoutError" ? "移出歌单超时，请重试" : error.message || "移出歌单失败，请重试";
+      } else showError(error);
+    } finally {
+      selection.pending = false;
+      refreshPendingTrackSelection(selection);
+      if (focused?.dataset.musicSelectControl === "remove-playlist" && isListOwnerCurrent(selection.owner)
+          && (document.activeElement === document.body || document.activeElement === focused)) {
+        const panel = els.workGrid.querySelector(".music-track-panel");
+        const target = panel?.querySelector('[data-music-select-control="remove-playlist"], [data-music-select-control="open"], .music-track-selection-feedback [role="status"]');
+        if (target?.matches('[role="status"]')) target.tabIndex = -1;
+        target?.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function refreshPendingTrackSelection(selection) {
+    if (trackSelection !== selection || !isListOwnerCurrent(selection.owner)) return;
+    const panel = els.workGrid.querySelector(".music-track-panel");
+    for (const checkbox of panel?.querySelectorAll("[data-music-select-track]") || []) checkbox.disabled = selection.pending;
+    syncTrackSelectionToolbar(panel, selection);
+  }
+
+  function syncTrackSelectionToolbar(panel, selection) {
+    const toolbar = panel?.querySelector(".music-track-selection");
+    if (toolbar && selection) updateTrackSelectionToolbar(toolbar, selection);
+  }
+
+  function updateTrackSelectionToolbar(toolbar, selection) {
+    const all = toolbar.querySelector('[data-music-select-control="all"]');
+    const count = selection.selected.size, loaded = selection.loaded.size;
+    const pending = Boolean(selection.pending);
+    all.checked = loaded > 0 && count === loaded;
+    all.indeterminate = count > 0 && count < loaded;
+    all.disabled = pending || !loaded;
+    all.nextElementSibling.textContent = `全选已加载 (${formatNumber(loaded)})`;
+    const overLimit = count > MUSIC_PLAYLIST_TRACK_LIMIT;
+    const limit = overLimit ? ` · 歌单操作每次最多 ${formatNumber(MUSIC_PLAYLIST_TRACK_LIMIT)} 首` : "";
+    const error = selection.error ? ` · ${selection.error}` : "";
+    toolbar.querySelector('[role="status"]').textContent = pending ? `正在移出 ${formatNumber(count)} 首` : `已选 ${formatNumber(count)} 首${limit}${error}`;
+    toolbar.querySelector('[data-music-select-control="add"]').disabled = pending || !count;
+    toolbar.querySelector('[data-music-select-control="cancel"]').disabled = pending;
+    for (const control of toolbar.querySelectorAll('[data-music-select-control="playlist"], [data-music-select-control="existing-playlist"], [data-music-select-control="remove-playlist"]')) {
+      control.disabled = pending || !count || overLimit;
+    }
+  }
+
+  function trackSelectionPlaylistSaved(playlist, requested) {
+    const selection = currentTrackSelection();
+    if (!selection) return;
+    const count = Number.isSafeInteger(playlist.trackCount) ? playlist.trackCount : requested;
+    const skipped = requested > count ? ` · ${formatNumber(requested - count)} 首已不可用` : "";
+    trackSelectionFeedback = { owner: selection.owner, playlistId: playlist.id,
+      message: `已新建「${playlist.name}」，保存 ${formatNumber(count)} 首${skipped}` };
+    closeTrackSelection();
+  }
+
+  function trackSelectionPlaylistAdded(playlist, { addedCount, alreadyPresentCount, unavailableCount }) {
+    const selection = currentTrackSelection();
+    if (!selection) return;
+    const details = [`「${playlist.name}」新增 ${formatNumber(addedCount)} 首`];
+    if (alreadyPresentCount) details.push(`${formatNumber(alreadyPresentCount)} 首已在歌单`);
+    if (unavailableCount) details.push(`${formatNumber(unavailableCount)} 首不可用`);
+    trackSelectionFeedback = { owner: selection.owner, playlistId: playlist.id, message: details.join(" · ") };
+    closeTrackSelection();
+  }
+
+  function closeTrackSelection() {
+    trackSelection = null;
+    refreshTrackSelection("open");
+  }
+
+  function refreshTrackSelection(focusControl) {
+    const top = els.workGrid.querySelector(".music-track-panel")?.scrollTop || 0;
+    if (!refreshMusicLibraryContent()) renderView();
+    const panel = els.workGrid.querySelector(".music-track-panel");
+    if (!panel) return;
+    panel.scrollTop = top;
+    const control = panel.querySelector(`[data-music-select-control="${focusControl}"]`);
+    control?.focus({ preventScroll: true });
+    control?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
   }
 
   function renderListReadRecovery(failure) {
@@ -1398,13 +1742,17 @@ export function createMusicPage(deps) {
     const table = els.workGrid?.querySelector?.(".music-track-panel .music-track-table");
     if (!table) return false;
     const focus = captureMusicInputFocus();
+    const selection = currentTrackSelection();
+    syncTrackSelectionMembership(selection, state.music.data?.tracks || []);
     table.querySelector(".music-load-more")?.remove();
     const fragment = document.createDocumentFragment();
-    tracks.forEach((track, index) => { const row = h.trackRow(track, startIndex + index); listResultRecords.set(row, track); fragment.append(row); });
+    tracks.forEach((track, index) => fragment.append(createTrackListRow(track, startIndex + index, selection)));
     const more = renderTrackLoadMore(startIndex + tracks.length);
     if (more) fragment.append(more);
     table.append(fragment);
-    restoreMusicInputFocus(table.closest(".music-track-panel"), focus?.more ? focus : null);
+    const panel = table.closest(".music-track-panel");
+    syncTrackSelectionToolbar(panel, selection);
+    restoreMusicInputFocus(panel, focus?.more ? focus : null);
     return true;
   }
 
@@ -1487,17 +1835,17 @@ export function createMusicPage(deps) {
   }
 
   // ================= 搜索联想 =================
-  function bindMusicSearchInput(input, acceptInput) {
+  function bindMusicSearchInput(input, acceptInput, { retireOnComposition = true, ownsSearch } = {}) {
     let composing = false;
     const current = () => input.isConnected && state.activeView === "music"
-      && state.music.mode === input.dataset.musicSearch;
+      && state.music.mode === input.dataset.musicSearch && (!ownsSearch || ownsSearch());
     const compositionKey = (event) => composing || event.isComposing || event.keyCode === 229;
     input.addEventListener("compositionstart", () => {
       if (!current()) return;
       composing = true;
       // Cancel both debounce work and reads that could replace the input while
       // the IME still owns its uncommitted text and candidate selection.
-      resetReader();
+      if (retireOnComposition) resetReader();
     });
     input.addEventListener("compositionend", () => {
       composing = false;
@@ -2007,15 +2355,16 @@ export function createMusicPage(deps) {
     const queue = state.music.queue || [];
     if (!move || !state.music.queueExpanded || queue.length > Math.max(DESKTOP_QUEUE_PAGE_SIZE, Number(state.music.queueVisibleLimit || 0))) return false;
     const { trackId, fromIndex, toIndex } = move;
-    if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || Math.abs(toIndex - fromIndex) !== 1) return false;
+    if (!Number.isInteger(fromIndex) || !Number.isInteger(toIndex) || fromIndex === toIndex) return false;
     const list = panel.querySelector(".music-queue-list");
     const row = list?.children[fromIndex], neighbor = list?.children[toIndex];
+    const shiftedIndex = toIndex + (toIndex > fromIndex ? -1 : 1);
     if (list?.children.length !== queue.length || !row?.classList.contains("music-queue-row") || !neighbor?.classList.contains("music-queue-row")
-        || row.dataset.musicTrackId !== trackId || queue[toIndex]?.id !== trackId || queue[fromIndex]?.id !== neighbor.dataset.musicTrackId) return false;
-    // Only an explicitly described adjacent move in the fully mounted queue
-    // can reuse rows. Membership, pagination and rollback retain full refresh.
+        || row.dataset.musicTrackId !== trackId || queue[toIndex]?.id !== trackId || queue[shiftedIndex]?.id !== neighbor.dataset.musicTrackId) return false;
+    // A fully mounted queue can reuse rows for an order change. Membership,
+    // pagination and rollback retain the regular refresh.
     list.insertBefore(row, list.children[toIndex + (toIndex > fromIndex ? 1 : 0)] || null);
-    for (const index of [fromIndex, toIndex]) {
+    for (const index of new Set([fromIndex, toIndex, shiftedIndex])) {
       const currentRow = list.children[index];
       currentRow.querySelector('[aria-label="上移"]').disabled = index === 0;
       currentRow.querySelector('[aria-label="下移"]').disabled = index === queue.length - 1;
@@ -2674,6 +3023,7 @@ export function createMusicPage(deps) {
     const options = document.createElement("div");
     options.className = "music-stage-options";
     options.append(h.controlButton(track?.favorite ? "已收藏" : "收藏", () => actions.toggleFavorite(track.id).catch(showError), !track, `text${track?.favorite ? " active" : ""}`, track?.favorite ? "取消收藏" : "收藏"));
+    options.append(renderSleepTimerControl(track));
     options.append(renderPlaybackSpeedControl(track));
     options.append(renderVolumeControl());
     footer.append(identity, controls, progressWrap, options);
@@ -2712,13 +3062,16 @@ export function createMusicPage(deps) {
     for (const minutes of MUSIC_SLEEP_TIMER_OPTIONS) {
       const option = document.createElement("option");
       option.value = String(minutes);
-      option.textContent = minutes ? `${minutes} 分钟` : "关闭";
+      option.textContent = minutes === MUSIC_SLEEP_AFTER_CURRENT ? "播完这首" : minutes ? `${minutes} 分钟` : "关闭";
       select.append(option);
     }
     select.value = String(player.sleepTimerActive() ? state.music.sleepMinutes : 0);
-    select.addEventListener("change", () => actions.setSleepTimer(Number(select.value || 0)));
+    select.addEventListener("change", () => {
+      if (!select.isConnected || state.activeView !== "music" || !track || state.music.current?.id !== track.id) return;
+      actions.setSleepTimer(Number(select.value || 0));
+    });
     const status = document.createElement("em");
-    status.textContent = player.sleepTimerActive() ? `${player.sleepTimerText()} 后暂停` : "未开启";
+    status.textContent = sleepTimerStatusText(player.sleepTimerActive());
     sleepTimerControlEls.push({ select, status });
     wrap.append(label, select, status);
     return wrap;
@@ -2730,6 +3083,8 @@ export function createMusicPage(deps) {
     playlistDialogEvents = null;
     if (!state.music.playlistDialogOpen) return document.createDocumentFragment();
     const trackId = state.music.playlistDialogTrackId || "";
+    const batch = state.music.playlistDialogBatch;
+    const titleText = batch?.existing ? "加入已有歌单" : trackId ? "加入歌单" : "新建歌单";
     const track = trackId ? findKnownTrack(trackId) : null;
     const backdrop = document.createElement("div");
     backdrop.className = "music-playlist-dialog-backdrop";
@@ -2740,7 +3095,7 @@ export function createMusicPage(deps) {
     dialog.className = "music-playlist-dialog";
     dialog.setAttribute("role", "dialog");
     dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", trackId ? "加入歌单" : "新建歌单");
+    dialog.setAttribute("aria-label", titleText);
     dialog.tabIndex = -1;
     const ownsDialog = () => backdrop.isConnected && state.activeView === "music" && state.music.playlistDialogOpen
       && state.music.playlistDialogTrackId === trackId && els.workGrid?.querySelector(".music-playlist-dialog-backdrop") === backdrop;
@@ -2776,15 +3131,25 @@ export function createMusicPage(deps) {
     const head = document.createElement("div");
     head.className = "music-playlist-dialog-head";
     const title = document.createElement("strong");
-    title.textContent = trackId ? "加入歌单" : "新建歌单";
+    title.textContent = titleText;
     const close = document.createElement("button");
     close.type = "button";
     close.className = "music-control-button";
     close.textContent = "×";
+    close.disabled = Boolean(batch?.pending);
     close.setAttribute("aria-label", "关闭");
     close.addEventListener("click", () => { if (ownsDialog()) actions.closePlaylistDialog(); });
     head.append(title, close);
     dialog.append(head);
+    if (batch) {
+      const count = document.createElement("p");
+      count.className = "music-playlist-dialog-count";
+      count.textContent = batch.pending && batch.existing
+        ? `正在加入 ${formatNumber(batch.trackIds.length)} 首歌曲`
+        : `保存已选的 ${formatNumber(batch.trackIds.length)} 首歌曲`;
+      if (batch.existing) count.setAttribute("role", "status");
+      dialog.append(count);
+    }
     if (track) {
       const preview = document.createElement("div");
       preview.className = "music-playlist-dialog-track";
@@ -2798,7 +3163,7 @@ export function createMusicPage(deps) {
       preview.append(text);
       dialog.append(preview);
     }
-    if (trackId && state.music.playlists.length) {
+    if ((trackId || batch?.existing) && !batch?.loading && !batch?.loadError && state.music.playlists.length) {
       const choices = document.createElement("div");
       choices.className = "music-playlist-dialog-list";
       for (const playlist of state.music.playlists) {
@@ -2806,6 +3171,7 @@ export function createMusicPage(deps) {
         button.type = "button";
         button.className = "music-playlist-choice";
         button.dataset.musicPlaylistId = playlist.id;
+        button.disabled = Boolean(batch?.pending);
         const strong = document.createElement("strong");
         strong.textContent = playlist.name;
         const small = document.createElement("small");
@@ -2816,27 +3182,55 @@ export function createMusicPage(deps) {
       }
       dialog.append(choices);
     }
-    const form = document.createElement("form");
-    form.className = "music-playlist-dialog-form";
-    const input = document.createElement("input");
-    input.type = "text";
-    input.value = state.music.playlistDialogName || "";
-    input.placeholder = "歌单名称";
-    input.autofocus = true;
-    input.addEventListener("input", () => {
-      if (ownsDialog()) state.music.playlistDialogName = input.value;
-    });
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className = "music-primary-button";
-    submit.textContent = trackId ? "新建并加入" : "创建";
-    form.append(input, submit);
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
-      if (!ownsDialog() || composing) return;
-      actions.createPlaylistFromDialog().catch(showError);
-    });
-    dialog.append(form);
+    if (batch?.existing) {
+      if (batch.loading || batch.loadError || !state.music.playlists.length) {
+        const status = document.createElement("p");
+        status.setAttribute("role", batch.loadError ? "alert" : "status");
+        status.textContent = batch.loadError || (batch.loading ? "正在加载歌单" : "暂无已有歌单，可从多选栏新建歌单");
+        dialog.append(status);
+      }
+      if (batch.loadError) {
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "music-control-button";
+        retry.textContent = "重试加载";
+        retry.addEventListener("click", () => { if (ownsDialog()) actions.loadSelectedTracksPlaylists().catch(showError); });
+        dialog.append(retry);
+      }
+    }
+    if (!batch?.existing) {
+      const form = document.createElement("form");
+      form.className = "music-playlist-dialog-form";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.value = state.music.playlistDialogName || "";
+      input.placeholder = "歌单名称";
+      input.disabled = Boolean(batch?.pending);
+      if (batch) input.maxLength = 80;
+      input.autofocus = true;
+      input.addEventListener("input", () => {
+        if (ownsDialog()) state.music.playlistDialogName = input.value;
+      });
+      const submit = document.createElement("button");
+      submit.type = "submit";
+      submit.className = "music-primary-button";
+      submit.disabled = Boolean(batch?.pending);
+      submit.textContent = batch?.pending ? "正在创建" : trackId ? "新建并加入" : "创建";
+      form.append(input, submit);
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (!ownsDialog() || composing) return;
+        actions.createPlaylistFromDialog().catch(showError);
+      });
+      dialog.append(form);
+    }
+    if (batch?.error) {
+      const error = document.createElement("p");
+      error.className = "music-playlist-dialog-error";
+      error.setAttribute("role", "alert");
+      error.textContent = batch.error;
+      dialog.append(error);
+    }
     backdrop.append(dialog);
     return backdrop;
   }
@@ -2867,11 +3261,15 @@ export function createMusicPage(deps) {
         || els.workGrid?.querySelector(".music-playlist-dialog-backdrop") !== next
         || (document.activeElement !== document.body && document.activeElement !== focused)) return;
     const input = next.querySelector(".music-playlist-dialog-form input");
-    const target = previousControl?.dataset.musicPlaylistId
-      ? [...next.querySelectorAll(".music-playlist-choice")].find(button => button.dataset.musicPlaylistId === previousControl.dataset.musicPlaylistId)
+    const batch = state.music.playlistDialogBatch;
+    const playlistId = previousControl?.dataset.musicPlaylistId || (batch?.error && batch.targetId);
+    const target = playlistId
+      ? [...next.querySelectorAll(".music-playlist-choice")].find(button => button.dataset.musicPlaylistId === playlistId)
       : previousControl?.matches('button[type="submit"]') ? next.querySelector('button[type="submit"]')
-        : previousControl?.getAttribute("aria-label") === "关闭" ? next.querySelector('[aria-label="关闭"]') : input;
-    (target || input)?.focus({ preventScroll: true });
+        : previousControl?.getAttribute("aria-label") === "关闭" ? next.querySelector('[aria-label="关闭"]')
+          : input || next.querySelector(".music-playlist-choice:not(:disabled)");
+    const destination = target && !target.disabled ? target : input && !input.disabled ? input : next.querySelector(".music-playlist-dialog");
+    destination?.focus({ preventScroll: true });
     if (selection && document.activeElement === input) input.setSelectionRange(...selection);
   }
 
@@ -3034,10 +3432,15 @@ export function createMusicPage(deps) {
     }
   }
 
+  function sleepTimerStatusText(active) {
+    if (!active) return "未开启";
+    return state.music.sleepMinutes === MUSIC_SLEEP_AFTER_CURRENT ? "播完这首后暂停" : `${player.sleepTimerText()} 后暂停`;
+  }
+
   function updateSleepTimerUi() {
     const active = player.sleepTimerActive();
     const value = String(active ? state.music.sleepMinutes : 0);
-    const text = active ? `${player.sleepTimerText()} 后暂停` : "未开启";
+    const text = sleepTimerStatusText(active);
     for (const { select, status } of sleepTimerControlEls) {
       if (select?.isConnected && select.value !== value) select.value = value;
       if (status?.isConnected && status.textContent !== text) status.textContent = text;
@@ -3259,6 +3662,12 @@ export function createMusicPage(deps) {
     if (event.key === "Escape" && state.music.playerStageOpen) {
       event.preventDefault();
       closePlayerStage();
+      return;
+    }
+    if (event.key === "Escape" && !event.isComposing && event.keyCode !== 229
+        && event.target?.closest?.(".music-track-selection, .music-track-selectable") && currentTrackSelection()) {
+      event.preventDefault();
+      closeTrackSelection();
       return;
     }
     if (isKeyboardShortcutTargetLocal(event.target)) return;

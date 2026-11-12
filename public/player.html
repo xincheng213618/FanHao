@@ -6,7 +6,7 @@
     <title>FanHao 播放</title>
     <link rel="stylesheet" href="/css/foundation.css?v=20260717-player-startup-01" />
     <link rel="stylesheet" href="/vendor/plyr/plyr.css" />
-    <link rel="modulepreload" href="/js/player-page.js?v=20261023-subtitles-04" />
+    <link rel="modulepreload" href="/js/player-page.js?v=20261113-player-switch-time-01" />
     <style>
       html.app-module-loading body {
         visibility: hidden;
@@ -115,7 +115,7 @@
         outline: 2px solid #60d3aa;
         outline-offset: 2px;
       }
-      .player-file-navigation button[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+      .player-file-navigation button:is([aria-disabled="true"], :disabled) { opacity: 0.4; cursor: default; }
       .player-file-navigation svg {
         width: 20px;
         height: 20px;
@@ -125,29 +125,55 @@
         stroke-linecap: round;
         stroke-linejoin: round;
       }
+      .player-playback-rate {
+        flex: 0 0 auto;
+        min-height: 40px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        border-radius: 9px;
+        padding-inline: 8px;
+        background: #101b17;
+        color: #eef7f2;
+        color-scheme: dark;
+        font: inherit;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+        pointer-events: auto;
+        cursor: pointer;
+      }
+      .player-playback-rate:focus-visible { outline: 2px solid #60d3aa; outline-offset: 2px; }
       .player-file-position { color: #eef7f2; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-      body.player-ui-idle .player-page-header:not(:focus-within) {
+      .player-episode-navigation .player-file-position {
+        max-width: min(28vw, 190px);
+        overflow-wrap: anywhere;
+        white-space: normal;
+      }
+      .player-episode-navigation :is(.player-episode-retry, .player-episode-picker-trigger) {
+        width: auto;
+        min-width: 44px;
+        padding-inline: 7px;
+        border-radius: 9px;
+      }
+      .player-episode-retry[hidden] { display: none; }
+      @media (max-width: 480px) {
+        .player-page-header:has(.player-file-navigation:not([hidden])) { flex-wrap: wrap; gap: 8px; }
+        .player-file-navigation { order: 1; flex-basis: 100%; flex-wrap: wrap; }
+        .player-episode-navigation .player-file-position { max-width: 42vw; }
+      }
+      body.player-ui-idle.player-sidebar-collapsed .player-page-header:not(:focus-within) {
         opacity: 0;
         transform: translateY(-8px);
       }
       .player-page-main {
-        display: grid;
         height: 100vh;
-        grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
-        gap: 10px;
+        height: 100dvh;
         box-sizing: border-box;
         padding: 8px;
-        transition: grid-template-columns 200ms ease, gap 200ms ease;
-      }
-      body.player-sidebar-collapsed .player-page-main {
-        grid-template-columns: minmax(0, 1fr) 0;
-        gap: 0;
       }
       .player-stage {
         position: relative;
         display: grid;
         width: 100%;
-        height: calc(100vh - 16px);
+        height: 100%;
         min-height: 0;
         place-items: center;
         overflow: hidden;
@@ -158,6 +184,9 @@
         width: 100vw;
         height: 100vh;
         background: #000;
+        border-radius: 0;
+      }
+      .player-stage.plyr--fullscreen-fallback {
         border-radius: 0;
       }
       .player-stage video {
@@ -390,13 +419,24 @@
         font-weight: 800;
       }
       .player-side {
+        position: absolute;
+        inset: 108px 12px auto auto;
+        z-index: 9;
         display: grid;
-        height: calc(100vh - 16px);
+        width: min(340px, calc(100% - 24px));
+        max-height: calc(100% - 168px);
         min-width: 0;
         align-content: start;
-        gap: 14px;
+        gap: 10px;
         overflow: auto;
+        overscroll-behavior: contain;
         box-sizing: border-box;
+        padding: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        border-radius: 12px;
+        background: rgba(11, 17, 14, 0.94);
+        box-shadow: 0 12px 38px rgba(0, 0, 0, 0.4);
+        backdrop-filter: blur(18px);
         scrollbar-color: rgba(96, 211, 170, 0.32) transparent;
         transition: opacity 160ms ease, transform 200ms ease, visibility 200ms ease;
       }
@@ -404,7 +444,7 @@
         visibility: hidden;
         opacity: 0;
         pointer-events: none;
-        transform: translateX(18px);
+        transform: translateX(calc(100% + 24px));
       }
       .player-panel {
         border: 1px solid rgba(255, 255, 255, 0.11);
@@ -416,6 +456,52 @@
         margin: 0 0 10px;
         font-size: 14px;
       }
+      .player-file-options {
+        display: flex;
+        grid-column: 1 / -1;
+        flex-wrap: wrap;
+        gap: 0 14px;
+      }
+      .player-file-options:not(:has(label:not([hidden]))) { display: none; }
+      .player-file-option {
+        display: inline-flex;
+        min-height: 44px;
+        align-items: center;
+        gap: 4px;
+        color: #d9e7e0;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .player-file-option[hidden] { display: none; }
+      .player-file-option input { width: 17px; height: 17px; margin: 0; accent-color: #60d3aa; }
+      .player-files-tools {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+        padding: 4px 0;
+        background: #17211c;
+      }
+      .player-files-tools[hidden],
+      .player-file-button[hidden] { display: none; }
+      .player-files-tools input[type="search"],
+      .player-files-tools button {
+        min-width: 0;
+        min-height: 44px;
+        padding: 0 8px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.07);
+        color: inherit;
+        font: inherit;
+      }
+      .player-files-tools input[type="search"] { color-scheme: dark; font-size: 16px; }
+      .player-files-tools button { cursor: pointer; font-size: 13px; white-space: nowrap; }
+      .player-files-tools button:disabled { opacity: 0.55; cursor: default; }
+      .player-files-tools :focus-visible { outline: 2px solid #60d3aa; outline-offset: 1px; }
+      .player-file-search-count { grid-column: 1 / -1; color: #b6c6bf; font-size: 12px; }
       .player-file-button {
         display: grid;
         width: 100%;
@@ -428,6 +514,7 @@
         cursor: pointer;
         padding: 10px;
         text-align: left;
+        scroll-margin-block-start: 76px;
       }
       .player-file-button.active {
         border-color: rgba(96, 211, 170, 0.6);
@@ -534,8 +621,31 @@
       .player-utility-dialog input { width: 100%; min-width: 0; min-height: 44px; padding: 10px; border: 1px solid #638172; border-radius: 7px; color: #eef7f2; background: #09140e; font: inherit; }
       .player-utility-dialog button { min-height: 44px; margin-top: 16px; padding: 8px 18px; border: 1px solid #638172; border-radius: 7px; color: #eef7f2; background: #234837; font: inherit; cursor: pointer; }
       .player-utility-dialog :focus-visible { outline: 2px solid #8ce1b8; outline-offset: 3px; }
+      .player-episode-picker { padding: 14px; }
+      .player-episode-picker :is(header, form, nav) { display: flex; align-items: center; gap: 8px; }
+      .player-episode-picker header { justify-content: space-between; margin-bottom: 10px; }
+      .player-episode-picker input { flex: 1; }
+      .player-episode-picker button { flex: 0 0 auto; margin: 0; padding: 6px 9px; }
+      .player-episode-picker button:disabled { opacity: .45; cursor: default; }
+      .player-episode-picker button[hidden] { display: none; }
+      .player-episode-picker [role="status"] { margin: 10px 0; font-size: 13px; color: #c4d7cd; }
+      .player-episode-picker ul { max-height: min(48dvh, 420px); margin: 0; padding: 3px; overflow-y: auto; overscroll-behavior: contain; list-style: none; }
+      .player-episode-picker li + li { margin-top: 4px; }
+      .player-episode-picker li button { width: 100%; text-align: left; background: #1a3025; overflow-wrap: anywhere; }
+      .player-episode-picker li button:hover, .player-episode-picker li button[aria-current] { border-color: #8ce1b8; }
+      .player-episode-picker small { color: #9be0bd; white-space: nowrap; }
+      .player-episode-picker nav { margin-top: 10px; justify-content: space-between; }
       .player-time-jump-actions { display: flex; gap: 10px; }
       .player-time-jump-error { color: #ffd1d1; }
+      .player-bookmarks-dialog header,
+      .player-bookmark-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+      .player-bookmarks-dialog header { justify-content: space-between; }
+      .player-bookmarks-dialog header button { margin-top: 0; }
+      .player-bookmarks-dialog [data-bookmark-file] { color: #b7cec1; overflow-wrap: anywhere; }
+      .player-bookmarks-dialog [data-bookmark-status] { min-height: 1.5em; }
+      .player-bookmarks-dialog ul { display: grid; gap: 8px; padding: 0; list-style: none; }
+      .player-bookmarks-dialog li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+      .player-bookmarks-dialog li button { margin-top: 0; overflow-wrap: anywhere; text-align: left; }
       .player-shortcuts-dialog dl { display: grid; grid-template-columns: minmax(100px, 0.8fr) minmax(0, 1fr); gap: 14px 12px; margin: 20px 0 0; font-size: 14px; line-height: 1.5; }
       .player-shortcuts-dialog dd { margin: 0; }
       .player-shortcuts-dialog kbd { display: inline-block; padding: 0 5px; border: 1px solid #638172; border-radius: 4px; font: inherit; }
@@ -679,15 +789,9 @@
       }
       @media (max-width: 900px) {
         .player-page-main {
-          grid-template-columns: 1fr;
-          gap: 0;
           padding: 0;
         }
-        body.player-sidebar-collapsed .player-page-main {
-          grid-template-columns: 1fr;
-        }
         .player-stage {
-          height: 100vh;
           border-radius: 0;
         }
         .player-page-header {
@@ -695,22 +799,6 @@
         }
         .player-page-header h1 {
           max-width: calc(100% - 118px);
-        }
-        .player-side {
-          position: fixed;
-          inset: 58px 8px 8px auto;
-          z-index: 12;
-          width: min(360px, calc(100vw - 24px));
-          height: auto;
-          padding: 10px;
-          border: 1px solid rgba(255, 255, 255, 0.12);
-          border-radius: 12px;
-          background: rgba(11, 17, 14, 0.96);
-          box-shadow: -18px 0 64px rgba(0, 0, 0, 0.42);
-          backdrop-filter: blur(18px);
-        }
-        body.player-sidebar-collapsed .player-side {
-          transform: translateX(calc(100% + 18px));
         }
         .player-playback-tools,
         .player-status-row {
@@ -788,9 +876,6 @@
           padding: 6px 4px;
           text-align: center;
         }
-        .player-side {
-          gap: 10px;
-        }
         .player-panel {
           padding: 10px;
         }
@@ -813,6 +898,23 @@
               <span class="player-file-position" id="playerFilePosition" role="status"></span>
               <button id="playerFileNext" type="button" aria-label="下一个文件" aria-disabled="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 6l9 6-9 6z"></path></svg></button>
             </div>
+            <div class="player-file-navigation player-episode-navigation" id="playerEpisodeNavigation" role="group" aria-label="剧集切换" hidden>
+              <button data-episode-step="previous" type="button" aria-label="上一集" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M18 6l-9 6 9 6z"></path></svg></button>
+              <span class="player-file-position" data-episode-status role="status" tabindex="-1"></span>
+              <button data-episode-step="next" type="button" aria-label="下一集" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 6l9 6-9 6z"></path></svg></button>
+              <button class="player-episode-picker-trigger" data-episode-picker-trigger type="button" aria-haspopup="dialog" aria-controls="playerEpisodePicker">选集</button>
+              <button class="player-episode-retry" data-episode-retry type="button" hidden>重试</button>
+            </div>
+            <select class="player-playback-rate" id="playerPlaybackRate" aria-label="播放倍速" title="播放倍速（[ / ]）" hidden>
+              <option value="0.5">0.5×</option>
+              <option value="0.75">0.75×</option>
+              <option value="1" selected>1×</option>
+              <option value="1.25">1.25×</option>
+              <option value="1.5">1.5×</option>
+              <option value="1.75">1.75×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
             <button class="player-sidebar-toggle" id="toggleSidebarButton" type="button" aria-controls="playerSidebar" aria-expanded="true" title="隐藏资料与操作（I）">
               <svg viewBox="0 0 20 20" aria-hidden="true">
                 <rect x="2.5" y="3" width="15" height="14" rx="2"></rect>
@@ -845,35 +947,87 @@
               </div>
             </div>
           </div>
+          <aside class="player-side" id="playerSidebar" aria-label="作品资料与操作">
+            <section class="player-panel">
+              <h2>视频文件</h2>
+              <div class="player-files-tools" id="playerFilesTools" role="group" aria-label="视频文件操作" hidden>
+                <input type="search" id="playerFileSearch" autocomplete="off" maxlength="120" placeholder="文件名或路径" aria-label="搜索视频文件" aria-controls="playerFiles" />
+                <button id="playerLocateFile" type="button" aria-label="定位当前" title="定位当前" disabled>定位</button>
+                <div class="player-file-options">
+                  <label id="playerFileSwitchTimeOption" class="player-file-option" hidden>
+                    <input id="playerFileSwitchTime" type="checkbox" autocomplete="off" />
+                    按当前时间切换
+                  </label>
+                  <label id="playerAutoNextFileOption" class="player-file-option" hidden>
+                    <input id="playerAutoNextFile" type="checkbox" aria-label="播完自动播放下一个文件" />
+                    连播
+                  </label>
+                </div>
+                <span id="playerFileSearchCount" class="player-file-search-count" role="status"></span>
+              </div>
+              <div id="playerFiles"></div>
+            </section>
+            <section class="player-panel">
+              <h2>作品资料</h2>
+              <div id="playerMeta"></div>
+            </section>
+            <section class="player-panel">
+              <h2>操作</h2>
+              <div class="player-actions-row">
+                <button id="backButton" type="button">返回资料库</button>
+                <button id="copyTimeLinkButton" type="button" disabled>复制时间链接</button>
+                <button id="playerTimeJumpButton" type="button" disabled aria-haspopup="dialog" title="跳到时间（G）">跳到时间</button>
+                <button id="playerBookmarksButton" type="button" disabled aria-haspopup="dialog" aria-controls="playerBookmarksDialog" title="播放书签（B）">播放书签</button>
+                <button id="playerShortcutsButton" type="button" aria-haspopup="dialog" aria-controls="playerShortcutsDialog">快捷键 (?)</button>
+                <span id="playerTimeLinkStatus" class="player-time-link-status" role="status" aria-live="polite" hidden></span>
+                <button id="markerAButton" type="button">标记 A</button>
+                <button id="correctActorButton" type="button" hidden>订正演员</button>
+                <button id="moveToPersonButton" type="button" hidden>迁移演员</button>
+                <button id="openFileButton" type="button" hidden>打开文件夹</button>
+                <button id="deleteLocalButton" type="button" class="danger" hidden>删除本地文件</button>
+                <a id="javdbLink" href="#" target="_blank" rel="noreferrer" hidden>JavDB</a>
+              </div>
+            </section>
+          </aside>
         </section>
-        <aside class="player-side" id="playerSidebar" aria-label="作品资料与操作">
-          <section class="player-panel">
-            <h2>视频文件</h2>
-            <div id="playerFiles"></div>
-          </section>
-          <section class="player-panel">
-            <h2>作品资料</h2>
-            <div id="playerMeta"></div>
-          </section>
-          <section class="player-panel">
-            <h2>操作</h2>
-            <div class="player-actions-row">
-              <button id="backButton" type="button">返回资料库</button>
-              <button id="copyTimeLinkButton" type="button" disabled>复制时间链接</button>
-              <button id="playerTimeJumpButton" type="button" disabled aria-haspopup="dialog" title="跳到时间（G）">跳到时间</button>
-              <button id="playerShortcutsButton" type="button" aria-haspopup="dialog" aria-controls="playerShortcutsDialog">快捷键 (?)</button>
-              <span id="playerTimeLinkStatus" class="player-time-link-status" role="status" aria-live="polite" hidden></span>
-              <button id="markerAButton" type="button">标记 A</button>
-              <button id="correctActorButton" type="button" hidden>订正演员</button>
-              <button id="moveToPersonButton" type="button" hidden>迁移演员</button>
-              <button id="openFileButton" type="button" hidden>打开文件夹</button>
-              <button id="deleteLocalButton" type="button" class="danger" hidden>删除本地文件</button>
-              <a id="javdbLink" href="#" target="_blank" rel="noreferrer" hidden>JavDB</a>
-            </div>
-          </section>
-        </aside>
       </main>
     </div>
+    <dialog id="playerEpisodePicker" class="player-utility-dialog player-episode-picker" aria-labelledby="playerEpisodePickerTitle">
+      <header>
+        <h2 id="playerEpisodePickerTitle">选集</h2>
+        <button data-episode-picker-close type="button">关闭</button>
+      </header>
+      <form role="search" aria-label="查找剧集">
+        <input type="search" aria-label="标题或目录序号" placeholder="标题、S02E10 或目录序号" maxlength="120" autocomplete="off" enterkeyhint="search" />
+        <button type="submit">查找</button>
+        <button data-episode-picker-clear type="button" hidden>清除</button>
+      </form>
+      <p data-episode-picker-status role="status"></p>
+      <ul data-episode-items aria-label="剧集列表"></ul>
+      <nav aria-label="选集分页">
+        <button data-episode-picker-previous type="button" disabled>上一页</button>
+        <button data-episode-picker-retry type="button" hidden>重试</button>
+        <button data-episode-picker-next type="button" disabled>下一页</button>
+      </nav>
+    </dialog>
+    <dialog id="playerBookmarksDialog" class="player-utility-dialog player-bookmarks-dialog" aria-labelledby="playerBookmarksTitle">
+      <header>
+        <h2 id="playerBookmarksTitle">播放书签</h2>
+        <button type="button" data-bookmark-close>关闭</button>
+      </header>
+      <p data-bookmark-file></p>
+      <form>
+        <p data-bookmark-position></p>
+        <label>备注（可选）<input type="text" autocomplete="off" /></label>
+        <div class="player-bookmark-actions">
+          <button type="submit">保存书签</button>
+          <button type="button" data-bookmark-capture>使用当前时间</button>
+        </div>
+      </form>
+      <p data-bookmark-status role="status"></p>
+      <p data-bookmark-empty>此文件还没有书签</p>
+      <ul aria-label="此文件的播放书签"></ul>
+    </dialog>
     <dialog id="playerShortcutsDialog" class="player-utility-dialog player-shortcuts-dialog" aria-labelledby="playerShortcutsTitle" aria-describedby="playerShortcutsNote">
       <h2 id="playerShortcutsTitle">播放快捷键</h2>
       <p id="playerShortcutsNote">在播放器中使用。输入文字或操作弹窗时，播放快捷键会暂停响应。</p>
@@ -885,15 +1039,17 @@
         <dt><kbd>F</kbd></dt><dd>切换全屏</dd>
         <dt><kbd>I</kbd></dt><dd>显示 / 隐藏资料栏</dd>
         <dt><kbd>G</kbd></dt><dd>跳到指定时间</dd>
+        <dt><kbd>B</kbd></dt><dd>打开播放书签</dd>
+        <dt><kbd>[</kbd> / <kbd>]</kbd></dt><dd>降低 / 提高播放倍速</dd>
         <dt><kbd>?</kbd></dt><dd>打开快捷键帮助</dd>
-        <dt><kbd>Esc</kbd></dt><dd>关闭当前帮助</dd>
+        <dt><kbd>Esc</kbd></dt><dd>关闭当前弹窗或资料栏</dd>
       </dl>
       <button type="button" autofocus>关闭</button>
     </dialog>
     <script src="/vendor/plyr/plyr.min.js"></script>
     <script type="module">
       try {
-        await import("/js/player-page.js?v=20261023-subtitles-04");
+        await import("/js/player-page.js?v=20261113-player-switch-time-01");
       } finally {
         document.documentElement.classList.remove("app-module-loading");
       }

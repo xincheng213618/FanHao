@@ -1,7 +1,7 @@
 import { createApiClient } from "./api.js?v=20260701-gallery-merge-01";
 import { adminUrl } from "./admin-navigation.js?v=20260727-admin-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
-import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20261108-photo-issue-sort-01";
+import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20261113-novel-reading-filter-01";
 
 const MODULE_VIEWS = new Set(["gallery", "manga", "novels", "music", "tools"]);
 const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
@@ -58,29 +58,33 @@ function beginPhotoOverview(api) {
 
 async function loadCurrentModule(view) {
   if (view === "gallery") {
-    const [pageModule, rendererModule] = await Promise.all([
-      import("../modules/content-index/gallery-page.js?v=20261108-photo-issue-sort-01"),
-      import("../modules/content-index/gallery-renderer.js?v=20261108-photo-issue-sort-01")
+    const [pageModule, rendererModule, continueModule, watchlistModule] = await Promise.all([
+      import("../modules/content-index/gallery-page.js?v=20261113-photo-preview-01"),
+      import("../modules/content-index/gallery-renderer.js?v=20261113-photo-slideshow-01"),
+      import("../modules/media/continue-watching.js?v=20261113-media-continue-hide-01"),
+      import("../modules/media/watchlist.js?v=20261113-media-watchlist-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
       createRenderer: rendererModule.createGalleryRenderer,
+      createContinueWatching: continueModule.createContinueWatching,
+      createMediaWatchlist: watchlistModule.createMediaWatchlist,
       view
     };
   }
   if (view === "manga") {
-    const module = await import("../modules/photos/manga-page.js?v=20261004-manga-reader-owner-01");
+    const module = await import("../modules/photos/manga-page.js?v=20261113-manga-shelf-filters-01");
     return { createPage: module.createMangaPage, view };
   }
   if (view === "novels") {
-      const module = await import("../modules/novels/novel-page.js?v=20261004-novel-progress-01");
+      const module = await import("../modules/novels/novel-page.js?v=20261113-novel-auto-scroll-01");
     return { createPage: module.createNovelPage, view };
   }
   if (view === "music") {
-    const module = await import("../modules/music/music-page.js?v=20261004-music-list-02");
+    const module = await import("../modules/music/music-page.js?v=20261113-music-track-sleep-01");
     return { createPage: module.createMusicPage, view };
   }
-  const module = await import("../modules/tools/tools-page.js?v=20260727-game-library-redesign-01");
+  const module = await import("../modules/tools/tools-page.js?v=20261113-txt-append-01");
   return { createPage: module.createToolsPage, view };
 }
 
@@ -102,6 +106,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     formatBytes,
     formatDateTime,
     formatNumber,
+    galleryListRoute: () => routeUrl(currentRouteSnapshot({ galleryMediaId: "" }), { initialParams }),
     hidePersonProfile,
     openAdminScript,
     pushRoute,
@@ -116,6 +121,8 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
   if (pages.view === "gallery") {
     galleryRenderer = pages.createRenderer({
       ...shared,
+      createContinueWatching: pages.createContinueWatching,
+      createMediaWatchlist: pages.createMediaWatchlist,
       getGalleryPage: () => page,
       goBackToPhotoList,
       rememberPhotoListPosition,
@@ -131,7 +138,6 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         state.personWorksTotal = 0;
         state.personWorksFacets = null;
       },
-      galleryListRoute: () => routeUrl(currentRouteSnapshot({ galleryMediaId: "" }), { initialParams }),
       galleryModeLabel: galleryRenderer.modeLabel,
       normalizeUiConfig,
       renderGalleryStats: galleryRenderer.renderStats,
@@ -164,6 +170,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         gallerySubCategory: state.gallery.subCategory || "all",
         galleryPerson: state.gallery.person || "all",
         gallerySeriesKey: state.gallery.seriesKey || "",
+        galleryEpisodeQuery: state.gallery.episodeQuery || "",
         galleryPhotoDate: state.gallery.photoDate || "all",
         galleryPhotoSite: state.gallery.photoSite || "",
         gallerySort: state.gallery.sort || "updated",
@@ -174,7 +181,9 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         mangaComicId: state.manga.chapter?.comicId || state.manga.comic?.id || "",
         mangaChapterIndex: String(state.manga.chapter?.index || ""),
         mangaQuery: state.manga.query || "",
-        mangaSort: state.manga.sort || "updated"
+        mangaSort: state.manga.sort || "updated",
+        mangaFavorites: Boolean(state.manga.favoritesOnly),
+        mangaReading: state.manga.readingFilter || "all"
       });
     } else if (state.activeView === "novels") {
       Object.assign(route, {
@@ -182,6 +191,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         novelChapterIndex: String(state.novel.chapter?.index || ""),
         novelQuery: state.novel.query || "",
         novelCategory: state.novel.category || "all",
+        novelReadingStatus: state.novel.readingStatus || "",
         novelSort: state.novel.sort || "updated",
         novelMode: state.novel.mode || "books",
         novelAuthor: state.novel.author || "",
@@ -360,7 +370,13 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
       const focusPhotoListCard = photoListBackPending;
       photoListBackPending = false;
       nextPhotoListParent = null;
-      applyRoute(routeFromUrl(), event.state?.photoListPosition, focusPhotoListCard).catch(renderFatalError);
+      const route = routeFromUrl();
+      const entry = event.state;
+      // Album URLs identify the archive; our same-document history also holds
+      // its originating collection or album list, including the list sort.
+      const photoListEntry = route.view === "gallery" && route.galleryMode === "photo" && route.galleryAlbumId
+        && entry?.standaloneRoute && entry.photoListParent && entry.galleryAlbumId === route.galleryAlbumId;
+      applyRoute(photoListEntry ? entry : route, entry?.photoListPosition, focusPhotoListCard).catch(renderFatalError);
     });
   }
 
@@ -417,6 +433,7 @@ function createStandaloneState(view) {
       subCategory: "all",
       person: "all",
       seriesKey: "",
+      episodeQuery: "",
       photoDate: "all",
       sort: view === "gallery" ? "count" : "updated",
       sortDirection: "",

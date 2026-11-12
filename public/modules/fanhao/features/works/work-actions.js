@@ -10,9 +10,10 @@ export function createWorkActions({
   state
 }) {
   const favoriteWrites = new Set();
-  const isFavoritePending = (workId) => favoriteWrites.has(String(workId));
+  const directFavoriteWrites = new Set();
+  const isFavoritePending = (workId) => favoriteWrites.has(String(workId)) || directFavoriteWrites.has(String(workId));
   const favoriteFolderWrites = new Set();
-  const isFavoriteFolderPending = (workId) => favoriteFolderWrites.has(String(workId));
+  const isFavoriteFolderPending = (workId) => favoriteFolderWrites.has(String(workId)) || directFavoriteWrites.has(String(workId));
   async function toggleFavorite(workId, control = null) {
     const writeKey = String(workId);
     if (isFavoritePending(writeKey)) return null;
@@ -120,6 +121,66 @@ export function createWorkActions({
     }
   }
 
+  async function saveFavoriteToFolder(workId, folderId) {
+    const key = String(workId);
+    if (isFavoritePending(key) || isFavoriteFolderPending(key)) throw new Error("作品的收藏正在更新，请稍后重试");
+    directFavoriteWrites.add(key);
+    let data;
+    let removedWorkIds = [];
+    try {
+      data = await api(`/api/favorites/${encodeURIComponent(key)}`, { method: "PUT", body: { folderId } });
+      if (data.ok !== true || data.workId !== key || data.favorite !== true || data.favoriteFolder?.folderId !== folderId) {
+        throw new Error("未收到收藏保存结果，请重试");
+      }
+      state.favoriteFolders = data.folders || state.favoriteFolders;
+      updateWorkFavorite(workId, true, data.favoriteFolder);
+      updateCurrentWorkFavorite(workId, true, data.favoriteFolder);
+      if (state.library) state.library.user = data.user;
+      if (state.activeView === "favorites" && state.selectedFavoriteFolderId !== "all" && state.selectedFavoriteFolderId !== folderId
+          && state.works.some((item) => String(item.id) === key)) {
+        removedWorkIds = [key];
+        state.works = state.works.filter((item) => String(item.id) !== key);
+      }
+    } finally {
+      directFavoriteWrites.delete(key);
+    }
+    onCollectionStateChanged({ removedWorkIds });
+    onCurrentWorkFavoriteChanged(state.currentWork);
+    return { ...data, removedWorkIds };
+  }
+
+  async function removeFavorites(workIds) {
+    const ids = new Set(workIds.map(String));
+    for (const id of ids) {
+      if (isFavoritePending(id) || isFavoriteFolderPending(id)) throw new Error("有选中的作品正在更新收藏，请稍后重试");
+    }
+    for (const id of ids) directFavoriteWrites.add(id);
+    let data, removedWorkIds = [];
+    try {
+      data = await api("/api/favorites/batch-remove", { method: "PUT", body: { workIds: [...ids] } });
+      if (data.ok !== true || !Array.isArray(data.workIds) || data.workIds.length !== ids.size
+        || new Set(data.workIds).size !== ids.size || data.workIds.some(id => !ids.has(id))) {
+        throw new Error("未收到批量取消收藏结果，请重试");
+      }
+      const cleared = { favorite: false, favoriteFolderId: "", favoriteFolderName: "" };
+      for (const work of state.works) {
+        if (ids.has(String(work.id))) Object.assign(work, cleared);
+      }
+      if (state.currentWork && ids.has(String(state.currentWork.id))) Object.assign(state.currentWork, cleared);
+      if (state.activeView === "favorites") {
+        removedWorkIds = state.works.filter(work => ids.has(String(work.id))).map(work => String(work.id));
+        state.works = state.works.filter(work => !ids.has(String(work.id)));
+      }
+      state.favoriteFolders = data.folders || state.favoriteFolders;
+      if (state.library) state.library.user = data.user;
+    } finally {
+      for (const id of ids) directFavoriteWrites.delete(id);
+    }
+    onCollectionStateChanged({ removedWorkIds });
+    onCurrentWorkFavoriteChanged(state.currentWork);
+    return { ...data, removedWorkIds };
+  }
+
   function updateWorkFavorite(workId, favorite, favoriteFolder = null) {
     for (const work of state.works) {
       if (work.id !== workId) continue;
@@ -179,7 +240,7 @@ export function createWorkActions({
     }
   }
 
-  return { isFavoriteFolderPending, isFavoritePending, moveFavoriteToFolder, toggleFavorite, updateWorkSnapshot };
+  return { isFavoriteFolderPending, isFavoritePending, moveFavoriteToFolder, removeFavorites, saveFavoriteToFolder, syncFavoriteControl, toggleFavorite, updateWorkSnapshot };
 }
 
 function pickFavoriteState(work) {

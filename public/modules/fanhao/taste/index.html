@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#1f7a62" />
     <title>口味分析 · FanHao</title>
     <link rel="stylesheet" href="/css/foundation.css" />
-    <link rel="stylesheet" href="/modules/fanhao/taste/styles.css" />
+    <link rel="stylesheet" href="/modules/fanhao/taste/styles.css?v=20261113-taste-evidence-01" />
   </head>
   <body>
     <main>
@@ -48,6 +48,24 @@
         </section>
       </div>
     </main>
-    <script type="module" src="/modules/fanhao/taste/app.js"></script>
+    <dialog id="tasteEvidence" class="evidence-dialog" aria-labelledby="evidenceTitle">
+      <header class="evidence-header">
+        <h2 id="evidenceTitle"></h2>
+        <form method="dialog"><button type="submit" aria-label="关闭作品清单">关闭</button></form>
+      </header>
+      <div class="evidence-scopes" role="group" aria-label="作品标记状态">
+        <button id="evidenceMarked" type="button" aria-pressed="true">特别喜欢 [A]</button>
+        <button id="evidenceUnmarked" type="button" aria-pressed="false">未标记</button>
+      </div>
+      <p id="evidenceStatus" class="notice" role="status"></p>
+      <ul id="evidenceWorks" class="evidence-works" aria-label="匹配作品"></ul>
+      <footer class="evidence-footer">
+        <button id="evidencePrevious" type="button">上一页</button>
+        <button id="evidenceNext" type="button">下一页</button>
+        <button id="evidenceRetry" type="button" hidden>重试</button>
+        <button id="evidenceRefresh" type="button" hidden>重读分析</button>
+      </footer>
+    </dialog>
+    <script type="module" src="/modules/fanhao/taste/app.js?v=20261113-taste-evidence-01"></script>
   </body>
 </html>

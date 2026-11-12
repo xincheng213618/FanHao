@@ -1,5 +1,6 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 import { resolveWorkPage } from "./features/works/work-page-state.js";
+import { createCodeBatchLookup } from "./code-batch-lookup.js?v=20261113-code-batch-lookup-01";
 
 const PREFIX_INDEX_DESKTOP_PAGE_SIZE = 96;
 const PREFIX_INDEX_MOBILE_PAGE_SIZE = 64;
@@ -35,6 +36,7 @@ export function createCodePrefixPage(deps) {
   let prefixIndex = null;
   let renderedPrefixes = [];
   let detailPageOwner = null;
+  let batchLookup = null;
 
   state.codePrefixSortMode = readPrefixSortMode();
 
@@ -84,6 +86,7 @@ export function createCodePrefixPage(deps) {
   }
 
   async function showIndex(options = {}) {
+    batchLookup?.close();
     const navigationIntent = onNavigationStarted?.(options);
     const request = indexRequests.begin();
     detailRequests.cancel();
@@ -234,7 +237,17 @@ export function createCodePrefixPage(deps) {
     const summary = document.createElement("span");
     summary.className = "code-prefix-index-summary";
     summary.setAttribute("role", "status");
-    controls.append(searchLabel, clear, group, summary);
+    const lookup = document.createElement("button");
+    lookup.type = "button";
+    lookup.className = "code-batch-launch";
+    lookup.textContent = "批量核对番号";
+    lookup.setAttribute("aria-haspopup", "dialog");
+    lookup.addEventListener("click", () => {
+      if (!lookup.isConnected || state.activeView !== "codes" || state.selectedCodePrefix) return;
+      batchLookup ??= createCodeBatchLookup(api);
+      batchLookup.open();
+    });
+    controls.append(searchLabel, clear, lookup, group, summary);
     els.statsRow.append(controls);
   }
 
@@ -418,6 +431,7 @@ export function createCodePrefixPage(deps) {
   }
 
   async function selectPrefix(prefix, options = {}) {
+    batchLookup?.close();
     const navigationIntent = onNavigationStarted?.(options);
     const normalizedPrefix = String(prefix || "").trim().toUpperCase();
     if (!normalizedPrefix) return showIndex(options);
@@ -552,6 +566,7 @@ export function createCodePrefixPage(deps) {
   }
 
   function cancelPendingRequests() {
+    batchLookup?.close();
     indexRequests.cancel();
     detailRequests.cancel();
     detailPageOwner = null;

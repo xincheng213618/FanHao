@@ -1,0 +1,46 @@
+.studio-series-controls .studio-series-launch {
+  max-width: none;
+  border-color: var(--accent);
+  color: var(--accent-strong);
+}
+.studio-series-picker {
+  box-sizing: border-box;
+  width: min(620px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--ink);
+}
+.studio-series-picker::backdrop { background: rgba(16, 32, 24, .55); }
+.studio-series-picker > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.studio-series-picker > header div { min-width: 0; }
+.studio-series-picker h2 { margin: 0; font-size: 20px; }
+.studio-series-picker-studio { margin: 3px 0 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.studio-series-picker-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 8px; }
+.studio-series-picker-controls label { display: grid; flex: 0 1 auto; gap: 4px; min-width: 0; color: var(--muted); font-size: 12px; }
+.studio-series-picker-controls label:first-child { flex: 1 1 165px; }
+.studio-series-picker input, .studio-series-picker select, .studio-series-picker button {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: 36px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.studio-series-picker button { cursor: pointer; }
+.studio-series-picker header button { white-space: nowrap; }
+.studio-series-picker-status { margin: 6px 0; color: var(--muted); font-size: 13px; }
+.studio-series-picker-list { max-height: 52dvh; overflow: auto; margin: 0; padding: 0 2px; list-style: none; }
+.studio-series-picker-list li + li { margin-top: 4px; }
+.studio-series-picker-list button { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; text-align: left; }
+.studio-series-picker-list button[aria-current="true"], .studio-series-picker-list button:hover { border-color: var(--accent); background: var(--panel-soft); }
+.studio-series-picker-name { min-width: 0; overflow-wrap: anywhere; }
+.studio-series-picker-name small { display: block; color: var(--muted); font-size: 11px; }
+.studio-series-picker-count { flex-shrink: 0; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.studio-series-picker-more { margin-top: 8px; }

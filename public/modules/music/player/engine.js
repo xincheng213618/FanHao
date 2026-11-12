@@ -2,15 +2,15 @@
 // 这是音乐模块里唯一允许直接创建/操作 audio 的地方。
 // 除频谱绘制外，UI 更新通过 callbacks 回交给组合根（music-page.js）。
 
-import { normalizePlaybackSpeed } from "../format.js";
-import { MUSIC_VISUALIZER_FRAME_MS } from "../constants.js";
+import { normalizePlaybackSpeed, normalizeSleepTimerMinutes } from "../format.js?v=20261113-music-track-sleep-01";
+import { MUSIC_SLEEP_AFTER_CURRENT, MUSIC_VISUALIZER_FRAME_MS } from "../constants.js?v=20261113-music-track-sleep-01";
 import { captureWebAccount } from "../../../platform/accounts/session-context.js";
 
 /**
  * @param {object} options
  * @param {() => object} options.getState  返回宿主全局 state（需含 .music 与 .activeView）
  * @param {object} options.callbacks  UI 更新回调
- *   onPlay / onPause / onTimeUpdate / onEnded / onError(message)
+ *   onPlay / onPause / onTimeUpdate / onEnded({ stopAfterCurrent }) / onError(message)
  *   onSleepTimerChange() / onSaveProgress() / onLyricFollowResume()
  */
 export function createMusicPlayer({ getState, callbacks = {} }) {
@@ -42,6 +42,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   let sleepTimerTimeout = 0;
   let sleepTimerInterval = 0;
+  let sleepTrack = null;
 
   // ---- audio 元素与事件 ----
   function ensureAudio() {
@@ -85,8 +86,18 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
       callbacks.onTimeUpdate && callbacks.onTimeUpdate();
     });
     audio.addEventListener("ended", () => {
-      if (discardStaleRetry() || sourceDiscarded) return;
-      callbacks.onEnded && callbacks.onEnded();
+      // A queued event from the previous resource cannot finish the new one.
+      if (discardStaleRetry() || sourceDiscarded || audio.ended === false) return;
+      const stopAfterCurrent = Boolean(sleepTrack);
+      if (stopAfterCurrent) {
+        if (!sleepAfterCurrentActive()) {
+          clearSleepTimer();
+          callbacks.onSleepTimerChange && callbacks.onSleepTimerChange();
+          return;
+        }
+        expireSleepTimer(true);
+      }
+      callbacks.onEnded && callbacks.onEnded({ stopAfterCurrent });
     });
     audio.addEventListener("error", () => {
       // A queued error from a discarded resource no longer owns this element.
@@ -113,7 +124,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     if (audio.error && source && trackId) {
       // play() alone cannot recover a terminal MediaError. Reload only on an
       // explicit play intent, retaining the same track and its listening point.
-      const position = retryPosition && isRetryPositionCurrent(retryPosition) ? retryPosition.position
+      const position = retryPosition && ownsPlaybackSource(retryPosition) ? retryPosition.position
         : metadataLoaded || !restoreSavedPosition ? Number(audio.currentTime || 0) : Number(music().current?.positionMs || 0) / 1000;
       retryPosition = { source, trackId, position, account: captureWebAccount() };
       metadataLoaded = false;
@@ -131,7 +142,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     });
   }
 
-  function isRetryPositionCurrent(pending) {
+  function ownsPlaybackSource(pending) {
     if (audio.src !== pending.source || music().current?.id !== pending.trackId) return false;
     try {
       const account = captureWebAccount();
@@ -140,7 +151,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
   }
 
   function discardStaleRetry() {
-    if (!retryPosition || isRetryPositionCurrent(retryPosition)) return false;
+    if (!retryPosition || ownsPlaybackSource(retryPosition)) return false;
     // The default start is already installed. Clear it and silence queued
     // media callbacks before pausing, so they cannot save for a new account.
     retryPosition = null;
@@ -171,6 +182,10 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     retryPosition = null;
     restoreSavedPosition = true;
     const target = new URL(track.streamUrl, window.location.href).href;
+    if (sleepTrack && (!ownsPlaybackSource(sleepTrack) || target !== sleepTrack.source || track.id !== sleepTrack.trackId)) {
+      clearSleepTimer();
+      callbacks.onSleepTimerChange && callbacks.onSleepTimerChange();
+    }
     applyPlaybackRate(music().playbackSpeed);
     if (audio.src !== target || resettingStart) {
       audio.src = target;
@@ -188,7 +203,7 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     // Native Audio retains that default start until metadata becomes ready.
     restoreSavedPosition = false;
     const position = Number(seconds || 0);
-    if (retryPosition && isRetryPositionCurrent(retryPosition)) retryPosition.position = position;
+    if (retryPosition && ownsPlaybackSource(retryPosition)) retryPosition.position = position;
     audio.currentTime = position;
   }
 
@@ -462,20 +477,32 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
 
   // ---- 睡眠定时 ----
   function syncSleepTimer() {
-    if (!sleepTimerActive()) {
-      music().sleepMinutes = 0;
-      music().sleepUntil = 0;
+    if (sleepAfterCurrentActive()) return;
+    if (!music().sleepUntil) {
+      clearSleepTimer();
+    } else if (!sleepTimerRemainingMs()) {
+      expireSleepTimer();
     } else if (!sleepTimerTimeout) {
       scheduleSleepTimer();
     }
   }
 
   function setSleepTimer(minutes) {
-    const normalized = normalizeSleepTimerMinutesLocal(minutes);
-    clearSleepTimerHandle();
+    const normalized = normalizeSleepTimerMinutes(minutes);
+    if (normalized === MUSIC_SLEEP_AFTER_CURRENT) {
+      const trackId = music().current?.id;
+      if (!trackId || !audio?.src) return;
+      let account;
+      try { account = captureWebAccount(); } catch { return; }
+      clearSleepTimer();
+      sleepTrack = { source: audio.src, trackId, account };
+      music().sleepMinutes = normalized;
+      music().status = "当前歌曲播完后将暂停播放";
+      callbacks.onSleepTimerChange && callbacks.onSleepTimerChange();
+      return;
+    }
+    clearSleepTimer();
     if (!normalized) {
-      music().sleepMinutes = 0;
-      music().sleepUntil = 0;
       music().status = "已关闭睡眠定时";
       callbacks.onSleepTimerChange && callbacks.onSleepTimerChange();
       return;
@@ -494,12 +521,12 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
       expireSleepTimer();
       return;
     }
-    sleepTimerTimeout = window.setTimeout(expireSleepTimer, Math.min(remaining, 2147483647));
+    const until = music().sleepUntil;
+    sleepTimerTimeout = window.setTimeout(() => {
+      if (music().sleepUntil === until) expireSleepTimer();
+    }, Math.min(remaining, 2147483647));
     sleepTimerInterval = window.setInterval(() => {
-      if (!sleepTimerActive()) {
-        clearSleepTimerHandle();
-        return;
-      }
+      if (music().sleepUntil !== until) return;
       if (sleepTimerRemainingMs() <= 0) {
         expireSleepTimer();
         return;
@@ -519,18 +546,27 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     }
   }
 
-  function expireSleepTimer() {
+  function clearSleepTimer() {
     clearSleepTimerHandle();
+    sleepTrack = null;
     music().sleepMinutes = 0;
     music().sleepUntil = 0;
+  }
+
+  function expireSleepTimer(afterCurrent = false) {
+    clearSleepTimer();
     ensureAudio();
     if (!audio.paused) pause();
-    music().status = "睡眠定时已暂停播放";
+    music().status = afterCurrent ? "当前歌曲已播完，已暂停播放" : "睡眠定时已暂停播放";
     callbacks.onSleepTimerChange && callbacks.onSleepTimerChange();
   }
 
   function sleepTimerActive() {
-    return sleepTimerRemainingMs() > 0;
+    return sleepAfterCurrentActive() || sleepTimerRemainingMs() > 0;
+  }
+
+  function sleepAfterCurrentActive() {
+    return Boolean(sleepTrack && music().sleepMinutes === MUSIC_SLEEP_AFTER_CURRENT && ownsPlaybackSource(sleepTrack));
   }
 
   function sleepTimerRemainingMs() {
@@ -563,11 +599,6 @@ export function createMusicPlayer({ getState, callbacks = {} }) {
     } catch {
       return 1;
     }
-  }
-
-  function normalizeSleepTimerMinutesLocal(value) {
-    const minutes = Math.round(Number(value || 0));
-    return [0, 10, 15, 30, 45, 60, 90].includes(minutes) ? minutes : 0;
   }
 
   return {

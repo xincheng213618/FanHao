@@ -4,6 +4,8 @@ import path from "node:path";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { lookupWorkCodes } from "../src/modules/fanhao/server/catalog/code-batch-lookup.js";
+import { readJsonBody } from "../src/platform/server/request-io.js";
 
 // Actual Web shell and index; only synthetic catalog data on private HTTP.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), publicRoot = path.join(root, "public");
@@ -18,6 +20,19 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://fixture");
+      if (url.pathname === "/api/code-prefixes/lookup") {
+        assert.equal(req.method, "POST", "pasted filenames must be sent in a body");
+        const { input } = await readJsonBody(req);
+        runtime.lookups.push(input);
+        if (runtime.lookupFailed) return json(res, { error: "fixture read failure" }, 503);
+        const local = new Map([["fix001", { title: "Local fixture", infoSummary: { code: "FIX-001" } }]]);
+        const result = lookupWorkCodes(input, {
+          localByCodeKey: () => local,
+          localByExactCode: () => local,
+          searchMissing: (code) => code === "FIX-002" ? [{ title: "Indexed fixture", infoSummary: { code } }] : []
+        });
+        return json(res, result);
+      }
       assert.equal(req.method, "GET", "index search must not write");
       if (url.pathname === "/api/library") return json(res, { people: [], works: [], totals: {}, user: {}, access: { mode: "local" } });
       if (url.pathname === "/api/code-prefixes") {
@@ -38,6 +53,44 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`, browser = await chromium.launch({ executablePath, headless: true });
   try {
+    await run("batch code lookup classifies a pasted list without leaving the index", async () => {
+      const page = await open();
+      try {
+        const launcher = page.getByRole("button", { name: "批量核对番号" });
+        await page.evaluate(() => {
+          Object.defineProperty(navigator, "clipboard", { value: { writeText: async () => { throw new Error("fixture"); } } });
+        });
+        await launcher.click();
+        const dialog = page.getByRole("dialog", { name: "批量核对番号" });
+        const textarea = dialog.getByLabel(/番号或文件名/);
+        const submit = dialog.getByRole("button", { name: "核对清单" });
+        assert.equal(await textarea.evaluate((node) => document.activeElement === node), true);
+        const input = "X:\\Fixture\\FIX_001.mp4\nFIX-002\nFIX-003\nfix-001\n没有番号";
+        await textarea.fill(input);
+        runtime.lookupFailed = true;
+        await submit.click();
+        await dialog.getByText("fixture read failure").waitFor();
+        runtime.lookupFailed = false;
+        await submit.click();
+        await dialog.getByText(/已入库 1.*索引有资料，未入库 1.*索引无匹配 1.*无法识别 1.*合并重复 1/).waitFor();
+        assert.deepEqual(runtime.lookups, [input, input]);
+        assert.equal(new URL(page.url()).pathname, "/fanhao/codes");
+        assert.equal(await dialog.getByRole("link", { name: "FIX-002" }).getAttribute("href"), "/fanhao?q=FIX-002");
+        await dialog.getByLabel("结果筛选").selectOption("invalid");
+        await dialog.getByText("第 5 行").waitFor();
+        assert.equal(await dialog.getByRole("listitem").count(), 1);
+        await dialog.getByRole("button", { name: "复制待核对番号" }).click();
+        const pending = dialog.getByLabel("待核对番号", { exact: true });
+        await pending.waitFor();
+        assert.equal(await pending.inputValue(), "FIX-002\nFIX-003");
+        assert.equal(await pending.evaluate((node) => node.selectionEnd - node.selectionStart), 15);
+        const bounds = await dialog.boundingBox();
+        assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 320, "batch lookup must fit the narrow fixture viewport");
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        assert.equal(await launcher.evaluate((node) => document.activeElement === node), true);
+      } finally { await page.close(); }
+    });
     await run("prefix search retains an unchanged broad result across input", async () => {
       const page = await open();
       try {
@@ -166,7 +219,7 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
   } finally { for (const pending of held) pending.release(); await browser.close(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
   async function run(name, action) { if (casePattern && !name.includes(casePattern)) return; await action(); checks++; console.log(`PASS ${name}`); }
   async function open({ pending = null, waitForRows = true } = {}) {
-    runtime = { reads: 0, details: [], pending };
+    runtime = { reads: 0, details: [], pending, lookups: [], lookupFailed: false };
     const page = await browser.newPage({ viewport: { width: 320, height: 820 } }); page.on("pageerror", error => faults.push(error.message));
     page.setDefaultTimeout(5000);
     await page.addInitScript(() => {

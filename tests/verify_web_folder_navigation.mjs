@@ -13,12 +13,32 @@ class Element {
     this.textContent = "";
     this.disabled = false;
     this.html = "";
+    this.className = "";
+    this.parentNode = null;
   }
-  set innerHTML(value) { this.html = value; this.children = []; }
+  set innerHTML(value) {
+    this.html = value;
+    for (const child of [...this.children]) child.remove();
+  }
   get innerHTML() { return this.html; }
-  append(...children) { this.children.push(...children); }
+  append(...children) {
+    for (const child of children) {
+      child.remove();
+      child.parentNode = this;
+      this.children.push(child);
+    }
+  }
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter(child => child !== this);
+    this.parentNode = null;
+  }
   setAttribute(name, value) { this.attributes.set(name, value); }
   addEventListener(name, listener) { this.listeners.set(name, listener); }
+  querySelector(selector) {
+    assert.equal(selector, ".history-range-controls", "unexpected fixture selector");
+    return this.children.find(child => child.className.split(" ").includes("history-range-controls"));
+  }
   querySelectorAll(selector) {
     assert.equal(selector, "button[data-folder-mutation]", "unexpected fixture selector");
     return this.children.flatMap((child) => [
