@@ -87,7 +87,8 @@ function harness(input = source, { mode = "movie", cached = true } = {}) {
     startRender(id = ID) { c.currentView = "mediaDetail"; c.currentViewParams = { id, mode }; const guard = c.beginViewRender(c.currentView, c.currentViewParams); return module.routes.find(route => route.view === "mediaDetail").render(c.currentViewParams, guard); },
     leave() { c.invalidateViewRender(); c.currentView = "channel"; c.currentViewParams = { mode }; els.viewContent.textContent = "UNRELATED PAGE"; },
     abort() { c.activeViewController.abort(); },
-    button: () => els.viewContent.querySelector(".media-native-play-surface"), errors: () => els.viewContent.querySelectorAll(".media-player-error"),
+    button: () => els.viewContent.querySelector(".media-native-play-surface"),
+    restart: () => els.viewContent.querySelector(".media-native-restart"), errors: () => els.viewContent.querySelectorAll(".media-player-error"),
     async settle() { for (let round = 0; round < 40; round++) { await Promise.resolve(); for (const [id, timer] of [...timers]) if (timers.delete(id)) { clock += timer.delay; timer.fn(); } }
       assert.equal(calls.errors.length, 0, calls.errors[0]?.stack || "No unhandled real callback failure"); },
     async click() { assert(h.button()); h.button().click(); await h.settle(); },
@@ -169,6 +170,46 @@ test("programmatic double click stays single-flight through background refresh a
   button.click(); await h.settle(); assert.equal(h.calls.fetch.filter(call => call.kind === "detail").length, 2); assert.equal(h.calls.fetch.filter(call => call.kind === "info").length, 1);
   background.resolve({ item: item("movie", 30) }); await rendering; detail.resolve({ item: item("movie", 125) }); info.resolve({ mode: "direct", duration: 240 }); await h.settle();
   assert.equal(h.calls.bridge.length, 1); h.queue("detail", { item: item("movie", 150) }); await h.click(); assert.equal(h.calls.bridge.length, 2); assert.equal(h.calls.bridge[1].position, 150);
+});
+for (const mode of ["movie", "tv"]) test(`${mode}: restart uses zero while continuing still uses freshly read progress`, async input => {
+  const h = harness(input, { mode }), background = deferred(), detail = deferred(), info = deferred();
+  h.queue("detail", background); const rendering = h.startRender(); await h.settle();
+  const restart = h.restart(), resume = h.button();
+  assert.equal(restart.hidden, false); assert.match(resume.textContent, /1:13/);
+  h.queue("detail", detail); h.queue("info", info);
+  restart.click(); resume.click(); restart.click(); await h.settle();
+  assert.equal(restart.disabled, true); assert.equal(resume.disabled, true);
+  assert.equal(h.calls.fetch.filter(call => call.kind === "detail").length, 2);
+  assert.equal(h.calls.fetch.filter(call => call.kind === "info").length, 1);
+  background.resolve({ item: item(mode, 42) }); await rendering;
+  detail.resolve({ item: item(mode, 150) });
+  info.resolve({ mode: "direct", duration: 240, fallbackStreamUrl: "/fixture-fallback.m3u8" });
+  await h.settle();
+  assert.equal(h.calls.bridge.length, 1); assert.equal(h.calls.bridge[0].position, 0);
+  assert.equal(h.calls.bridge[0].fallbackUrl, `${A}/fixture-fallback.m3u8`);
+  assert.equal(h.calls.bridge[0].progressUrl, `${A}/api/progress/${encodeURIComponent(ID)}`);
+  assert.equal(restart.disabled, false); assert.equal(h.button(), resume);
+  h.queue("detail", { item: item(mode, 155) }); await h.click();
+  assert.equal(h.calls.bridge.length, 2); assert.equal(h.calls.bridge[1].position, 155);
+});
+test("restart appears and disappears with authoritative return progress", async input => {
+  const h = harness(input, { cached: false });
+  h.queue("detail", { item: item("movie", 0) }); await h.startRender(); await h.settle();
+  const restart = h.restart();
+  assert.equal(restart.hidden, true);
+  restart.click(); await h.settle(); assert.equal(h.calls.bridge.length, 0);
+  h.queue("detail", { item: item("movie", 88) }); await h.focus();
+  assert.equal(restart.hidden, false);
+  restart.focus();
+  h.queue("detail", { item: item("movie", 237) }); await h.focus();
+  assert.equal(restart.hidden, true); assert.equal(h.document.activeElement, h.button());
+});
+test("retiring a restart in flight prevents native opening", async input => {
+  const h = harness(input, { cached: false }), detail = deferred();
+  await h.startRender(); await h.settle();
+  h.queue("detail", detail); h.restart().click(); await h.settle();
+  h.leave(); detail.resolve({ item: item("movie", 150) }); await h.settle();
+  assert.equal(h.calls.bridge.length, 0); assert.equal(h.els.viewContent.textContent, "UNRELATED PAGE");
 });
 test("background refresh cannot create another enabled surface while bridge promise is pending", async input => {
   const h = harness(input), background = deferred(), native = deferred(); h.queue("detail", background); const rendering = h.startRender(); await h.settle(); const button = h.button();
@@ -255,6 +296,8 @@ const transformFunction = (value, name, change) => {
   const method = tail.slice(0, end.index + end[0].length); return replaceOnce(value, method, change(method));
 };
 mutate("disconnect accepted intent notification", tests[0].name, value => replaceOnce(value, "playbackContext.onPlayRequested?.();", "/* mutation: notification disconnected */"));
+mutate("restart falls through to the saved position", "movie: restart uses zero while continuing still uses freshly read progress", value =>
+  replaceOnce(value, "playbackContext.fromBeginning ? 0 : mediaResumePosition", "mediaResumePosition"));
 mutate("allow background success to rebuild accepted button", tests[0].name, value => replaceOnce(value, "if (!isCurrent() || playbackRequested) return;", "if (!isCurrent()) return;"));
 mutate("allow passive failure message after accepted click", "accepted click suppresses unrelated background error while native still launches", value => transformFunction(value, "renderMediaDetail", method => {
   const target = "if (!isCurrent() || playbackRequested) return;", index = method.lastIndexOf(target); assert(index >= 0);

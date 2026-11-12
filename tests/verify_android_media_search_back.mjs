@@ -52,6 +52,7 @@ function harness(input = sources) {
   c.els.searchInput.select = () => {};
   Object.assign(c, {
     searchPrepareTimer: 0, renderedSearchController: null,
+    readPhotoPositions: () => [], savePhotoPosition() {}, discardPhotoPosition() {}, openPhotoResumeHistory() {}, openMangaCatalogSearch() {},
     requestAnimationFrame: callback => callback(),
     syncModuleChrome: () => false,
     mediaViewer: { close: () => false },
@@ -74,7 +75,9 @@ function harness(input = sources) {
   const renderBoundary = name => (...args) => { renders.push({ name, args }); };
   c.createChannelViews = () => Object.fromEntries(["renderChannel", "renderPhotoDetail", "renderMangaDetail", "renderMangaChapter", "renderMediaDetail", "deactivate"].map(name => [name, renderBoundary(name)]));
   // Full fanhao adapter construction uses these unrelated content renderers.
-  const contentViews = () => new Proxy({}, { get: (_value, name) => name === "handleBack" ? () => false : renderBoundary(String(name)) });
+  const contentViews = () => new Proxy({ favoriteFolders: { closePicker() {} } }, {
+    get: (views, name) => views[name] ?? (name === "handleBack" ? () => false : renderBoundary(String(name)))
+  });
   for (const name of ["createWorkViews", "createPeopleViews", "createDetailViews", "createCodePrefixViews"]) c[name] = contentViews;
   const roots = input.chrome.match(/^export const FANHAO_ROOT_VIEWS = .*;$/m);
   assert(roots, "Real fanhao root-view declaration exists");

@@ -26,6 +26,22 @@
 .novel-mobile-shelf-toolbar button { min-height: 44px; border: 0; padding: 0 2px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 500; }
 .novel-mobile-shelf-toolbar button[aria-pressed="true"] { border-bottom: 2px solid var(--mobile-accent); color: var(--mobile-accent); }
 .novel-mobile-shelf-toolbar .novel-mobile-shelf-import { color: var(--mobile-accent); }
+.novel-mobile-shelf-toolbar .novel-mobile-shelf-read-later { min-width: 44px; margin-inline-start: auto; color: var(--mobile-accent); }
+
+.novel-mobile-reading-state { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; color: var(--muted); font-size: 13px; }
+.novel-mobile-reading-state select { min-width: 0; min-height: 44px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); color: var(--ink); font: inherit; }
+
+.novel-mobile-read-later-list { grid-column: 1 / -1; min-width: 0; }
+.novel-mobile-read-later-list input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-soft); color: var(--ink); font: inherit; }
+.novel-mobile-read-later-list ul { display: grid; gap: 2px; margin: 8px 0; padding: 0; list-style: none; }
+.novel-mobile-read-later-list li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; border-bottom: 1px solid var(--line); }
+.novel-mobile-read-later-list button { min-height: 44px; min-width: 44px; padding: 6px; border: 0; background: transparent; color: var(--ink); font: inherit; }
+.novel-mobile-read-later-list .novel-mobile-read-later-open { text-align: start; overflow-wrap: anywhere; }
+.novel-mobile-read-later-list small { display: block; color: var(--muted); }
+.novel-mobile-read-later-list .novel-mobile-read-later-remove { color: var(--mobile-accent); }
+.novel-mobile-read-later-list [role="status"] { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+.novel-mobile-read-later-list [role="status"]:empty { margin: 0; }
+.novel-mobile-read-later-error { grid-column: 1 / -1; margin: 4px 0; color: var(--danger, #b7443c); font-size: 13px; overflow-wrap: anywhere; }
 
 .novel-mobile-list:not(.manage) { grid-template-columns: minmax(0, 1fr); gap: 0; padding: 0 0 16px; }
 .novel-mobile-card.novel-mobile-book-row {
@@ -102,6 +118,8 @@
 .novel-mobile-detail-body h1 { margin: 0; font-size: 22px; line-height: 1.4; font-weight: 650; overflow-wrap: anywhere; }
 .novel-mobile-detail-body > span { color: var(--muted); font-size: 12px; font-weight: 400; line-height: 1.8; white-space: normal; overflow-wrap: anywhere; }
 .novel-mobile-detail-hero > .novel-mobile-detail-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; margin: 0; gap: 10px; }
+.novel-mobile-detail-hero > .novel-mobile-detail-actions:has(.novel-mobile-detail-read-later) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.novel-mobile-detail-read-later[aria-pressed="true"] { color: var(--mobile-accent); }
 .novel-mobile-detail-actions button { min-height: 46px; font-size: 13px; font-weight: 600; }
 .novel-mobile-detail-actions button.primary { border-color: var(--mobile-accent); background: var(--mobile-accent); }
 .novel-mobile-reading-status { grid-column: 1 / -1; gap: 4px; padding-top: 4px; }
@@ -117,6 +135,8 @@
 .novel-mobile-summary-panel.collapsed p { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
 .novel-mobile-summary-toggle { justify-self: start; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--mobile-accent); font-size: 12px; }
 .novel-mobile-catalog { padding: 16px; scroll-margin-top: 12px; }
+.novel-mobile-catalog > div:first-child:has(.novel-mobile-detail-book-search) { justify-content: flex-start; gap: 10px; }
+.novel-mobile-detail-book-search { margin-inline-start: auto; min-height: 44px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--mobile-accent); font-size: 13px; }
 .novel-mobile-catalog-tools input,
 .novel-mobile-catalog-tools select,
 .novel-mobile-catalog-tools button { min-height: 44px; }
@@ -125,7 +145,106 @@
 .novel-mobile-chapter strong { font-size: 14px; font-weight: 500; }
 
 .novel-reader-screen { align-content: start; }
-.novel-reader-action-row { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.novel-reader-action-row { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.novel-reader-action-row .novel-reader-tool-button { padding-inline: 2px; white-space: nowrap; }
+.novel-reader-bookmark-trigger { min-width: 48px; border: 1px solid var(--line); border-radius: 12px; padding: 0 8px; font: inherit; font-size: 13px; font-weight: 700; }
+.novel-reader-bookmark-trigger:disabled { opacity: .45; }
+.novel-bookmarks-night { --surface-raised: #23211f; --line: #494541; color: #e7ded3; }
+.novel-reader-bookmarks { grid-column: 1 / -1; min-width: 0; }
+.novel-reader-bookmarks ul { display: grid; gap: 8px; padding: 0; margin: 0; list-style: none; }
+.novel-reader-bookmarks li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.novel-reader-bookmarks button { min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: transparent; color: inherit; font: inherit; }
+.novel-reader-bookmarks .novel-bookmark-open { text-align: start; overflow-wrap: anywhere; }
+.novel-reader-bookmarks .novel-bookmark-open:disabled { opacity: .55; }
+.novel-reader-bookmarks p { margin: 8px 0; font-size: 13px; }
+.novel-reader-screen.search-open .novel-reader-topbar,
+.novel-reader-screen.search-open .novel-reader-toolbar { visibility: hidden; }
+
+.novel-reader-screen.mode-scroll .novel-reader-action-row { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
+.novel-reader-screen.mode-page .novel-reader-auto-scroll-start,
+.novel-reader-screen.mode-page [data-novel-setting="autoScrollSpeed"] { display: none; }
+.novel-reader-screen:not(.menu-open) .novel-reader-auto-scroll-start { visibility: hidden; }
+.novel-reader-action-row .novel-reader-auto-scroll-start { padding: 0 2px; font-size: 11px; line-height: 1.15; overflow-wrap: anywhere; }
+
+.novel-reader-auto-scroll-stop {
+  position: fixed;
+  z-index: 33;
+  inset-inline-end: 14px;
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, .24);
+  border-radius: 10px;
+  background: rgba(32, 30, 28, .94);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+}
+.novel-reader-chapter-search {
+  position: fixed;
+  z-index: 34;
+  top: calc(8px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
+  right: max(8px, env(safe-area-inset-right));
+  left: max(8px, env(safe-area-inset-left));
+  max-width: 560px;
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, 44px);
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 10px;
+  background: #252321;
+  color: #fff;
+  color-scheme: dark;
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.22);
+}
+.novel-reader-chapter-search input,
+.novel-reader-chapter-search button {
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 6px;
+  background: #383432;
+  color: inherit;
+}
+.novel-reader-chapter-search input { padding-inline: 8px; font-size: 16px; }
+.novel-reader-chapter-search button { padding: 0; font-size: 18px; }
+.novel-reader-chapter-search button:disabled { opacity: 0.45; }
+.novel-reader-chapter-search :focus-visible { outline: 2px solid #ffc467; outline-offset: 1px; }
+.novel-reader-chapter-search [role="status"] { grid-column: 1 / -1; padding-inline: 2px; color: #e6ddd4; font-size: 12px; }
+.novel-reader-chapter-search [role="status"]:empty { display: none; }
+.novel-reader-chapter-search:has(.novel-reader-search-whole-book) [role="status"] { grid-column: 1 / 3; grid-row: 2; align-self: center; }
+.novel-reader-chapter-search .novel-reader-search-whole-book { grid-column: 3 / -1; grid-row: 2; font-size: 14px; }
+.novel-book-text-search {
+  box-sizing: border-box;
+  width: min(560px, calc(100% - 24px));
+  max-height: min(760px, calc(100dvh - 32px));
+  padding: 14px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.novel-book-text-search::backdrop { background: rgba(0, 0, 0, .46); }
+.novel-book-text-search.night { --surface: #252321; --ink: #f9f2ea; --muted: #d3c6bb; --line: #5c514b; color-scheme: dark; }
+.novel-book-text-search header,
+.novel-book-text-search form { display: flex; align-items: center; gap: 8px; }
+.novel-book-text-search header { justify-content: space-between; margin-block-end: 8px; }
+.novel-book-text-search input,
+.novel-book-text-search button { min-height: 44px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--surface); color: inherit; }
+.novel-book-text-search input { flex: 1; min-width: 0; font-size: 16px; }
+.novel-book-text-search form button { flex: 0 0 auto; }
+.novel-book-text-search [role="status"] { margin: 10px 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.novel-book-text-search ul { display: grid; gap: 6px; list-style: none; padding: 0; margin: 0 0 8px; }
+.novel-book-text-search ul:empty { margin: 0; }
+.novel-book-text-search .novel-book-text-result { display: grid; gap: 4px; width: 100%; text-align: start; overflow-wrap: anywhere; }
+.novel-book-text-result span { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.novel-book-text-result mark { background: #ffd66a; color: #2f1e00; }
+.novel-reader-content::highlight(novel-reader-search-match) { background-color: #ffd66a; color: #2f1e00; }
+.novel-reader-content mark.novel-reader-search-match { background-color: #ffd66a; color: #2f1e00; }
 .novel-reader-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .novel-reader-panel-head > strong { font-size: 16px; font-weight: 600; }
 .novel-reader-panel-head button { min-width: 56px; }

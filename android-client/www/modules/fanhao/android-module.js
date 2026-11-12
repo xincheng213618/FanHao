@@ -1,6 +1,6 @@
-import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-76f4b0fadf4d";
-import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-76f4b0fadf4d";
-import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-76f4b0fadf4d";
+import { FANHAO_ROOT_VIEWS, renderFanhaoChrome } from "./chrome.js?v=assets-06c1d7f13464";
+import { createDetailViews, createPeopleViews, createWorkViews } from "./index.js?v=assets-06c1d7f13464";
+import { createCodePrefixViews } from "./features/code-prefixes/prefix-views.js?v=assets-06c1d7f13464";
 
 export function createAndroidModule({ host }) {
   const workViews = createWorkViews({
@@ -92,17 +92,23 @@ export function createAndroidModule({ host }) {
       route("studioDetail", (params, guard) => workViews.renderStudioDetail(params.studioId, params.seriesId, guard)),
       route("history", (_params, guard) => workViews.renderHistory(guard)),
       route("search", (params, guard) => workViews.renderSearchResults(params, guard)),
-      route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, params.scope, guard)),
+      route("personDetail", (params, guard) => detailViews.renderPersonDetail(params.personId, params.scope, guard, params.query)),
       route("workDetail", (params, guard) => detailViews.renderWorkDetail(params.workId, guard))
     ].map((entry) => ({
       ...entry,
       render(params, guard) {
+        workViews.favoriteFolders.closePicker({ restoreFocus: false });
         workViews.releaseAllWorks();
         return entry.render(params, guard);
       }
     })),
-    deactivate: () => workViews.releaseAllWorks(),
-    handleBack: () => detailViews.handleBack?.() === true,
+    deactivate() {
+      workViews.favoriteFolders.closePicker({ restoreFocus: false });
+      workViews.releaseAllWorks();
+    },
+    handleBack: (view, params) => workViews.favoriteFolders.closePicker()
+      || (view === "works" && params?.favorite === "1" && workViews.closeFavoriteBatch())
+      || detailViews.handleBack?.() === true,
     search,
     renderChrome: (context) => renderFanhaoChrome(context, host, { peopleViews, workViews }),
     api: { codePrefixViews, detailViews, peopleViews, workViews }

@@ -1,9 +1,9 @@
-import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-76f4b0fadf4d";
+import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-06c1d7f13464";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials } from "../shared.js?v=assets-76f4b0fadf4d";
-import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-76f4b0fadf4d";
-import { renderFollowingAuthorTools } from "./following-view.js?v=assets-76f4b0fadf4d";
-import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-76f4b0fadf4d";
+import { DEFAULT_SORT, initials, normalizeShortVideoMedia, selectOption } from "../shared.js?v=assets-06c1d7f13464";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-06c1d7f13464";
+import { renderFollowingAuthorTools } from "./following-view.js?v=assets-06c1d7f13464";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-06c1d7f13464";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);
@@ -35,6 +35,8 @@ export function createShortVideoListView(context = {}) {
   function renderListShell({ preserveVideoPagingFocus = false } = {}) {
     const focusedPaging = preserveVideoPagingFocus && els.viewContent.contains(document.activeElement)
       && document.activeElement.matches("button.short-video-mobile-load-more");
+    const focusedMedia = document.activeElement?.classList?.contains("short-video-mobile-media-filter")
+      && els.viewContent.contains(document.activeElement);
     releaseAuthorIndex();
     els.viewContent.innerHTML = "";
     resetListLoadMoreObserver();
@@ -73,6 +75,8 @@ export function createShortVideoListView(context = {}) {
       els.viewContent.append(shell);
       return;
     }
+    const mediaFilter = renderMediaFilter();
+    shell.append(mediaFilter);
     if (listState.status && !(listState.data?.videos || []).length) {
       const status = document.createElement("div");
       status.className = "short-video-mobile-status";
@@ -95,11 +99,29 @@ export function createShortVideoListView(context = {}) {
     shell.append(grid);
     syncListLoadMoreSentinel(shell);
     els.viewContent.append(shell);
+    if (focusedMedia) mediaFilter.querySelector("select").focus({ preventScroll: true });
     if (focusedPaging) {
       const pagingButton = shell.querySelector("button.short-video-mobile-load-more");
       if (pagingButton) pagingButton.focus({ preventScroll: true });
       else focusLastVideo(shell);
     }
+  }
+
+  function renderMediaFilter() {
+    const label = document.createElement("label");
+    label.className = "short-video-mobile-media-controls";
+    label.textContent = "作品类型";
+    const select = document.createElement("select");
+    select.className = "short-video-mobile-media-filter";
+    select.append(selectOption("all", "全部作品"), selectOption("video", "视频"), selectOption("gallery", "图文"));
+    select.value = normalizeShortVideoMedia(listState.media);
+    select.addEventListener("change", () => {
+      if (!select.isConnected || !els.viewContent.contains(select)) return;
+      const media = normalizeShortVideoMedia(select.value);
+      if (media !== normalizeShortVideoMedia(listState.media)) updateListParams({ media });
+    });
+    label.append(select);
+    return label;
   }
 
   function appendListVideos(videos = []) {
@@ -120,6 +142,8 @@ export function createShortVideoListView(context = {}) {
   function setListRefreshing(refreshing) {
     const shell = els.viewContent.querySelector(".short-video-mobile-list");
     if (!shell) return;
+    const media = shell.querySelector(".short-video-mobile-media-filter");
+    if (media) media.value = normalizeShortVideoMedia(listState.media);
     shell.classList.toggle("is-refreshing", Boolean(refreshing));
     if (refreshing) {
       shell.style.setProperty("--short-video-preserved-height", `${Math.max(shell.offsetHeight, 1)}px`);

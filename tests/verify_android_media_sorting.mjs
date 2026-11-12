@@ -72,6 +72,7 @@ function harness(input = sources, { storage = new Map(), hash = "", cache = new 
     photoCatalogCollections: items => items, loadPreviewImage() {},
     enhanceAutoLoadMore: (button, handler) => { loadButtons.push({ button, handler }); return button; },
     fetchJson: async (source, path, options) => {
+      if (path.startsWith("/api/gallery-media/continue-watching?")) return { items: [] };
       calls.network.push({ source, path, options }); const response = queue.shift();
       if (response instanceof Error) throw response;
       const actual = service.itemsPayload(new URL(path, source));

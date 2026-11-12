@@ -32,7 +32,8 @@ const unguardedProgressDelivery = process.argv.includes("--unguarded-reader-prog
 const unguardedProgressHandle = process.argv.includes("--unguarded-reader-progress-handle");
 const readerEventsOnly = process.argv.includes("--reader-events-only") || legacyReaderEvents || unguardedReaderBack || unguardedReaderContent
   || unguardedProgressEntry || unguardedProgressDelivery || unguardedProgressHandle;
-const focused = catalogOnly || menuOnly || overlayOnly || inputOnly || detailOnly || readerEventsOnly;
+const autoScrollOnly = process.argv.includes("--auto-scroll-only");
+const focused = catalogOnly || menuOnly || overlayOnly || inputOnly || detailOnly || readerEventsOnly || autoScrollOnly;
 let viewsSource = fs.readFileSync(path.join(assets, "modules/novels/novel-views.js"), "utf8").replace(/\r\n/g, "\n");
 const screenClick = `    screen.addEventListener("click", ownAction((event) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -432,12 +433,15 @@ try {
     await page.close();
     console.log(`PASS ${width}px: library/detail navigation without progress writes, summary, catalog, reader settings, night mode, search, offline shelf without network`);
   }
-  if (!menuOnly && !overlayOnly && !inputOnly && !detailOnly && !readerEventsOnly) await verifyFirstCatalogRendering();
-  if (!catalogOnly && !overlayOnly && !inputOnly && !detailOnly && !readerEventsOnly) await verifyReaderMenuReuse();
-  if (!catalogOnly && !menuOnly && !inputOnly && !detailOnly && !readerEventsOnly) await verifyOverlayReuse();
-  if (!catalogOnly && !menuOnly && !overlayOnly && !detailOnly && !readerEventsOnly) await verifyCatalogInputReuse();
-  if (!catalogOnly && !menuOnly && !overlayOnly && !inputOnly && !readerEventsOnly) await verifyDetailCatalogReuse();
-  if (!catalogOnly && !menuOnly && !overlayOnly && !inputOnly && !detailOnly) await verifyReaderEventOwnership();
+  if (autoScrollOnly || !focused) await verifyReaderAutoScroll();
+  if (!autoScrollOnly) {
+    if (!menuOnly && !overlayOnly && !inputOnly && !detailOnly && !readerEventsOnly) await verifyFirstCatalogRendering();
+    if (!catalogOnly && !overlayOnly && !inputOnly && !detailOnly && !readerEventsOnly) await verifyReaderMenuReuse();
+    if (!catalogOnly && !menuOnly && !inputOnly && !detailOnly && !readerEventsOnly) await verifyOverlayReuse();
+    if (!catalogOnly && !menuOnly && !overlayOnly && !detailOnly && !readerEventsOnly) await verifyCatalogInputReuse();
+    if (!catalogOnly && !menuOnly && !overlayOnly && !inputOnly && !readerEventsOnly) await verifyDetailCatalogReuse();
+    if (!catalogOnly && !menuOnly && !overlayOnly && !inputOnly && !detailOnly) await verifyReaderEventOwnership();
+  }
 } finally {
   for (const gate of catalogGates) gate.released.resolve();
   await browser.close();
@@ -507,6 +511,11 @@ async function newCatalogReader({ local = false, ignoreAbort = false, readingMod
     window.cancelAnimationFrame = current => { if (current < 0) held.delete(current); else cancel(current); };
     window.__holdOverlayFrames = () => { holding = true; };
     window.__releaseOverlayFrames = () => { holding = false; for (const [current, callback] of held) raf(time => { if (held.delete(current)) callback(time); }); };
+    window.__stepOverlayFrames = now => {
+      const ready = [...held.values()];
+      held.clear();
+      for (const callback of ready) callback(now);
+    };
     const create = document.createElement.bind(document);
     document.createElement = (...args) => {
       __novelRenderProbe.created++;
@@ -715,6 +724,87 @@ async function clickReaderText(page) {
   // Avoid Playwright scrolling a distant paragraph into view before clicking it.
   await page.locator('.novel-reader-content p').first().evaluate(paragraph => paragraph.click());
   await catalogFrames(page);
+}
+
+async function verifyReaderAutoScroll() {
+  const page = await newCatalogReader({ readingMode: "scroll", local: true });
+  const start = page.getByRole("button", { name: "自动滚动", exact: true });
+  const pause = page.getByRole("button", { name: "暂停滚动", exact: true });
+  const menu = async () => {
+    if (!(await page.locator(".novel-reader-screen").evaluate(screen => screen.classList.contains("menu-open")))) {
+      await page.locator(".novel-reader-content p").first().evaluate(node => node.click());
+    }
+  };
+  const step = now => page.evaluate(now => { __stepOverlayFrames(now); return window.scrollY; }, now);
+  try {
+    await page.setViewportSize({ width: 320, height: 680 });
+    await menu();
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "快速", exact: true }).click();
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("fanhao.android.novel.settings")).autoScrollSpeed), "fast");
+    await page.getByRole("button", { name: "完成", exact: true }).click();
+    await catalogFrames(page);
+    await menu();
+    const bounds = await start.boundingBox();
+    assert(bounds.width >= 44 && bounds.height >= 44 && bounds.x + bounds.width <= 320);
+    const first = await page.locator(".novel-reader-content p").first().elementHandle();
+    await page.evaluate(() => { window.scrollTo({ top: 10, behavior: "instant" }); __holdOverlayFrames(); });
+    await start.press("Enter");
+    await pause.waitFor();
+    assert.equal(await pause.evaluate(node => document.activeElement === node), true);
+    const before = await step(1000), after = await step(1800);
+    assert(after - before >= 4 && after - before <= 6, "fast speed and frame-gap cap apply on the real reader");
+    assert.equal(await first.evaluate(node => node.isConnected), true);
+    await pause.press("Enter");
+    await pause.waitFor({ state: "hidden" });
+    const paused = await step(1880);
+    assert.equal(paused, after);
+
+    await menu(); await start.press("Enter"); await pause.waitFor();
+    await page.locator(".novel-reader-content").dispatchEvent("wheel", { deltaY: 40, bubbles: true });
+    await pause.waitFor({ state: "hidden" });
+    assert.equal(await step(1960), paused, "manual wheel retires the pending auto-scroll callback");
+
+    await menu(); await start.press("Enter"); await pause.waitFor();
+    await page.evaluate(() => {
+      const screen = document.querySelector(".novel-reader-screen");
+      window.scrollTo({ top: screen.getBoundingClientRect().bottom + scrollY - innerHeight - 3, behavior: "instant" });
+    });
+    await step(2040); await step(2120); await step(2200);
+    await pause.waitFor({ state: "hidden" });
+    await page.waitForFunction(async () => {
+      const { readLocalNovelSummary } = await import("/js/local-novels.js");
+      return (await readLocalNovelSummary("local:catalog-fixture")).book.progress?.scrollRatio >= .999;
+    });
+    await page.evaluate(() => { window.scrollTo({ top: 10, behavior: "instant" }); __releaseOverlayFrames(); });
+    await catalogFrames(page);
+    await menu(); await start.press("Enter"); await pause.waitFor();
+    await page.evaluate(() => {
+      Object.defineProperty(document, "hidden", { configurable: true, value: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+      delete document.hidden;
+    });
+    await pause.waitFor({ state: "hidden" });
+    await menu(); await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "翻页", exact: true }).click();
+    await page.getByRole("button", { name: "完成", exact: true }).click();
+    await menu(); assert.equal(await start.isVisible(), false);
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.getByRole("button", { name: "滚动", exact: true }).click();
+    await page.getByRole("button", { name: "完成", exact: true }).click();
+    await catalogFrames(page);
+    await page.evaluate(() => { window.scrollTo({ top: 10, behavior: "instant" }); __holdOverlayFrames(); });
+    await menu(); await start.press("Enter"); await pause.waitFor();
+    await step(2300);
+    await page.evaluate(() => __novelUiFixture.showView("novels", {}));
+    await page.locator(".novel-mobile-shelf-toolbar").waitFor();
+    assert.equal(await pause.count(), 0);
+    const left = await page.evaluate(() => window.scrollY);
+    assert.equal(await step(2380), left, "retired reader frames cannot scroll the next route");
+    await page.evaluate(() => __releaseOverlayFrames());
+    assert.deepEqual(page.catalogErrors, []);
+    console.log("PASS Android novel auto-scroll: 320px, saved speed, frame cap, manual pause, chapter end and route/mode/visibility boundaries");
+  } finally { await page.close(); }
 }
 
 async function settleMenuProgress(page, ratio) {

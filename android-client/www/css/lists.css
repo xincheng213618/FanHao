@@ -282,6 +282,17 @@
   min-width: 0;
 }
 
+.studio-index-retry {
+  min-height: 44px;
+  margin-block: 0 8px;
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font-weight: 850;
+}
+
 .studio-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2481,13 +2492,27 @@ button.work-person {
 }
 
 .work-cover-frame {
+  --work-cover-inset: 6px;
+  --work-cover-ratio: 4 / 5;
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 1fr auto;
+  row-gap: 2px;
   width: 100%;
-  aspect-ratio: 4 / 5;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--surface-soft);
+  padding: var(--work-cover-inset);
+}
+
+/* Keep the cover ratio as a minimum so wrapped badges can add height. */
+.work-cover-frame::before {
+  content: "";
+  grid-area: 1 / 1 / 4 / 2;
+  aspect-ratio: var(--work-cover-ratio);
+  margin: calc(-1 * var(--work-cover-inset));
 }
 
 .work-cover-frame > .work-thumb,
@@ -2516,39 +2541,75 @@ button.work-person {
   font-size: 10px;
 }
 
-.work-cover-badge {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
+.work-cover-top,
+.work-cover-bottom {
+  position: relative;
+  grid-column: 1;
   z-index: 1;
-  display: inline-flex;
-  min-height: 23px;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  max-width: calc(100% - 12px);
-  overflow: hidden;
-  border-radius: 6px;
-  background: rgba(47, 128, 237, 0.94);
-  box-shadow: 0 2px 8px rgba(17, 24, 32, 0.16);
-  color: #fff;
-  padding: 0 7px;
-  font-size: 10px;
-  font-weight: 950;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  gap: 3px;
   pointer-events: none;
 }
 
-.work-cover-badge.missing,
-.work-cover-badge.rank {
-  background: rgba(233, 138, 44, 0.96);
+.work-cover-top {
+  grid-row: 1;
 }
 
+.work-cover-bottom {
+  grid-row: 3;
+}
+
+.work-cover-badge,
+.work-cover-indicator {
+  display: inline-flex;
+  min-height: var(--work-cover-badge-height, 21px);
+  max-width: 100%;
+  align-items: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(17, 24, 32, 0.92);
+  color: #fff;
+  padding-inline: var(--work-cover-badge-padding, 5px);
+  font-size: var(--work-cover-badge-font-size, 10px);
+  font-weight: 850;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.work-cover-badge.missing,
+.work-cover-indicator.magnet,
 .work-cover-badge.rank {
-  top: 6px;
-  right: auto;
-  bottom: auto;
-  left: 6px;
+  color: #ffd6a8;
+}
+
+.work-cover-indicator.marker,
+.work-cover-indicator.quality,
+.work-cover-indicator.rating {
+  color: #ffe294;
+}
+
+.work-cover-indicator.rating {
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.work-cover-rating-count {
+  color: #e2e6e3;
+  font-weight: 600;
+}
+
+.work-cover-badge.rank.podium-2 {
+  color: #e1eaf5;
+}
+
+.work-cover-badge.rank.podium-3 {
+  color: #ffc69d;
+}
+
+.work-cover-bottom > .work-cover-badge:only-child {
+  margin-inline-start: auto;
 }
 
 .work-cover-badge.progress,
@@ -2578,7 +2639,11 @@ button.work-person {
 }
 
 .content-panel[data-view="personDetail"] .work-cover-frame {
-  aspect-ratio: 16 / 10;
+  --work-cover-inset: 3px;
+  --work-cover-badge-height: 16px;
+  --work-cover-badge-padding: 3px;
+  --work-cover-badge-font-size: 9px;
+  --work-cover-ratio: 16 / 10;
 }
 
 .content-panel[data-view="personDetail"] .work-cover-frame > img {
@@ -2604,23 +2669,8 @@ button.work-person {
   font-size: 10px;
 }
 
-.content-panel[data-view="personDetail"] .work-cover-badge {
-  min-height: 18px;
-  max-width: calc(100% - 8px);
-  padding: 0 5px;
-  font-size: 8.5px;
-}
-
-.content-panel[data-view="personDetail"] .work-cover-badge:not(.rank) {
-  right: 4px;
-  bottom: 4px;
-}
-
-.content-panel[data-view="personDetail"] .work-cover-badge.rank {
-  top: 4px;
-  right: auto;
-  bottom: auto;
-  left: 4px;
+.content-panel[data-view="personDetail"] :is(.work-cover-top, .work-cover-bottom) {
+  gap: 2px;
 }
 
 .content-panel[data-view="personDetail"] .work-cover-badge.playable,
@@ -3064,6 +3114,41 @@ button.work-card-grid-person:focus-visible {
   max-height: 58vh;
   border-radius: 6px;
   background: #000;
+}
+
+.android-player-shell:fullscreen {
+  grid-template-rows: minmax(0, 1fr) repeat(4, auto);
+  align-content: center;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 0;
+}
+
+.android-player-shell:fullscreen video {
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  object-fit: contain;
+}
+
+.android-player-subtitles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  color: #d8e0e8;
+  font-size: 12px;
+}
+
+.android-player-subtitles :is(select, button) {
+  min-height: 44px;
+  max-width: 100%;
+  border: 1px solid rgba(216, 224, 232, 0.26);
+  border-radius: 8px;
+  background: #171f29;
+  color: #eef4fa;
+  padding: 0 10px;
+  font: inherit;
 }
 
 .player-mode-label {

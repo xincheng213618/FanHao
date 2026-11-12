@@ -13,9 +13,11 @@ const foldersPath = "android-client/www/modules/fanhao/features/works/favorite-f
 const cachePath = "android-client/www/js/cache.js";
 const frozen = path => execFileSync("git", ["show", `f110040d02b1eb579461248da9960e97370fa4d2:${path}`], { cwd: root, encoding: "utf8" });
 const read = path => fs.readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
-const assetVersion = read(foldersPath).match(/\?v=assets-[a-f0-9]+/)?.[0];
-assert(assetVersion);
-const previousFolders = frozen(foldersPath).replace(/\?v=assets-[a-f0-9]+/g, assetVersion);
+const invalidatePrefixes = /^  async function invalidatePrefixes\([\s\S]*?^  \}/m;
+const currentFolders = read(foldersPath), previousInvalidate = frozen(foldersPath).match(invalidatePrefixes)?.[0];
+assert(previousInvalidate && invalidatePrefixes.test(currentFolders));
+const previousFolders = currentFolders.replace("import { clearCachedJsonByPrefixes }", "import { clearCachedJsonByPrefix }")
+  .replace(invalidatePrefixes, () => previousInvalidate.replace("clearCache(", "(clearCachePrefix || clearCachedJsonByPrefix)("));
 const singleClear = /^export async function clearCachedJsonByPrefix\([\s\S]*?^\}/m;
 const currentCache = read(cachePath), previousClear = frozen(cachePath).match(singleClear)?.[0];
 assert(previousClear && singleClear.test(currentCache));
@@ -200,6 +202,7 @@ try {
         assert.equal(await page.evaluate(() => window.favoriteCacheProbe.scans), 0, "a failed PATCH does not start cache invalidation");
         assert.equal(await dialog.getAttribute("aria-busy"), "false");
         assert.equal(folderName, nameAfter);
+        await verifyFavoriteSearch(page, url);
       }
       assert.deepEqual(faults, []);
     } finally {
@@ -210,4 +213,87 @@ try {
   await browser?.close();
   server.kill();
   await serverExit;
+}
+
+async function verifyFavoriteSearch(page, url) {
+  const query = "C++ & 合成", deepId = "search-deep-73";
+  const work = id => ({ id, title: `合成作品 ${id}`, directoryName: id, category: "censored",
+    favorite: true, favoriteFolderId: folderId, favoriteFolderName: nameAfter, videos: [], images: [] });
+  const folders = [{ id: "default", name: "默认收藏", count: 1 }, { id: folderId, name: nameAfter, count: 73 }];
+  const requests = [];
+  const delayed = { started: Promise.withResolvers(), release: Promise.withResolvers() };
+  await page.route(request => request.pathname === "/api/favorites", async route => {
+    const params = new URL(route.request().url()).searchParams;
+    const q = params.get("q"), folder = params.get("folder") || "all", limit = Number(params.get("limit"));
+    requests.push({ q, folder, limit });
+    if (q === "延迟结果") { delayed.started.resolve(); await delayed.release.promise; }
+    const candidates = q === query && folder !== "default" ? [...Array.from({ length: 72 }, (_, index) => work(`search-result-${index + 1}`)), work(deepId)]
+      : q === "延迟结果" ? [work("retired-result")] : q && q !== "旧服务" ? [] : [work("unfiltered-work")];
+    await route.fulfill({ json: { folders, selectedFolderId: folder, total: candidates.length, works: candidates.slice(0, limit),
+      ...(q && q !== "旧服务" ? { query: q } : {}) } }).catch(() => {});
+  });
+  await page.route(request => request.pathname === `/api/works/${deepId}`, route => route.fulfill({ json: { work: work(deepId) } }));
+  await page.route(request => request.pathname === `/api/works/${deepId}/move-job`, route => route.fulfill({ json: { ok: true, job: null } }));
+  const field = page.getByRole("searchbox", { name: "搜索收藏", exact: true });
+  const clear = page.getByRole("button", { name: "清除搜索", exact: true });
+  const submit = async value => { await field.fill(value); await field.press("Enter"); };
+  const card = id => page.locator(`[data-work-detail-id="${id}"]`);
+  try {
+    await page.setViewportSize({ width: 320, height: 620 });
+    await page.goto(url.href);
+    await card("unfiltered-work").waitFor();
+    const initialLimit = requests.at(-1).limit;
+    assert(initialLimit < 73);
+    await field.fill("未提交");
+    await field.evaluate(input => {
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      input.form.requestSubmit();
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    });
+    assert.equal(requests.some(request => request.q === "未提交"), false);
+
+    await submit("延迟结果");
+    await delayed.started.promise;
+    await submit(`  ${query}  `);
+    await card("search-result-1").waitFor();
+    delayed.release.resolve();
+    assert.equal(await field.inputValue(), query);
+    assert.equal(await card("retired-result").count(), 0);
+    assert.equal(await card("unfiltered-work").count(), 0);
+    assert.equal(await card(deepId).count(), 0);
+    assert.equal(new URLSearchParams(new URL(page.url()).hash.split("?")[1]).get("query"), query);
+    assert.deepEqual(requests.at(-1), { q: query, folder: folderId, limit: initialLimit });
+    await page.locator(".load-more button").click();
+    await card(deepId).waitFor();
+    assert(requests.at(-1).limit > initialLimit && requests.at(-1).q === query && requests.at(-1).folder === folderId);
+    await card(deepId).click();
+    await page.locator(".work-detail-hero").waitFor();
+    await page.getByRole("button", { name: "返回上一页", exact: true }).click();
+    await card("search-result-1").waitFor();
+    assert.equal(await field.inputValue(), query);
+
+    await page.getByRole("button", { name: "默认收藏，1 个作品", exact: true }).click();
+    await page.getByText("没有符合收藏搜索的作品。", { exact: true }).waitFor();
+    assert.equal(await field.inputValue(), query);
+    assert.equal(requests.at(-1).folder, "default");
+    await submit("旧服务");
+    await page.getByText("当前服务不支持收藏搜索。可清除搜索继续浏览。", { exact: true }).waitFor();
+    assert.equal(await card("unfiltered-work").count(), 0);
+    const cached = await page.evaluate(async () => {
+      const module = performance.getEntriesByType("resource").find(entry => new URL(entry.name).pathname.endsWith("/js/cache.js"));
+      const { readCachedJson } = await import(module.name);
+      const path = performance.getEntriesByType("resource").map(entry => new URL(entry.name))
+        .findLast(url => url.pathname === "/api/favorites" && url.searchParams.get("q") === "旧服务");
+      return Boolean(await readCachedJson(location.origin, path.pathname + path.search));
+    });
+    assert.equal(cached, false, "an unfiltered legacy response never enters the search cache");
+    await clear.click();
+    await card("unfiltered-work").waitFor();
+    assert.equal(await field.inputValue(), "");
+    assert.deepEqual(requests.at(-1), { q: null, folder: "default", limit: initialLimit });
+    const sizes = await page.locator(".favorite-search-form :is(input, button:not([hidden]))").evaluateAll(nodes =>
+      nodes.map(node => ({ height: node.getBoundingClientRect().height, right: node.getBoundingClientRect().right })));
+    assert(sizes.every(box => box.height >= 44 && box.right <= 320));
+    console.log("Android favorite search: preserved folder, pagination, navigation, request ownership and old-server recovery");
+  } finally { delayed.release.resolve(); }
 }

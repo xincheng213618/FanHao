@@ -4,10 +4,12 @@ import { readFileSync } from "node:fs";
 import { reconcileLocalNovelEntry } from "../../android-client/www/js/novel-chapter-identity.js";
 
 const collectionDependencies = [
-  ["account-owner.js", "accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, rememberAccountPayload, setAccountOwner"],
-  ["auto-load.js", "enhanceAutoLoadMore"]
+  ["js/account-owner.js", "accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, rememberAccountPayload, setAccountOwner"],
+  ["js/auto-load.js", "enhanceAutoLoadMore"],
+  ["modules/novels/book-text-search.js", "createBookTextSearch"],
+  ["modules/novels/reader-auto-scroll.js", "createNovelAutoScroll, NOVEL_AUTO_SCROLL_SPEEDS"]
 ].map(([file, exports]) => {
-  const source = readFileSync(new URL(`../../android-client/www/js/${file}`, import.meta.url), "utf8");
+  const source = readFileSync(new URL(`../../android-client/www/${file}`, import.meta.url), "utf8");
   assert(!/^import /m.test(source), "the dependency fixture must handle any new imports explicitly");
   return `(function () { ${source.replace(/^export /gm, "")}\nreturn { ${exports} }; })()`;
 });

@@ -108,6 +108,14 @@ async function surface(code) {
         else if (url.pathname === "/api/library") payload = { people: [], works: [], totals: { people: 0, videos: fixture.works.length, works: fixture.works.length, infoFiles: fixture.works.length },
           user: { historyCount: 0, favorites: [] }, availableRoots: [], access: { mode: "loopback" } };
         else if (url.pathname === "/api/modules") payload = { modules: [] };
+        else if (url.pathname === "/api/studios") {
+          const visible = [{ id: "alpha", name: "Alpha Studio", localWorkCount: 4 }];
+          const query = url.searchParams.get("q");
+          const makers = query ? [...visible, { id: "hidden", name: "远端片商", localWorkCount: 0 }]
+            .filter(studio => studio.name.toLowerCase().includes(query.toLowerCase())) : visible;
+          payload = { makers, total: query ? makers.length : 501 };
+        }
+        else if (url.pathname === "/api/studios/alpha") payload = { studio: { id: "alpha", name: "Alpha Studio" }, works: [], total: 0 };
         else if (url.pathname === "/api/accounts/status") payload = { user: fixture.accountId ? { id: fixture.accountId, username: "Synthetic" } : null, registrationEnabled: true, invitationRequired: true, accountLoginRequired: false, setupAvailable: false };
         else if (url.pathname === "/api/history") payload = { works: [], total: 0 };
         else if (url.pathname === "/api/favorites/folders") payload = { folders: [] };
@@ -141,8 +149,9 @@ async function surface(code) {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   const result = { base, cases,
-    async open(count = 1200) {
+    async open(count = 1200, prepare = () => {}) {
       const id = `case-${++sequence}`, fixture = { id, works: pool(count), requests: [], covers: [], holds: [] };
+      prepare(fixture.works);
       cases.set(id, fixture);
       const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, extraHTTPHeaders: { "X-Fixture-Case": id } });
       const page = await context.newPage(); fixture.page = page; fixture.context = context;
@@ -164,7 +173,8 @@ async function ready(page, count) {
 async function snapshot(page) {
   return page.evaluate(() => ({ view: __worksAudit.context.getCurrentView(), params: __worksAudit.context.getCurrentParams(),
     title: document.querySelector("#viewTitle")?.textContent || "", meta: document.querySelector("#viewMeta")?.textContent || "",
-    cards: [...document.querySelectorAll("#viewContent .work-card")].map(card => ({ work: __worksAudit.cardWorks.get(card), text: card.querySelector(".work-summary")?.textContent,
+    cards: [...document.querySelectorAll("#viewContent .work-card")].map(card => ({ work: __worksAudit.cardWorks.get(card),
+      text: [...(card.querySelector(".work-summary")?.children || [])].filter(child => !child.matches(".work-card-folder-button")).map(child => child.textContent).join(""),
       badges: [...card.querySelectorAll(".work-cover-badge")].map(node => node.textContent),
       role: card.getAttribute("role"), tabIndex: card.tabIndex, className: card.className })),
     filters: [...document.querySelectorAll("#viewContent .work-filter-strip button")].map(button => ({ text: button.textContent, title: button.title, pressed: button.getAttribute("aria-pressed") })),
@@ -211,8 +221,10 @@ async function commonFallbacks(before, current) {
           await f.page.locator("#viewContent .load-more button").click(); await waiting.request;
           assert.equal(await f.page.locator("#viewContent .work-card").count(), 48);
           assert.equal(await f.page.evaluate(() => __worksAudit.initialCard.isConnected), true);
-          const previousY = viewport.scrollY;
+          const previousY = (await settleVisibleViewport(f.page)).scrollY;
+          await f.page.mouse.move(195, 420);
           await f.page.mouse.wheel(0, -180);
+          await f.page.waitForFunction(y => scrollY < y - 10, previousY, { timeout: 5000 });
           viewport = await settleVisibleViewport(f.page);
           assert.ok(viewport.scrollY < previousY - 10, "the real wheel moves the retained old prefix before publication");
           waiting.release(); await ready(f.page, 96);
@@ -298,21 +310,77 @@ async function verifyCachedFresh(surface) {
       const { writeCachedJson } = await import("/js/cache.js");
       await writeCachedJson(location.origin, "/api/works?limit=96&offset=0&sort=updated&filter=all", cached);
     }, cached);
-    f.works[90].title = "Fresh changed tail 00090";
+    f.works[90].traits = { flags: { hasSidecar: true } };
     const fresh = hold(f, url => url.pathname === "/api/works" && url.searchParams.get("limit") === "96");
     await f.page.locator("#viewContent .load-more button").click(); await fresh.request;
     await f.page.waitForFunction(() => document.querySelectorAll("#viewContent .work-card").length > 48);
     const freshResponse = f.page.waitForResponse(response => new URL(response.url()).pathname === "/api/works" && new URL(response.url()).searchParams.get("limit") === "96");
     fresh.release(); await (await freshResponse).finished();
-    await f.page.waitForFunction(() => [...document.querySelectorAll("#viewContent .work-card")].some(card => __worksAudit.cardWorks.get(card)?.title === "Fresh changed tail 00090"));
+    await f.page.locator('[data-work-detail-id="work-00090"] .work-cover-indicator.marker').filter({ hasText: "外挂字幕" }).waitFor();
     await ready(f.page, 96);
     const state = await snapshot(f.page);
     assert.equal(state.cards.length, 96);
     assert.equal(new Set(state.cards.map(card => card.work.id)).size, 96, "retired progressive timers cannot append duplicate or missing cached rows");
-    assert.equal(state.cards.find(card => card.work.id === "work-00090").work.title, "Fresh changed tail 00090");
+    assert.equal(state.cards.find(card => card.work.id === "work-00090").work.traits.flags.hasSidecar, true);
     await f.page.evaluate(() => new Promise(resolve => setTimeout(resolve, 100)));
     assert.equal(await f.page.locator("#viewContent .work-card").count(), 96);
   } finally { for (const item of f.holds) item.release(); await f.context.close(); }
+}
+
+async function verifyCoverDetails(surface) {
+  const f = await surface.open(4, ([local, missing, unrated, ratedZero]) => {
+    Object.assign(local, {
+      coverId: "",
+      localMarkers: ["A"],
+      ranking: { rankNo: 1 },
+      traits: { flags: { quality4k: true, ltx: true, ltxLocal: true, embeddedChinese: true, uncensored: true, hasSidecar: true, hasChineseSidecar: true } },
+      progress: { percent: 25 }
+    });
+    local.infoSummary.imageUrl = "/media/image/from-metadata";
+    local.infoSummary.ratingCount = 1240;
+    Object.assign(missing, {
+      missingLocal: true,
+      availability: { hasMagnet: true, hasSubtitles: true },
+      traits: { flags: { quality4k: true, uncensored: true } }
+    });
+    Object.assign(unrated.infoSummary, { rating: 0, ratingCount: 0 });
+    Object.assign(ratedZero.infoSummary, { rating: 0, ratingCount: 2 });
+  });
+  try {
+    const card = f.page.locator('[data-work-detail-id="work-00000"]');
+    assert.deepEqual(await card.locator(".work-cover-top > span").allTextContents(), ["TOP 1", "★", "A", "本机LTX", "C", "U", "中字", "4K"]);
+    assert.equal(await card.locator(".rank.podium-1").count(), 1);
+    assert.equal(await card.locator(".work-cover-indicator.rating").getAttribute("aria-label"), "4.2分，1,240人评价");
+    assert.equal(await card.locator(".work-cover-rating-count").textContent(), "1.2k");
+    assert.equal(await card.locator(".work-card-grid-meta").textContent(), "2026-01-01");
+    assert.equal(await card.locator(".work-cover-badge.progress").textContent(), "在看 25%");
+    await card.locator(".work-cover-frame img").waitFor();
+    assert.ok(f.covers.includes("/media/image/from-metadata"), "older work DTOs can display a cover from metadata");
+    const missing = f.page.locator(".work-card.missing-local");
+    assert.equal(await missing.locator(".work-cover-indicator.magnet").textContent(), "中字磁链");
+    assert.equal(await missing.locator(".work-cover-top").count(), 0, "missing local works do not claim a local video trait");
+    const unrated = f.page.locator('[data-work-detail-id="work-00002"]');
+    assert.equal(await unrated.locator(".work-cover-indicator.rating").count(), 0);
+    assert.match(await unrated.locator(".work-card-grid-meta").textContent(), /120分/);
+    assert.equal(await f.page.locator('[data-work-detail-id="work-00003"] .work-cover-indicator.rating').getAttribute("aria-label"), "0.0分，2人评价");
+
+    await f.page.setViewportSize({ width: 320, height: 690 });
+    const layout = await card.locator(".work-cover-frame").evaluate(frame => {
+      frame.closest(".content-panel").dataset.view = "personDetail";
+      const bounds = frame.getBoundingClientRect();
+      const top = frame.querySelector(".work-cover-top").getBoundingClientRect();
+      const bottom = frame.querySelector(".work-cover-bottom").getBoundingClientRect();
+      return {
+        stacked: top.bottom <= bottom.top,
+        insideFrame: top.top >= bounds.top && bottom.bottom <= bounds.bottom,
+        visible: [...frame.querySelectorAll(".work-cover-badge, .work-cover-indicator")].every(badge => {
+          const box = badge.getBoundingClientRect();
+          return box.width > 0 && box.left >= bounds.left && box.right <= bounds.right;
+        })
+      };
+    });
+    assert.deepEqual(layout, { stacked: true, insideFrame: true, visible: true }, "cover indicators stay visible on a narrow person grid");
+  } finally { await f.context.close(); }
 }
 async function verifyRetirement(surface) {
   const f = await surface.open(144);
@@ -489,6 +557,71 @@ async function verifyOwnerChange(surface) {
     compare(await snapshot(f.page), state, "actual account-owner reload rejects the preceding owner's held page");
   } finally { for (const item of f.holds) item.release(); await f.context.close(); }
 }
+async function verifyStudioSearch(current) {
+  const f = await current.open(64);
+  const { page } = f;
+  try {
+    await page.evaluate(async () => {
+      __worksAudit.ignoreAbort = true;
+      const { writeCachedJson } = await import("/js/cache.js");
+      await writeCachedJson(location.origin, "/api/studios?limit=500&sort=localCount",
+        { makers: [{ id: "alpha", name: "Alpha Studio", localWorkCount: 3 }], total: 501 });
+    });
+    const freshIndex = hold(f, url => url.pathname === "/api/studios" && !url.searchParams.has("q"));
+    await navigate(f, "studios");
+    await freshIndex.request;
+    const input = page.getByRole("searchbox", { name: "搜索片商", exact: true });
+    const cards = page.locator(".studio-index-results .studio-card");
+    await cards.first().waitFor();
+    const old = hold(f, url => url.searchParams.get("q") === "Alpha");
+    await input.fill("Alpha");
+    await old.request;
+    await input.fill("远端");
+    await cards.filter({ hasText: "远端片商" }).waitFor();
+    const indexResponse = page.waitForResponse(response => new URL(response.url()).pathname === "/api/studios" && !new URL(response.url()).searchParams.has("q"));
+    freshIndex.release();
+    await (await indexResponse).finished();
+    const oldResponse = page.waitForResponse(response => new URL(response.url()).searchParams.get("q") === "Alpha");
+    old.release();
+    await (await oldResponse).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.deepEqual(await cards.locator("strong").allTextContents(), ["远端片商"],
+      "neither an old search nor a newer base-index refresh can displace the active search");
+    assert.equal(await input.inputValue(), "远端");
+    assert.equal(await input.evaluate(node => node === document.activeElement), true);
+    await input.evaluate(node => {
+      node.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      node.value = "候选";
+      node.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+    });
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 260)));
+    assert.equal(f.requests.some(({ query }) => query.q === "候选"), false);
+    const failure = hold(f, url => url.searchParams.get("q") === "Alpha", "Synthetic studio error");
+    await input.evaluate(node => {
+      node.value = "Alpha";
+      node.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    });
+    await failure.request;
+    failure.release();
+    await page.getByText("全库搜索失败，显示已加载片商中的匹配。").waitFor();
+    assert.deepEqual(await cards.locator("strong").allTextContents(), ["Alpha Studio"]);
+    const retry = hold(f, url => url.searchParams.get("q") === "Alpha");
+    await page.getByRole("button", { name: "重试全库搜索" }).click();
+    await retry.request;
+    await cards.first().focus();
+    retry.release();
+    await page.waitForFunction(() => document.querySelector(".studio-index-summary strong")?.textContent === "1 个");
+    assert.equal(await cards.first().evaluate(node => node === document.activeElement), true, "a matching studio card retains keyboard focus after search completes");
+    await page.getByRole("button", { name: "清除片商搜索" }).click();
+    assert.equal(await input.inputValue(), "");
+    assert.match(await page.locator(".studio-index-summary strong").textContent(), /1 \/ 501/);
+    console.log("PASS Android studio search across the catalog, cached refresh, IME, stale transport and retry");
+  } finally {
+    for (const item of f.holds) item.release();
+    await f.context.close();
+  }
+}
+
 function compare(actual, expected, label) {
   function mismatch(a, b, at = "state") {
     if (isDeepStrictEqual(a, b)) return "";
@@ -503,6 +636,8 @@ function compare(actual, expected, label) {
 try {
   browser = await chromium.launch({ executablePath, headless: true });
   const before = await surface(frozen), current = await surface(candidate);
+  await verifyCoverDetails(current);
+  await verifyStudioSearch(current);
   const old = await before.open(), next = await current.open();
   try {
     assert.deepEqual(failures, [], "actual entry has no unexpected API or browser errors");
@@ -511,7 +646,8 @@ try {
       await more(old, page * 48); await more(next, page * 48);
       compare(await snapshot(next.page), await snapshot(old.page), `actual entry page ${page}`);
     }
-    const measured = async fixture => ({ ...(await fixture.page.evaluate(() => ({ createdCards: __worksAudit.createdCards, createElementCalls: __worksAudit.createElementCalls }))),
+    const measured = async fixture => ({ ...(await fixture.page.evaluate(() => ({ createdCards: __worksAudit.createdCards, createElementCalls: __worksAudit.createElementCalls,
+      folderButtons: document.querySelectorAll("#viewContent .work-card-folder-button").length }))),
       api: fixture.requests.filter(record => record.path === "/api/works").map(({ query, rows }) => ({ query, rows })), covers: fixture.covers.length });
     const scale = { before: await measured(old), current: await measured(next) };
     await commonFallbacks(before, current);
@@ -532,7 +668,8 @@ try {
     assert.ok(Math.abs(native.anchorTop - native.baseline.anchorTop) <= 2, "the same visible work keeps its viewport position");
     console.log(JSON.stringify({ comparisons, negativeControl: negative, scale, native }));
     assert.equal(scale.current.createdCards, 960, "twenty prefix pages create each actual card once");
-    assert.ok(scale.current.createElementCalls <= 16000, "actual DOM creation remains bounded by new cards and small controls");
+    assert.equal(scale.current.folderButtons, 960, "each visible local card has exactly one folder action");
+    assert.ok(scale.current.createElementCalls - scale.current.folderButtons <= 16000, "other DOM creation remains bounded by new cards and small controls");
     assert.equal(native.retainedCard, true); assert.equal(native.retainedImage, true); assert.equal(native.retainedMore, true); assert.equal(native.reboundWork, true);
   } finally { await old.context.close(); await next.context.close(); }
 } finally {

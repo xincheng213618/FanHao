@@ -71,6 +71,8 @@ function fixture() {
       fullscreen:false,fullPanel:"cover",playing:false,playReportedTrackId:"P",lyricFollowPaused:true};
     let selectedUrl=BASE,moduleActive=true,audio=null,openTrackGeneration=0,pendingTrackSelection=0;
     let trackAudioPreparation=null,gaplessPreloadTrackId="",mountedSearchController=null;
+    // The list lifecycle is covered through the full factory in the browser fixture.
+    const retireBatchList=()=>{},ownsBatchPlaybackQueue=()=>false,cancelCollectionSearch=()=>{};
     let playReportSession=7,currentPlaybackUrl=BASE,progressSession=createMusicProgressSession("P",BASE,CLOCK),
       progressClaimRequired=false,playedReport={prior:true},currentLyricIndex=3,gaplessHandoffPending=false;
     let audioLoadHook=null;

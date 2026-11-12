@@ -185,6 +185,26 @@ try {
         assert.equal(await oldNav.evaluate(node => node.isConnected), false);
         assert.match(await page.locator("#viewMeta").textContent(), /MP4/u);
         assert.deepEqual(phaseOffsets("changed"), [0, 240, 0, 240], "changed detail uses the normal replacement");
+
+        phase = "episode-picker";
+        const pickerTrigger = page.getByRole("button", { name: "选集", exact: true });
+        const picker = page.getByRole("dialog", { name: "选集", exact: true });
+        await pickerTrigger.tap();
+        await picker.getByRole("button", { name: "250 · 合成影集 S01E250" }).waitFor();
+        assert.equal(await picker.getByRole("button", { name: "250 · 合成影集 S01E250" }).getAttribute("aria-current"), "true");
+        const bounds = await picker.boundingBox();
+        assert(bounds.x >= 0 && bounds.x + bounds.width <= 390 && bounds.y >= 0 && bounds.y + bounds.height <= 844);
+        await picker.getByRole("textbox", { name: "目录序号" }).fill("４７０");
+        await picker.getByRole("button", { name: "定位" }).tap();
+        const target = picker.getByRole("button", { name: "470 · 合成影集 S01E470" });
+        await target.waitFor();
+        assert.equal(await target.evaluate(node => node === document.activeElement), true);
+        assert.deepEqual(phaseOffsets("episode-picker"), [240, 456], "picker jumps directly between bounded directory pages");
+        assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+        await picker.waitFor({ state: "detached" });
+        assert.equal(await pickerTrigger.evaluate(node => node === document.activeElement), true);
+        assert.match(await readyNav.textContent(), /第 250 \/ 480 集/);
+        console.log("Android Chromium episode picker displays the current episode, jumps to episode 470 and restores trigger focus");
         assert.deepEqual(faults, []);
       }
     } finally {

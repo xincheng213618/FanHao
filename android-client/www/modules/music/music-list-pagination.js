@@ -1,5 +1,6 @@
 export function createMusicListPagination(deps) {
-  const { state, getActiveUrl, isActive, musicListQuery, fetchJson, collapseDuplicateTracks, render, setLoadingState, appendPage } = deps;
+  const { state, getActiveUrl, isActive, musicListQuery, fetchJson, collapseDuplicateTracks, render, setLoadingState, appendPage,
+    replaceQueue = tracks => { state.queue = tracks; } } = deps;
   let pendingController = null;
 
   function cancelPending() {
@@ -43,6 +44,7 @@ export function createMusicListPagination(deps) {
       const data = await fetchJson(activeUrl, `${endpoint}?${params}`, { timeoutMs: 18000, signal: controller.signal });
       // Abort is best-effort: a completed response can still settle after navigation.
       if (!isCurrent() || state.data !== sourceData) return;
+      if (mode === "smart" && state.collectionQuery && data?.smartPlaylist?.id !== state.smartId) return;
       incomingData = data;
       if (mode === "artists") {
         state.data = { ...data, artists: [...(sourceData.artists || []), ...(data.artists || [])] };
@@ -52,7 +54,7 @@ export function createMusicListPagination(deps) {
         const rawTracks = [...(sourceData.rawTracks || sourceData.tracks || []), ...(data.tracks || [])];
         const tracks = mode === "library" && query ? collapseDuplicateTracks(rawTracks) : mergeTracksById(sourceData.tracks || [], data.tracks || []);
         state.data = { ...data, tracks, rawTracks, rawLoaded: rawTracks.length };
-        if (!query) state.queue = tracks;
+        if (!query && !state.collectionQuery) replaceQueue(tracks);
       }
       state.summary = data.summary || state.summary;
       state.hasMore = Boolean(data.hasMore);

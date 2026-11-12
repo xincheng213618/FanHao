@@ -3,6 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
 import { PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS } from "../android-client/www/platform/content-index/photo-catalog.js";
+import { readPhotoPositions, savePhotoPosition, discardPhotoPosition } from "../android-client/www/modules/photos/reading-positions.js";
 
 // Actual complete photos adapter, shared action sheet and shell Back dispatcher.
 // DOM/geometry, route rendering and content loading are synthetic boundaries.
@@ -51,6 +52,7 @@ function fixture(input = source, sheet = sheetSource) {
   let params = { mode: "photo", category: "我喜欢的", photoView: "collections" }, view = "channel", channelContext;
   const context = vm.createContext({
     document, window, console, PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS,
+    readPhotoPositions, savePhotoPosition, discardPhotoPosition, openPhotoResumeHistory() {}, openMangaCatalogSearch() {},
     createChannelViews(value) {
       channelContext = value;
       return { deactivate() { calls.deactivated++; }, renderChannel() { calls.content++; }, renderPhotoDetail() {}, renderMangaDetail() {}, renderMangaChapter() {} };

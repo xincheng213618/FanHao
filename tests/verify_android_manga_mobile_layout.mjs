@@ -22,7 +22,7 @@ const serviceExit = new Promise(resolve => service.once("exit", resolve));
 const faults = [], profiles = [], frozenRuns = [], network = new WeakMap();
 const viewports = [{ width: 320, height: 568 }, { width: 390, height: 844 }, { width: 568, height: 320 }];
 const frames = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-let browser, origin, checks = 0;
+let browser, origin, mangaLayoutFixtureUrl, checks = 0;
 async function run(name, task) {
   if (caseFilter && !name.includes(caseFilter)) return;
   if (recoveryOnly !== name.startsWith("recovery:")) return;
@@ -42,6 +42,111 @@ try {
   browser = await chromium.launch({ executablePath, headless: true });
   for (const viewport of viewports) {
     const profile = `${viewport.width}x${viewport.height}`;
+    if (viewport.width === 390) await run("library resume: one tap restores the saved page and native Back returns to the library", async () => {
+      const page = await launch(viewport, "manga-layout", "", { isMobile: true, hasTouch: true });
+      const shelf = page.getByRole("region", { name: "继续阅读", exact: true });
+      const id = "fixture-manga-layout-1";
+      const detailReads = () => network.get(page).filter(record => new URL(record.url).pathname === `/api/manga/${id}`).length;
+      try {
+        assert.equal(await shelf.count(), 0);
+        const firstComic = page.locator(".channel-card.manga").first();
+        const title = await firstComic.locator("strong").textContent();
+        await firstComic.tap();
+        await page.locator(".manga-chapter-open").first().tap();
+        await waitReader(page, 1);
+        await scrollToSecondPage(page, viewport);
+        assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+        await page.locator(".manga-detail-summary").waitFor();
+        assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+        const button = shelf.getByRole("button");
+        await button.waitFor();
+        assert.equal(await button.locator("strong").textContent(), title);
+        assert.equal(await button.locator("span").textContent(), "第 1 话 · 第 2 张");
+        await assertTargets(page, ".manga-library-resume button", "one-tap manga resume");
+        await assertHorizontalBounds(page);
+        const before = detailReads();
+        const retired = await button.elementHandle();
+        await button.tap();
+        await waitReader(page, 1);
+        await page.waitForFunction(() => document.querySelector("[data-manga-progress-current]")?.textContent === "第 2 / 3 张");
+        const restored = await page.locator(".manga-reader-page").nth(1).boundingBox();
+        assert(restored.y >= -1 && restored.y < viewport.height / 2, "the saved page is in view");
+        assert.equal(detailReads(), before, "the library action opens the chapter without reading comic detail");
+        assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+        await button.waitFor();
+        assert.match(new URL(page.url()).hash, /^#channel\?mode=manga/);
+        const libraryUrl = page.url();
+        await retired.evaluate(node => node.click());
+        assert.equal(page.url(), libraryUrl, "a detached resume control cannot navigate the new view");
+
+        const chapterPath = `/api/manga/${id}/chapters/1`;
+        const cacheModule = await page.evaluate(() => performance.getEntriesByType("resource")
+          .find(entry => new URL(entry.name).pathname.endsWith("/js/cache.js"))?.name);
+        assert(cacheModule);
+        await page.waitForFunction(async ({ cacheModule, chapterPath }) => {
+          const { readCachedJson } = await import(cacheModule);
+          return (await readCachedJson(location.origin, chapterPath))?.payload?.chapter?.images?.length === 3;
+        }, { cacheModule, chapterPath });
+        await page.route(url => url.pathname === chapterPath || url.pathname === "/api/image-library/items" && url.searchParams.get("mode") === "manga",
+          route => route.fulfill({ status: 503, json: { error: "合成离线" } }));
+        await page.evaluate(async cacheModule => {
+          const { clearCachedJsonByPrefix } = await import(cacheModule);
+          await clearCachedJsonByPrefix(location.origin, "/api/image-library/items?mode=manga");
+        }, cacheModule);
+        await page.reload();
+        await page.getByText("韩漫书库暂时打不开", { exact: true }).waitFor();
+        await button.tap();
+        await waitReader(page, 1);
+        await page.getByText("电脑端暂时未连接，当前章节仍可继续阅读。", { exact: true }).waitFor();
+        await page.waitForFunction(() => document.querySelector("[data-manga-progress-current]")?.textContent === "第 2 / 3 张");
+      } finally { await page.close(); }
+    });
+    if (viewport.width === 320) await run("library resume: legacy positions, source ownership and unseen catalog rows", async () => {
+      const page = await launch(viewport);
+      const shelf = page.getByRole("region", { name: "继续阅读", exact: true });
+      let partial = true;
+      try {
+        await page.evaluate(() => {
+          const progress = (day, source = location.origin, owner = "guest") => ({
+            chapterIndex: 2, pageIndex: 3, comicTitle: `合成续读 ${day}`, source, owner, updatedAt: `2026-11-${day}`
+          });
+          localStorage.setItem("fanhao.android.mangaReadingProgress.v1", JSON.stringify({
+            "fixture-manga-layout-1": { chapterIndex: 1, pageIndex: 2, updatedAt: "2026-11-07" },
+            "fixture-manga-layout-2": progress("08"),
+            "fixture-manga-layout-3": progress("11", "https://another-server.invalid"),
+            otherAccount: progress("10", location.origin, "account:somebody"),
+            unseenNew: progress("09"),
+            unseenSecond: progress("06"),
+            unseenThird: progress("05"),
+            staleLegacy: { chapterIndex: 1, pageIndex: 2, updatedAt: "2026-11-12" }
+          }));
+        });
+        await page.route(url => url.pathname === "/api/image-library/items" && url.searchParams.get("mode") === "manga", async route => {
+          const response = await route.fetch();
+          const data = await response.json();
+          const limit = Number(new URL(route.request().url()).searchParams.get("limit"));
+          const filler = Array.from({ length: 12 }, (_, index) => ({
+            type: "manga", id: `filler-${index}`, title: `合成目录 ${index}`, chapterCount: 1, doneChapterCount: 1
+          }));
+          await route.fulfill({ response, json: partial && !data.query
+            ? { ...data, items: [...data.items, ...filler], total: limit + 20, nextOffset: limit }
+            : data });
+        });
+        await page.reload();
+        await page.waitForFunction(() => document.querySelectorAll(".manga-library-resume button").length === 4);
+        const titles = await page.locator(".channel-card.manga strong").allTextContents();
+        assert.deepEqual(await shelf.locator("button strong").allTextContents(), ["合成续读 09", titles[1], titles[0], "合成续读 06"]);
+        await assertTargets(page, ".manga-library-resume button", "narrow manga resume");
+        await assertHorizontalBounds(page);
+        partial = false;
+        await page.reload();
+        await page.waitForFunction(() => document.querySelectorAll(".manga-library-resume button").length === 2);
+        assert.deepEqual(await shelf.locator("button strong").allTextContents(), [titles[1], titles[0]], "a complete catalog rules out unavailable records");
+        await page.evaluate(() => { location.hash = "#channel?mode=manga&query=不存在的漫画"; });
+        await page.getByText("没有搜到「不存在的漫画」。", { exact: true }).waitFor();
+        assert.equal(await shelf.count(), 0, "search results remain limited to the query");
+      } finally { await page.close(); }
+    });
     await run(`details: ${profile} long, short and fallback text remain readable with local-only expansion`, async () => {
       const page = await launch(viewport);
       let retiredToggle;
@@ -95,6 +200,93 @@ try {
           await page.locator(".channel-card.manga").first().waitFor(); assert.equal(await page.locator(".channel-card.manga").count(), 3);
         }
       } finally { await page.close(); }
+    });
+    if (viewport.width === 320) await run("catalog search: find a deep chapter locally and keep input through revalidation", async () => {
+      const page = await launch(viewport, "manga-layout", "", { isMobile: true, hasTouch: true, reuseFrozen: true });
+      const id = "fixture-manga-layout-1", detailPath = `/api/manga/${id}`;
+      const chapterPath = `${detailPath}/chapters/219`;
+      let refreshed = false, hold = null;
+      const chapters = () => Array.from({ length: 240 }, (_, offset) => {
+        const index = offset + 1, count = index === 220 ? 0 : 3;
+        const title = index === 219 ? (refreshed ? "Moonlight 晨雾" : "Moonlight 薄雾") : `合成章节 ${index}`;
+        return { index, title, imageCount: count, downloadedCount: count, status: count ? "downloaded" : "pending" };
+      });
+      await page.route(url => url.pathname === detailPath, async route => {
+        const gate = hold;
+        if (gate) { gate.started.resolve(); await gate.release.promise; }
+        const response = await route.fetch(), data = await response.json();
+        await route.fulfill({ json: { ...data, comic: { ...data.comic, chapterCount: 240, chapters: chapters() } } });
+      });
+      await page.route(url => url.pathname === chapterPath, async route => {
+        const source = new URL(route.request().url());
+        source.pathname = `${detailPath}/chapters/1`;
+        const response = await route.fetch({ url: source.href }), data = await response.json();
+        await route.fulfill({ json: { ...data, chapter: { ...data.chapter, ...chapters()[218], navigation: { position: 219, total: 240 } } } });
+      });
+      const trigger = page.getByRole("button", { name: "搜索章节", exact: true });
+      const dialog = page.getByRole("dialog", { name: "搜索漫画章节", exact: true });
+      const input = dialog.getByRole("searchbox", { name: "搜索话数或章节标题" });
+      const readCount = () => network.get(page).filter(record => new URL(record.url).pathname.startsWith(detailPath)).length;
+      try {
+        await page.locator(".channel-card.manga").first().tap();
+        await trigger.waitFor(); await page.waitForLoadState("networkidle");
+        const initialRows = await page.locator(".manga-chapter-card").count();
+        assert(initialRows > 0 && initialRows < 219);
+        const initialList = await page.locator(".manga-chapter-list").elementHandle();
+        const beforeSearch = readCount();
+        await trigger.tap();
+        await dialog.getByText("可搜索全部 240 话", { exact: true }).waitFor();
+        assert.equal(await input.evaluate(node => document.activeElement === node), true);
+        await input.fill("第２２０話");
+        const unavailable = dialog.getByRole("button", { name: /合成章节 220.*等待下载/ });
+        assert.equal(await unavailable.isDisabled(), true);
+        await input.fill("合成章节");
+        await dialog.getByText("匹配 239 话", { exact: true }).waitFor();
+        assert.equal(await dialog.locator("li").count(), 40);
+        await dialog.getByRole("button", { name: "显示更多章节", exact: true }).click();
+        assert.equal(await dialog.locator("li").count(), 80);
+        assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+        assert.equal(await dialog.count(), 0);
+        assert.equal(await trigger.evaluate(node => document.activeElement === node), true);
+        assert.equal(await initialList.evaluate(node => node.isConnected), true);
+        assert.equal(await page.locator(".manga-chapter-card").count(), initialRows);
+        assert.equal(readCount(), beforeSearch, "search and result paging do not fetch the directory or chapters");
+
+        await trigger.tap(); await input.fill("第２１９話");
+        const chapter = dialog.getByRole("button", { name: /Moonlight 薄雾.*第 219 话/ });
+        await chapter.waitFor();
+        await assertTargets(page, ".manga-catalog-search li button, .manga-catalog-search input", "chapter search");
+        await assertHorizontalBounds(page);
+        const retired = await chapter.elementHandle();
+        await chapter.tap();
+        await page.waitForURL(url => new URLSearchParams(url.hash.split("?")[1]).get("chapterIndex") === "219");
+        await page.getByText("Moonlight 薄雾", { exact: true }).first().waitFor();
+        assert.equal(readCount(), beforeSearch + 1);
+
+        refreshed = true;
+        hold = { started: Promise.withResolvers(), release: Promise.withResolvers() };
+        assert.equal(await page.evaluate(() => window.fanhaoHandleNativeBack()), true);
+        await hold.started.promise;
+        await trigger.tap(); await input.fill("薄雾");
+        const staleResult = dialog.getByRole("button", { name: /Moonlight 薄雾/ });
+        await staleResult.waitFor();
+        const retained = await input.elementHandle();
+        const replacedTrigger = await trigger.elementHandle();
+        await input.dispatchEvent("compositionstart");
+        hold.release.resolve();
+        await page.waitForFunction(node => !node.isConnected, replacedTrigger);
+        await staleResult.evaluate(node => node.click());
+        await dialog.getByText("章节目录已更新，请重新选择", { exact: true }).waitFor();
+        await input.dispatchEvent("compositionend");
+        await dialog.getByText("没有匹配的章节", { exact: true }).waitFor();
+        assert.equal(await retained.evaluate(node => node.isConnected && document.activeElement === node), true);
+        assert.equal(await input.inputValue(), "薄雾");
+        await input.fill("mOonlight 晨雾");
+        await dialog.getByRole("button", { name: /Moonlight 晨雾.*第 219 话/ }).waitFor();
+        const url = page.url();
+        await retired.evaluate(node => node.click());
+        assert.equal(page.url(), url, "a retired search result cannot open a chapter");
+      } finally { hold?.release.resolve(); await page.close(); }
     });
     await run(`reader: ${profile} full chapter heading, real next/catalog and saved-page resume stay usable`, async () => {
       const page = await launch(viewport);
@@ -267,7 +459,7 @@ try {
   await browser?.close(); service.kill("SIGTERM"); await Promise.race([serviceExit, new Promise(resolve => setTimeout(resolve, 3000))]);
 }
 
-async function launch(viewport, scenario = "manga-layout", profile = "", options = {}) {
+async function launch(viewport, scenario = "manga-layout", profile = "", { reuseFrozen = false, ...options } = {}) {
   const page = await browser.newPage({ viewport, ...options }); network.set(page, []);
   page.on("pageerror", error => faults.push(error.message));
   page.on("request", request => network.get(page).push({ method: request.method(), url: request.url() }));
@@ -330,10 +522,15 @@ async function launch(viewport, scenario = "manga-layout", profile = "", options
   });
   const launcherLabel = scenario === "manga-recovery" ? { "immediate-failure": "漫画采集失败恢复（立即失败）", "delayed-failure": "漫画采集失败恢复（延迟失败）", "retry-complete": "漫画采集失败恢复（失败后重试完成）" }[profile]
     : scenario === "manga-panels" ? "漫画添加与下载记录面板（长任务信息）" : "漫画详情与阅读布局（长简介与章节）";
+  if (reuseFrozen && mangaLayoutFixtureUrl) {
+    await page.goto(mangaLayoutFixtureUrl);
+    await page.locator(".channel-card.manga").first().waitFor(); await frames(page); return page;
+  }
   await page.goto(origin); await page.getByRole("button", { name: launcherLabel, exact: true }).click();
   await page.waitForURL(url => url.pathname.startsWith("/run/"));
   const runId = new URL(page.url()).pathname.split("/")[2];
   const frozen = (await (await page.request.get(`${origin}/fixture/requests?run=${runId}`)).json()).runs[0];
+  if (scenario === "manga-layout" && !mangaLayoutFixtureUrl) mangaLayoutFixtureUrl = new URL(frozen.url, origin).href;
   frozenRuns.push({ runId, scenario: frozen.scenario, ...(frozen.profile ? { profile: frozen.profile } : {}), files: frozen.files.filter(file => ["app.js", "modules/photos/styles.css", "platform/content-index/channel-views.js"].includes(file.name)).map(file => ({ name: file.name, sha256: file.servedSha256 })) });
   await page.locator(".channel-card.manga").first().waitFor(); await frames(page); return page;
 }

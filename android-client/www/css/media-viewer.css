@@ -171,6 +171,9 @@ body.media-viewer-open .bottom-nav {
 }
 
 .media-viewer-control-bar {
+  --jump-line: rgba(255, 255, 255, 0.24);
+  --jump-surface: rgba(255, 255, 255, 0.10);
+  --jump-ink: #fff;
   position: absolute;
   right: 12px;
   bottom: max(12px, env(safe-area-inset-bottom));
@@ -222,6 +225,58 @@ body.media-viewer-open .bottom-nav {
 
 .media-viewer-range:disabled {
   opacity: 0.4;
+}
+
+.image-page-jump:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  max-width: 100%;
+}
+
+.image-page-jump input,
+.image-page-jump button,
+.media-viewer-page-jump-toggle {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--jump-line, var(--line));
+  border-radius: 8px;
+  background: var(--jump-surface, var(--surface-raised));
+  color: var(--jump-ink, var(--ink));
+  font: inherit;
+}
+
+.image-page-jump input {
+  width: min(12ch, 100%);
+  font-size: 16px;
+}
+
+.image-page-jump input:focus-visible,
+.image-page-jump button:focus-visible,
+.media-viewer-page-jump-toggle:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.image-page-jump [aria-disabled="true"] {
+  opacity: 0.55;
+}
+
+.image-page-jump [role="status"]:not(:empty) {
+  flex-basis: 100%;
+  color: var(--jump-ink, var(--muted));
+  font-size: 12px;
+}
+
+.image-page-jump [role="status"]:empty {
+  display: none;
+}
+
+.media-viewer-page-jump-toggle {
+  flex: none;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .media-viewer-controls-hidden .media-viewer-head {

@@ -29,6 +29,6 @@ function compareStudios(a, b, sort) {
   return byCount() || byRecent() || byName();
 }
 
-function studioWorkCount(studio) {
-  return Number(studio?.localWorkCount || studio?.workCount || 0);
+export function studioWorkCount(studio) {
+  return Number(studio?.localWorkCount ?? studio?.workCount ?? 0);
 }

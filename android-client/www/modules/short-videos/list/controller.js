@@ -1,5 +1,5 @@
-import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-76f4b0fadf4d";
-import { isStaleResponseEnvelope } from "../api.js?v=assets-76f4b0fadf4d";
+import { AUTHOR_APPEND_COUNT, AUTHOR_INITIAL_COUNT, DEFAULT_LIMIT, DEFAULT_SORT, DEFAULT_SOURCE, normalizeAuthorAccountStatus, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeShortVideoMedia, normalizeSortForSource, normalizeSource } from "../shared.js?v=assets-06c1d7f13464";
+import { isStaleResponseEnvelope } from "../api.js?v=assets-06c1d7f13464";
 export function createShortVideoListController(context = {}) {
   const { api, getActiveUrl, listState, showView } = context;
   let listLoadMoreObserver = null;
@@ -104,6 +104,7 @@ export function createShortVideoListController(context = {}) {
     let nextAuthor = String(params.author || "all").trim() || "all";
     let nextSource = normalizeSource(params.source || params.origin);
     const nextSort = normalizeSortForSource(nextSource, params.sort);
+    const nextMedia = normalizeShortVideoMedia(params.media || params.type);
     const nextAuthorSort = normalizeFollowingAuthorSort(params.authorSort || listState.authorSort);
     const nextAuthorFilter = normalizeFollowingAuthorFilter(params.authorFilter || listState.authorFilter);
     const nextAuthorAccountStatus = nextSource === "authors"
@@ -116,6 +117,7 @@ export function createShortVideoListController(context = {}) {
       || nextAuthor !== listState.author
       || nextSource !== listState.source
       || nextSort !== listState.sort
+      || nextMedia !== normalizeShortVideoMedia(listState.media)
       || nextAuthorSort !== listState.authorSort
       || nextAuthorFilter !== listState.authorFilter
       || nextAuthorAccountStatus !== listState.authorAccountStatus
@@ -124,6 +126,7 @@ export function createShortVideoListController(context = {}) {
     listState.author = nextAuthor;
     listState.source = nextSource;
     listState.sort = nextSort;
+    listState.media = nextMedia === "all" ? undefined : nextMedia;
     listState.authorSort = nextAuthorSort;
     listState.authorFilter = nextAuthorFilter;
     listState.authorAccountStatus = nextAuthorAccountStatus;
@@ -183,6 +186,7 @@ export function createShortVideoListController(context = {}) {
       if (listState.author && listState.author !== "all") params.set("author", listState.author);
       params.set("source", shortVideoApiSource());
       params.set("sort", listState.sort || DEFAULT_SORT);
+      if (listState.media && listState.media !== "all") params.set("media", listState.media);
       params.set("limit", String(DEFAULT_LIMIT));
       params.set("facets", "0");
       params.set("stats", "0");
@@ -471,7 +475,7 @@ export function createShortVideoListController(context = {}) {
             : listState.authorAccountStatus === "banned"
               ? "没有已封禁的作者。"
               : "还没有作者数据。"
-        : "还没有短视频。";
+        : listState.media === "gallery" ? "没有匹配的图文作品。" : "还没有短视频。";
   }
 
   function readListPageRows(data, entryKey, offset) {
@@ -512,6 +516,7 @@ export function createShortVideoListController(context = {}) {
       author: listState.author,
       source: listState.source,
       sort: listState.sort,
+      media: listState.media,
       authorSort: listState.authorSort,
       authorFilter: listState.authorFilter,
       authorAccountStatus: listState.authorAccountStatus,
@@ -581,6 +586,7 @@ export function createShortVideoListController(context = {}) {
       author: listState.author,
       source: listState.source,
       sort: listState.sort,
+      ...(listState.media && listState.media !== "all" ? { media: listState.media } : {}),
       authorSort: listState.authorSort,
       authorFilter: listState.authorFilter,
       authorAccountStatus: listState.authorAccountStatus,
@@ -600,6 +606,7 @@ export function createShortVideoListController(context = {}) {
       author: listState.author || "all",
       source: listState.source || DEFAULT_SOURCE,
       sort: listState.sort || DEFAULT_SORT,
+      media: listState.media || "all",
       authorSort: listState.authorSort || "followed",
       authorFilter: listState.authorFilter || "all",
       authorAccountStatus: listState.authorAccountStatus || "all",
@@ -727,6 +734,7 @@ export function createShortVideoListController(context = {}) {
         author: authorFilter,
         source: "all",
         sort: listState.sort || DEFAULT_SORT,
+        media: "all",
         openAuthorPanel: true
       });
       if (!opened && owner.isCurrent()) shortVideoToast("当前设备无法打开原生作者主页");

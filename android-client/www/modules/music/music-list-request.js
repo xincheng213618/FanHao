@@ -23,7 +23,8 @@ export function createMusicListRequestBuilder(deps) {
   function musicListQuery() {
     const params = new URLSearchParams();
     params.set("limit", String(state.smartId ? autoCollectionLimit : defaultLimit));
-    if (state.query) params.set("q", state.query);
+    const query = state.mode === "smart" ? state.collectionQuery || state.query : state.query;
+    if (query) params.set("q", query);
     if (state.mode === "artists") {
       params.set("sort", state.artistSort);
       if (state.language) params.set("language", state.language);

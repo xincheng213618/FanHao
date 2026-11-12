@@ -3,7 +3,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { createHash } from "node:crypto";
 import { channelAccountBoundary, createNavigationFixtureDocument } from "./fixtures/android-gallery-navigation-harness.mjs";
-import { captureAccountOwner, rememberAccountPayload, setAccountOwner } from "../android-client/www/js/account-owner.js";
+import { captureAccountOwner, isAccountOwnerCurrent, rememberAccountPayload, setAccountOwner } from "../android-client/www/js/account-owner.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
 import { formatBytes, formatDate, formatNumber } from "../android-client/www/js/format.js";
 
@@ -13,6 +13,7 @@ import { formatBytes, formatDate, formatNumber } from "../android-client/www/js/
 const read = file => fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
 const source = read("android-client/www/platform/content-index/channel-views.js");
 const autoLoadSource = read("android-client/www/js/auto-load.js").replace(/^export /gm, "");
+const pageJumpSource = read("android-client/www/js/image-page-jump.js").replace(/^export /gm, "");
 const legacy = JSON.parse(read("tests/fixtures/android-photo-viewer-requests-before-fix.json"));
 assert.equal(createHash("sha256").update(JSON.stringify(legacy.functions)).digest("hex"),
   "bd1b271f2bb09ded7e17fc7cb985308be08082398d067ffddd4404d677e84ef7");
@@ -65,7 +66,7 @@ function harness(input = source) {
   const calls = { cache: [], fetch: [], writes: [], updates: [], accepted: [] };
   const viewer = {
     current: null,
-    openImage(url, title, options) { this.current = { url, title, ...plain(options) }; },
+    openImage(url, title, options) { this.current = { url, title, ...plain(options) }; return true; },
     close() { this.current = null; },
     updateItems(items, options) {
       calls.updates.push({ items: plain(items), options: plain(options) });
@@ -98,9 +99,10 @@ function harness(input = source) {
     writeCachedJson: async (...args) => { calls.writes.push(args); return {}; }
   });
   vm.runInContext(autoLoadSource, context, { filename: "actual-auto-load.js" });
+  vm.runInContext(pageJumpSource, context, { filename: "actual-image-page-jump.js" });
   const exposure = /  return \{\r?\n(?=    deactivate:)/;
   assert(exposure.test(input));
-  const executable = input.replace(exposure, "  return {\n    __createPhotoTile: createPhotoTile,\n    __rememberPhotoViewerRange: rememberPhotoViewerRange,\n")
+  const executable = input.replace(exposure, "  return {\n    __createPhotoTile: createPhotoTile,\n    __rememberPhotoViewerRange: rememberPhotoViewerRange,\n    __openPhotoPage: openPhotoPage,\n")
     .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
   vm.runInContext(executable, context, { filename: "actual-photo-channel-views.js" });
   const els = { viewContent: document.body, viewKicker: create("span"), viewTitle: create("span"), viewMeta: create("span") };
@@ -424,6 +426,37 @@ test("hydration failure preserves the initial selection and a later open succeed
   assert.equal(h.viewer.current.items.length, 1); assert.equal(h.calls.updates.length, 0);
   h.networkQueue.push({ album: album("retry") }); h.open(album("retry")); await flush();
   assert.equal(h.viewer.current.items.length, 3);
+});
+test("a legacy deep jump verifies the archive before opening and allows a failed request to be retried", async input => {
+  const h = harness(input);
+  const value = { ...album("legacy", "legacy", 4), archiveIdentity: "verified-legacy", updatedAt: "2026-10-01" };
+  const account = captureAccountOwner(h.A);
+  const scope = { activeUrl: h.A, account, verified: true, isCurrent: () => isAccountOwnerCurrent(account) };
+  const target = h.document.createElement("button");
+  h.networkQueue.push({ album: { ...value, archiveIdentity: "changed-legacy" } }, { album: value });
+  await assert.rejects(h.factory.__openPhotoPage(value, value.images.slice(0, 1), scope, 4, target), /套图已变化/);
+  assert.equal(h.viewer.current, null);
+  assert.equal(h.calls.writes.length, 0);
+  assert.equal(await h.factory.__openPhotoPage(value, value.images.slice(0, 1), scope, 4, target), true);
+  assert.equal(h.viewer.current.url, h.A + value.images[3].url);
+  assert.deepEqual(h.calls.fetch.map(({ path }) => new URL(path, h.A).searchParams.get("imageLimit")), ["all", "all"]);
+});
+test("retiring a direct deep jump prevents a late HTTP response from opening a viewer", async input => {
+  const h = harness(input), pending = deferred(), controller = new AbortController();
+  const value = { ...album("legacy", "legacy", 4), archiveIdentity: "verified-legacy", updatedAt: "2026-10-01" };
+  const account = captureAccountOwner(h.A);
+  const scope = { activeUrl: h.A, account, verified: true, signal: controller.signal,
+    isCurrent: () => !controller.signal.aborted && isAccountOwnerCurrent(account) };
+  h.networkQueue.push(pending);
+  const opening = h.factory.__openPhotoPage(value, value.images.slice(0, 1), scope, 4, h.document.createElement("button"));
+  await flush();
+  assert.equal(h.calls.fetch.length, 1);
+  controller.abort();
+  pending.resolve({ album: value });
+  assert.equal(await opening, false);
+  assert.equal(h.calls.fetch[0].options.signal.aborted, true);
+  assert.equal(h.viewer.current, null);
+  assert.equal(h.calls.writes.length, 0);
 });
 
 for (const { name, run } of tests) {

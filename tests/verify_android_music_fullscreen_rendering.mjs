@@ -163,13 +163,16 @@ async function fullscreen(f, open) {
 async function snapshot(page) {
   return page.evaluate(() => {
     const { state, audio } = __musicAudit.read(), full = document.querySelector("#viewContent .music-mobile-full-player");
+    const queueSearch = full?.querySelector(".music-mobile-queue-search-trigger");
+    const comparableFull = queueSearch ? full.cloneNode(true) : full;
+    if (queueSearch) comparableFull.querySelector(".music-mobile-queue-search-trigger").remove();
     return { route: __musicAudit.host.navigation.currentParams(), title: document.querySelector("#viewTitle").textContent, meta: document.querySelector("#viewMeta").textContent,
       current: state.current, queue: state.queue.map(value => value.id), playing: state.playing, fullscreen: state.fullscreen,
       lyricFollowPaused: state.lyricFollowPaused, fullPanel: state.fullPanel, queueOpen: state.queueOpen,
       audio: { count: __musicAudit.audios.length, paused: audio.paused, time: audio.currentTime, rate: audio.playbackRate },
       rows: [...document.querySelectorAll("#viewContent .music-mobile-list .music-mobile-track")].map(row => ({ track: __musicAudit.bindings.get(row), text: row.textContent, className: row.className })),
-      mini: document.querySelector("#viewContent .music-mobile-mini-player")?.textContent || "", fullText: full?.textContent || "",
-      controls: [...(full?.querySelectorAll("button,input,select") || [])].map(node => ({ label: node.getAttribute("aria-label"), text: node.textContent,
+      mini: document.querySelector("#viewContent .music-mobile-mini-player")?.textContent || "", fullText: comparableFull?.textContent || "",
+      controls: [...(full?.querySelectorAll("button,input,select") || [])].filter(node => node !== queueSearch).map(node => ({ label: node.getAttribute("aria-label"), text: node.textContent,
         disabled: node.disabled, value: "value" in node ? node.value : null, type: node.type, title: node.title })), playerClass: document.body.classList.contains("music-player-open") };
   });
 }
@@ -204,6 +207,7 @@ async function updates(oldSurface, nextSurface) {
     }, "rating response updates retained background bindings");
     await both(old, next, f => press(f, ".music-mobile-playback-settings-close"), "settings close preserves full player");
     await both(old, next, f => press(f, ".music-mobile-full-queue"), "queue opens using current data");
+    assert.equal(await next.page.getByRole("button", { name: "搜索播放队列", exact: true }).isEnabled(), true);
     await both(old, next, f => press(f, ".music-mobile-queue-sheet .music-mobile-sheet-close"), "queue close returns to player");
     await both(old, next, async f => {
       await press(f, '.music-mobile-full-controls button[aria-label="下一首"]');

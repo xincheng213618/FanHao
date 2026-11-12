@@ -1,5 +1,5 @@
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-76f4b0fadf4d";
-import { createNovelViews } from "./novel-views.js?v=assets-76f4b0fadf4d";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { createNovelViews } from "./novel-views.js?v=assets-06c1d7f13464";
 
 export function createAndroidModule({ host }) {
   const novelViews = createNovelViews({
@@ -24,7 +24,7 @@ export function createAndroidModule({ host }) {
     routes: [
       { view: "novels", render: (_params, guard) => novelViews.renderNovelList(guard) },
       { view: "novelSearch", render: (params, guard) => novelViews.renderNovelSearch(params, guard) },
-      { view: "novelDetail", render: (params, guard) => novelViews.renderNovelDetail(params.id, guard) },
+      { view: "novelDetail", render: (params, guard) => novelViews.renderNovelDetail(params.id, guard, params) },
       { view: "novelReader", render: (params, guard) => novelViews.renderNovelReader(params.id, params.chapterIndex, guard, params) }
     ],
     renderChrome(context) {
@@ -36,7 +36,10 @@ export function createAndroidModule({ host }) {
     },
     deactivate: deactivateChrome,
     handleBack(view, params) {
-      if (view !== "novelReader" || host.navigation.hasBackStack()) return false;
+      if (novelViews.closeBookTextSearch?.({ restoreFocus: true })) return true;
+      if (view !== "novelReader") return false;
+      if (novelViews.closeReaderSearch?.({ restoreFocus: true })) return true;
+      if (host.navigation.hasBackStack()) return false;
       host.navigation.showView("novels", {}, { skipHistory: true, replaceHistory: true });
       return true;
     },

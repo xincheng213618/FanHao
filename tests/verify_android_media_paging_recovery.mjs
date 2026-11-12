@@ -85,8 +85,10 @@ function harness(input = sources, { storage = new Map(), hash = "" } = {}) {
     library: {}, HISTORY_MARKER: "synthetic-history", mediaViewer: { close: () => false }, channelViews: null,
     cacheAgeText: () => "synthetic", isChannelFavorite: () => false, toggleChannelFavorite: () => ({ favorite: true, items: [] }),
     photoCatalogCollections, PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS, openMobileActionSheet: no, loadPreviewImage: no,
+    readPhotoPositions: () => [], discardPhotoPosition: no, savePhotoPosition: no, openPhotoResumeHistory: no, openMangaCatalogSearch: no,
     HTMLButtonElement: proto.constructor,
     fetchJson: async (source, path, options) => {
+      if (path.startsWith("/api/gallery-media/continue-watching?")) return { items: [] };
       if (path === "/api/manga/jobs" || path.startsWith("/api/manga/jobs?")) { assert(!options?.method || options.method === "GET"); return { jobs: [] }; }
       const request = { source, path, options }; calls.network.push(request); const response = queue.shift();
       const actual = services.get(source).itemsPayload(new URL(path, source));

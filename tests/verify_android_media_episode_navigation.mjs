@@ -7,6 +7,7 @@ import { appFunction, channelAccountBoundary, createNavigationFixtureDocument } 
 import { captureMediaTrail, mediaBackTarget } from "../android-client/www/js/media-navigation-state.js";
 import { formatBytes, formatDate, formatNumber, formatTime } from "../android-client/www/js/format.js";
 import { absoluteUrl } from "../android-client/www/js/image.js";
+import { openMediaEpisodePicker } from "../android-client/www/platform/content-index/media-episode-picker.js";
 import { setAccountOwner } from "../android-client/www/js/account-owner.js";
 import { createImageLibraryService } from "../src/modules/content-index/server/image-library-service.js";
 
@@ -53,7 +54,7 @@ function syntheticLibrary(count, metadataCount, mode) {
     },
     bumpMetadataRevision() { metadataRevision++; },
     detail(number) { const row = items.find(value => value.id === id(number)) || { ...items[0], id: id(number) }; return {
-    item: { ...service.publicGalleryMediaItem(row), streamUrl: `/media/gallery-video/${encodeURIComponent(row.id)}`, progress: { position: 73, duration: 240 } }
+    item: { ...service.publicGalleryMediaItem(row), streamUrl: `/media/gallery-video/${encodeURIComponent(row.id)}`, progress: { position: number % 200, duration: 240 } }
   }; } };
 }
 function harness(input = source, { count = 90, current = 80, metadataCount, cached = false, mode = "tv" } = {}) {
@@ -63,12 +64,19 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
   if (!Object.getOwnPropertyDescriptor(proto, "childElementCount")) Object.defineProperty(proto, "childElementCount", { get() { return this.children.length; } });
   const els = Object.fromEntries(["viewContent", "viewTitle", "viewMeta", "viewKicker", "contentPanel"].map(key => [key, document.createElement("div")]));
   document.body.append(...Object.values(els));
-  const calls = { pages: [], details: [], nav: [], bridge: [], errors: [] }, pageQueue = [], detailQueue = [];
+  const calls = { pages: [], details: [], nav: [], bridge: [], errors: [] }, pageQueue = [], detailQueue = [], bridgeQueue = [];
+  const timers = new Map();
+  let timerSequence = 0;
   let activeUrl = A, currentNumber = current;
   const originalCreate = document.createElement;
   document.createElement = tag => {
     const node = originalCreate(tag), add = node.addEventListener.bind(node), click = node.click.bind(node);
     node.disabled = false;
+    node.scrollIntoView = () => {};
+    if (tag === "dialog") {
+      node.showModal = () => { node.open = true; };
+      node.close = () => { node.open = false; };
+    }
     node.addEventListener = (type, callback, options) => add(type, event => {
       try { const task = callback(event); task?.catch?.(error => calls.errors.push(error)); } catch (error) { calls.errors.push(error); }
     }, options);
@@ -77,12 +85,17 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
     return node;
   };
   document.addEventListener = () => {}; document.visibilityState = "visible";
-  const context = vm.createContext({ ...channelAccountBoundary, console, document, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget,
+  const context = vm.createContext({ ...channelAccountBoundary, console, document, URL, URLSearchParams, AbortController, captureMediaTrail, mediaBackTarget, openMediaEpisodePicker,
     currentView: "mediaDetail", currentViewParams: {}, viewRenderToken: 0, activeViewController: null,
     // No shell menus here; their actual lifecycle is covered by the gallery gate.
     retireModePickerSession() {},
-    performance: { now: () => 0 }, window: { addEventListener() {}, setTimeout() { return 1; }, clearTimeout() {},
-      Capacitor: { Plugins: { FanHaoPlayer: { async play(value) { calls.bridge.push(plain(value)); return { opened: true }; } } } } },
+    performance: { now: () => 0 }, window: { addEventListener() {},
+      setTimeout(callback, delay) { timers.set(++timerSequence, { callback, delay }); return timerSequence; }, clearTimeout(id) { timers.delete(id); },
+      Capacitor: { Plugins: { FanHaoPlayer: { async play(value) {
+        calls.bridge.push(plain(value));
+        const result = bridgeQueue.shift();
+        return result?.promise || result || { opened: true };
+      } } } } },
     formatBytes, formatDate, formatNumber, formatTime, absoluteUrl, cacheAgeText: () => "synthetic", photoCatalogCollections: value => value,
     isChannelFavorite: () => false, toggleChannelFavorite: () => ({ favorite: true, items: [] }), loadPreviewImage() {}, enhanceAutoLoadMore() {},
     readCachedJson: async () => cached ? { payload: library.detail(currentNumber) } : null, writeCachedJson: async () => {},
@@ -90,6 +103,7 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
       assert([A, B].includes(base), "Only synthetic sources are permitted");
       let value;
       if (path.startsWith("/api/gallery-media/")) { calls.details.push({ base, path, options }); value = detailQueue.length ? detailQueue.shift() : library.detail(currentNumber); }
+      else if (path.startsWith("/api/playinfo/")) value = { mode: "direct", duration: 240 };
       else {
         assert(path.startsWith("/api/image-library/items?"), `Unexpected endpoint: ${path}`);
         const url = new URL(path, base), actual = library.service.itemsPayload(url), call = { base, path, options, params: Object.fromEntries(url.searchParams), actual };
@@ -111,13 +125,21 @@ function harness(input = source, { count = 90, current = 80, metadataCount, cach
   const adapter = input === legacy.sources.channel.source ? legacy.sources.media.source : mediaSource;
   const createModule = vm.runInContext(`(function(){${strip(adapter)};return createAndroidModule;})()`, context), module = createModule({ host });
   const h = { context, document, els, calls, library, trail,
-    queuePage(value) { pageQueue.push(value); }, queueDetail(value) { detailQueue.push(value); }, setSource(value) { activeUrl = value; },
+    queuePage(value) { pageQueue.push(value); }, queueDetail(value) { detailQueue.push(value); }, queueBridge(value) { bridgeQueue.push(value); },
+    setSource(value) { activeUrl = value; },
     leave() { context.invalidateViewRender(); context.currentView = "channel"; els.viewContent.textContent = "OTHER PAGE"; },
     abort() { context.activeViewController.abort(); },
+    back() { return module.handleBack(context.currentView, context.currentViewParams); },
     start(number = currentNumber) { currentNumber = number; context.currentView = "mediaDetail"; context.currentViewParams = { id: id(number), mode, mediaTrail: trail };
       const guard = context.beginViewRender("mediaDetail", context.currentViewParams); return module.routes.find(route => route.view === "mediaDetail").render(context.currentViewParams, guard); },
     async settle() { for (let index = 0; index < 160; index++) await Promise.resolve(); assert.equal(calls.errors.length, 0, calls.errors[0]?.stack); },
+    async runTimer(delay) {
+      const timer = [...timers.entries()].find(([, entry]) => entry.delay === delay);
+      assert(timer, `Expected a timer at ${delay} ms`);
+      timers.delete(timer[0]); timer[1].callback(); await h.settle();
+    },
     row: () => els.viewContent.querySelector(".media-episode-nav"), label: () => h.row()?.querySelector(".media-episode-nav-label")?.textContent || "",
+    async play() { const button = els.viewContent.querySelector(".media-native-play-surface"); assert(button, "Actual play surface exists"); button.click(); await h.settle(); },
     button(text) { return h.row()?.querySelectorAll("button").find(button => button.textContent === text); },
     async click(text) { const button = h.button(text); assert(button, `Actual ${text} button exists`); button.click(); await h.settle(); },
     async follow(text, number) {
@@ -155,7 +177,8 @@ for (const current of [239, 240, 241, 300]) test(`300 episodes at ${current} res
 for (const [count, current] of [[1, 1], [90, 1], [90, 90], [800, 1], [800, 800]]) test(`exact first/last boundaries and early stop for ${current}/${count}`, async input => {
   const h = harness(input, { count, current, metadataCount: 99999 }); await h.start(); await h.settle();
   assert.equal(h.row().dataset.state, "ready"); assert.equal(h.label(), `第 ${current} / ${count} 集`);
-  assert.equal(h.row().getAttribute("aria-busy"), null); assert.equal(h.row().children.length, 3, "Navigation remains a three-column row");
+  assert.equal(h.row().getAttribute("aria-busy"), null); assert.equal(h.row().children.length, 4, "Selection shares the navigation row");
+  assert.equal(h.button("选集").disabled, false);
   assert.equal(h.button("上一集").disabled, current === 1); assert.equal(h.button("下一集").disabled, current === count);
   if (current === 1) { await h.click("上一集"); assert.equal(h.calls.nav.length, 0); }
   if (current === count) { await h.click("下一集"); assert.equal(h.calls.nav.length, 0); }
@@ -340,6 +363,145 @@ for (const invalidation of ["source", "account", "route"]) test(`adjacent window
   } finally { if (invalidation === "account") setAccountOwner(A, "guest"); }
 });
 
+for (const mode of ["tv", "anime"]) test(`${mode} native next replaces detail and opens the target with its own saved progress`, async input => {
+  const h = harness(input, { mode, count: 242, current: 240, cached: true }); await h.start(); await h.settle();
+  h.queueBridge({ opened: true, episodeStep: 1 }); await h.play();
+  assert.equal(h.calls.bridge[0].previousEpisode, true);
+  assert.equal(h.calls.bridge[0].nextEpisode, true);
+  assert.deepEqual(h.calls.nav.map(({ view, params, navigation }) => ({ view, params: { ...params, mediaTrail: JSON.parse(params.mediaTrail) }, navigation })),
+    [{ view: "mediaDetail", params: { id: id(241), mode, mediaTrail: JSON.parse(h.trail) }, navigation: { skipHistory: true, replaceHistory: true } }]);
+  assert.deepEqual(pageRanges(h.calls.pages.slice(-1)), [["238", "3"]]);
+  const detail = deferred(); h.queueDetail(detail);
+  const render = h.start(241); await h.settle();
+  assert.equal(h.calls.bridge.length, 1, "Cached details may not trigger the handed-off launch");
+  detail.resolve(h.library.detail(241)); await render; await h.settle();
+  assert.equal(h.calls.bridge.length, 2);
+  assert.equal(h.calls.bridge[1].videoId, id(241));
+  assert.equal(h.calls.bridge[1].position, 41);
+  assert.match(h.calls.bridge[1].progressUrl, /synthetic-episode-0241$/);
+  assert.notEqual(h.calls.bridge[1].progressSessionId, h.calls.bridge[0].progressSessionId);
+  assert.equal(h.calls.bridge[1].nextEpisode, true);
+});
+
+test("native episode launch honors series boundaries and ignores an unavailable direction", async input => {
+  for (const current of [1, 3]) {
+    const h = harness(input, { count: 3, current }); await h.start(); await h.settle();
+    h.queueBridge({ opened: true, episodeStep: current === 1 ? -1 : 1 }); await h.play();
+    assert.equal(h.calls.bridge[0].previousEpisode, current !== 1);
+    assert.equal(h.calls.bridge[0].nextEpisode, current !== 3);
+    assert.equal(h.calls.nav.length, 0);
+  }
+});
+
+test("native previous from the last episode opens the previous episode and a regular close stops there", async input => {
+  const h = harness(input, { count: 3, current: 3 }); await h.start(); await h.settle();
+  h.queueBridge({ opened: true, episodeStep: -1 }); await h.play();
+  assert.equal(h.calls.nav[0]?.params.id, id(2));
+  await h.start(2); await h.settle();
+  assert.equal(h.calls.bridge[1]?.videoId, id(2));
+  assert.equal(h.calls.nav.length, 1);
+});
+
+test("native playback offers the picker while adjacency misses the waiting budget", async input => {
+  const h = harness(input, { count: 3, current: 2 }), page = deferred();
+  h.queuePage(page); await h.start(); await h.settle();
+  await h.play(); assert.equal(h.calls.bridge.length, 0);
+  await h.runTimer(800);
+  assert.equal(h.calls.bridge[0]?.videoId, id(2));
+  assert.equal(h.calls.bridge[0].nextEpisode, undefined);
+  assert.equal(h.calls.bridge[0].episodePicker, true);
+  page.resolve(h.calls.pages[0].actual); await h.settle();
+  assert.equal(h.button("下一集").disabled, false, "The detail can still resolve its neighbors while playback is open");
+});
+
+function pickerDialog(h) { return h.document.body.querySelector(".media-episode-picker"); }
+function pickerChoice(h, title) {
+  return pickerDialog(h).querySelectorAll(".media-episode-picker-choice").find(button => button.textContent === title);
+}
+function submitPicker(h, label, value) {
+  const input = pickerDialog(h).querySelector(`input[aria-label="${label}"]`);
+  assert(input, `Actual ${label} field exists`);
+  input.value = value;
+  input.parentNode.dispatchEvent({ type: "submit", preventDefault() {} });
+}
+
+test("detail picker reaches a distant directory ordinal in one bounded page and launches the selected file", async input => {
+  const h = harness(input, { count: 800, current: 2 }); await h.start(); await h.settle();
+  await h.click("选集");
+  assert.equal(pickerDialog(h).open, true);
+  assert.equal(pickerChoice(h, "2 · Episode 2").getAttribute("aria-current"), "true");
+  const reads = h.calls.pages.length;
+  submitPicker(h, "目录序号", "７９６"); await h.settle();
+  assert.equal(h.calls.pages.length, reads + 1);
+  const { params } = h.calls.pages.at(-1);
+  assert.equal(params.limit, "24"); assert.equal(params.offset, "792"); assert.equal(params.seriesKey, SERIES_KEY);
+  const target = pickerChoice(h, "796 · Episode 796"); assert(target);
+  assert.equal(h.document.activeElement, target);
+  target.click(); await h.settle();
+  assert.equal(pickerDialog(h), null);
+  assert.equal(h.calls.nav.at(-1).params.id, id(796));
+  assert.deepEqual(JSON.parse(h.calls.nav.at(-1).params.mediaTrail), JSON.parse(h.trail));
+  assert.deepEqual(h.calls.nav.at(-1).navigation, { skipHistory: true, replaceHistory: true });
+  await h.start(796); await h.settle();
+  assert.equal(h.calls.bridge[0].videoId, id(796));
+  assert.equal(h.calls.bridge[0].position, 196);
+  assert.deepEqual(h.calls.pages.slice(reads + 1).map(call => [call.params.offset, call.params.limit]), [["794", "3"]]);
+});
+
+test("native single-episode playback can open the same picker and Android back dismisses it", async input => {
+  const h = harness(input, { count: 1, current: 1 }); await h.start(); await h.settle();
+  h.queueBridge({ opened: true, episodePicker: true }); await h.play();
+  assert.equal(h.calls.bridge[0].episodePicker, true);
+  assert.equal(h.calls.bridge[0].previousEpisode, false); assert.equal(h.calls.bridge[0].nextEpisode, false);
+  assert(pickerChoice(h, "1 · Episode 1"));
+  assert.equal(h.back(), true); assert.equal(pickerDialog(h), null);
+  assert.equal(h.document.activeElement, h.button("选集")); assert.equal(h.calls.nav.length, 0);
+});
+
+test("anime picker searches within the active series and ignores older results", async input => {
+  const h = harness(input, { mode: "anime", count: 80, current: 1 }); await h.start(); await h.settle();
+  await h.click("选集");
+  const slow = deferred(); h.queuePage(slow);
+  submitPicker(h, "搜剧集标题", "Episode 15"); await h.settle();
+  const stale = h.calls.pages.at(-1);
+  submitPicker(h, "搜剧集标题", "Episode 56"); await h.settle();
+  assert.equal(stale.options.signal.aborted, true);
+  assert.equal(h.calls.pages.at(-1).params.q, "Episode 56");
+  assert.equal(h.calls.pages.at(-1).params.kind, "anime"); assert.equal(h.calls.pages.at(-1).params.seriesKey, h.library.detail(1).item.seriesKey);
+  slow.resolve(stale.actual); await h.settle();
+  assert(pickerChoice(h, "Episode 56")); assert(!pickerChoice(h, "Episode 15"));
+  pickerChoice(h, "Episode 56").click(); await h.settle();
+  await h.start(56); await h.settle();
+  assert.equal(h.calls.bridge[0].videoId, id(56));
+});
+
+for (const change of ["route", "account", "source"]) test(`native picker return is ignored after ${change} changes`, async input => {
+  const h = harness(input, { count: 3, current: 2 }), result = deferred(); await h.start(); await h.settle();
+  h.queueBridge(result); await h.play();
+  try {
+    if (change === "route") h.leave();
+    if (change === "account") setAccountOwner(A, "account:episode-picker-fixture");
+    if (change === "source") h.setSource(B);
+    result.resolve({ opened: true, episodePicker: true }); await h.settle();
+    assert.equal(pickerDialog(h), null); assert.equal(h.calls.nav.length, 0);
+  } finally { if (change === "account") setAccountOwner(A, "guest"); }
+});
+
+for (const change of ["directory", "account", "source", "route"]) test(`native selection retires after ${change} changes`, async input => {
+  const h = harness(input, { count: 242, current: 240 }), result = deferred(); await h.start(); await h.settle();
+  h.queueBridge(result); await h.play();
+  assert.equal(h.calls.bridge.length, 1);
+  try {
+    if (change === "directory") h.library.rescanShift();
+    if (change === "account") setAccountOwner(A, "account:episode-fixture");
+    if (change === "source") h.setSource(B);
+    if (change === "route") h.leave();
+    result.resolve({ opened: true, episodeStep: 1 }); await h.settle();
+    assert.equal(h.calls.nav.length, 0);
+    if (change === "directory") assert.match(h.els.viewContent.querySelector(".media-player-error")?.textContent || "", /选集目录有变化/);
+  } finally { if (change === "account") setAccountOwner(A, "guest"); }
+});
+
 const mutations = [], mutate = (name, scenario, change) => mutations.push({ name, scenario, change });
 const replaceOnce = (value, from, to) => { assert(value.includes(from), `Missing mutation target ${from}`); return value.replace(from, to); };
 const navMutation = change => value => {
@@ -353,7 +515,7 @@ mutate("advance offset by requested size instead of actual length", "short nonfi
 mutate("show seen prefix size rather than server total", "300 episodes at 239 resolve across a 240-item page boundary", navMutation(method => replaceOnce(method, "${current.position} / ${total}", "${current.position} / ${seen.size}")));
 mutate("mistake every page boundary for series ending", "300 episodes at 240 resolve across a 240-item page boundary", navMutation(method => replaceOnce(method, "if (offset >= total)", "if (true)")));
 mutate("forget prior-page last episode", "300 episodes at 241 resolve across a 240-item page boundary", navMutation(method => replaceOnce(method, "for (let index = 0; index < episodes.length; index += 1)", "previous = null;\n          for (let index = 0; index < episodes.length; index += 1)")));
-mutate("ignore ownership after awaiting a neighbor page", "source during the immediate neighbor page cannot mark a retired row ready", navMutation(method => replaceOnce(method, "if (!isCurrent()) return;", "/* mutation: post-request owner unchecked */")));
+mutate("ignore ownership after awaiting a neighbor page", "source during the immediate neighbor page cannot mark a retired row ready", navMutation(method => replaceOnce(method, "if (!isCurrent()) return;\n          const episodes = data?.items;", "/* mutation: post-request owner unchecked */\n          const episodes = data?.items;")));
 mutate("let old enabled onclick navigate", "source rejects an already-enabled old episode onclick", value => replaceOnce(value, "if (!button.disabled && isCurrent()) {", "if (!button.disabled) {"));
 mutate("remove duplicate-ID fence", "later-page duplicate across pages does not infer a nonexistent ending", navMutation(method => replaceOnce(method, " || seen.has(id)", "")));
 mutate("ignore changed total between pages", "later-page total changed does not infer a nonexistent ending", navMutation(method => replaceOnce(method, " || (total !== null && data.total !== total)", "")));

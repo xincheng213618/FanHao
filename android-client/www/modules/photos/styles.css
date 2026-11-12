@@ -83,6 +83,257 @@
   min-height: 44px;
 }
 
+.photo-album-navigation {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 8px;
+  margin: 0 0 8px;
+}
+
+.photo-album-navigation > button {
+  min-height: 44px;
+}
+
+.photo-album-navigation > button:is(:disabled, [aria-disabled="true"]) {
+  opacity: 0.55;
+}
+
+.photo-album-navigation-status {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.photo-album-navigation-status:not(:empty) {
+  margin-top: 6px;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) {
+  min-width: 0;
+  margin-bottom: 10px;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) h2 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 16px;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) ul {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(min(56%, 176px), 1fr);
+  gap: 8px;
+  overflow-x: auto;
+  margin: 0;
+  padding: 2px 2px 6px;
+  list-style: none;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) li {
+  min-width: 0;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) li button {
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  width: 100%;
+  min-height: 56px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  padding: 8px 10px;
+  text-align: start;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) button:focus-visible,
+.photo-resume-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) button strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+:is(.manga-library-resume, .photo-resume-shelf) button span,
+.photo-resume-control span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.photo-resume-shelf > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.photo-resume-shelf > header h2 { margin: 0; }
+
+.photo-resume-history-trigger {
+  min-height: 44px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: var(--mobile-accent);
+  font: inherit;
+  font-size: 13px;
+}
+
+.mobile-action-sheet-panel:is(.photo-resume-history, .manga-catalog-search) {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  justify-self: center;
+  width: min(100%, 560px);
+  max-height: min(640px, 82dvh);
+}
+
+:is(.photo-resume-history, .manga-catalog-search) input {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+}
+
+:is(.photo-resume-history, .manga-catalog-search) [role="status"],
+:is(.photo-resume-history, .manga-catalog-search) small { color: var(--muted); font-size: 13px; }
+
+.photo-resume-history ul {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.photo-resume-history li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.photo-resume-history li button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+}
+
+.photo-resume-history li .photo-resume-history-open {
+  display: grid;
+  gap: 4px;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.photo-resume-history li .photo-resume-history-remove { color: var(--mobile-accent); }
+
+.manga-section-title:has(> .manga-catalog-search-trigger) { align-items: center; justify-content: flex-start; }
+
+.manga-catalog-search-trigger,
+.manga-catalog-search-more {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.manga-catalog-search-trigger { margin-inline-start: auto; }
+
+.manga-catalog-search-results {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.manga-catalog-search ul { margin: 0; padding: 0; list-style: none; }
+
+.manga-catalog-search li button {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+
+.manga-catalog-search li button:disabled { color: var(--muted); }
+.manga-catalog-search-more { width: 100%; margin-top: 8px; }
+
+.photo-resume-control:not([hidden]) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.photo-resume-action {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.photo-resume-action:disabled {
+  opacity: 0.55;
+}
+
+.photo-detail-page-jump:not([hidden]) {
+  margin-bottom: 10px;
+}
+
+.manga-reader-progress-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.manga-reader-page-jump-toggle {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.manga-reader-page-jump { grid-column: 1 / -1; }
+.manga-reader-page-jump [role="status"] { white-space: normal; }
+
 .content-panel[data-view="mangaDetail"] .manga-detail-description {
   display: block;
   overflow: visible;

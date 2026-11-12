@@ -1,6 +1,6 @@
-import { DEFAULT_SORT } from "../shared.js";
-import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-76f4b0fadf4d";
-import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-76f4b0fadf4d";
+import { DEFAULT_SORT, normalizeShortVideoMedia } from "../shared.js";
+import { clearCachedJsonByPrefix } from "../../../js/cache.js?v=assets-06c1d7f13464";
+import { stringifyNativeShortVideoFeed } from "./native-feed-contract.js?v=assets-06c1d7f13464";
 
 const MAX_ACTION_RESULT_SNAPSHOTS = 512;
 const MAX_ACTION_RESULT_VIDEO_ID_CHARS = 512;
@@ -142,10 +142,12 @@ export function createShortVideoNativeFeed(context = {}) {
     const author = options.author ?? listState.author;
     const source = options.source ?? shortVideoApiSource();
     const sort = options.sort ?? listState.sort;
+    const media = normalizeShortVideoMedia(options.media ?? listState.media);
     if (query) url.searchParams.set("q", query);
     if (author && author !== "all") url.searchParams.set("author", author);
     url.searchParams.set("source", source || "all");
     url.searchParams.set("sort", sort || DEFAULT_SORT);
+    if (media !== "all") url.searchParams.set("media", media);
     url.searchParams.set("facets", "0");
     url.searchParams.set("stats", "0");
     url.searchParams.set("users", "0");

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { deriveWorkTraits, matchesWorkTraitFilter, summarizeWorkTraits } from "../lib/work-traits.js";
+import { deriveWorkTraits, isWorkTraitFilter, matchesWorkTraitFilter, summarizeWorkTraits } from "../lib/work-traits.js";
 
 let checks = 0;
 function check(name, callback) {
@@ -10,7 +10,7 @@ function traitsForName(name, extra = {}) {
   return deriveWorkTraits({ videos: [{ name }], ...extra });
 }
 function activeFlags(traits) {
-  return Object.keys(traits.flags).filter((key) => traits.flags[key] && !key.startsWith("format")).sort();
+  return Object.keys(traits.flags).filter((key) => isWorkTraitFilter(key) && traits.flags[key] && !key.startsWith("format")).sort();
 }
 
 function versionBadges(traits) {
@@ -136,6 +136,29 @@ check("metadata edition labels are evidence, not genre chips or visual verificat
     assert.ok(edition.evidence.length > 0);
     assert.ok(edition.evidence.every((text) => text.includes("资料标签") && text.includes("未核验本地画面")));
   }
+});
+
+check("cover markers distinguish filename C, matched Chinese sidecars and generic source metadata", () => {
+  const videos = [{ name: "ABC-123-LTXC-CD1.mp4" }, { name: "ABC-123-CD2.mp4" }];
+  const project = (infos) => deriveWorkTraits({ videos, infos: infos.map((name) => ({ name })) }).flags;
+  const chinese = project(["ABC-123-CD2.zh-TW.srt"]);
+  assert.equal(chinese.embeddedChinese, true);
+  assert.equal(chinese.hasSidecar, true);
+  assert.equal(chinese.hasChineseSidecar, true);
+  const unknown = project(["ABC-123-CD2.vtt", "ABC-123-CD3.zh-CN.srt"]);
+  assert.equal(unknown.hasSidecar, true);
+  assert.equal(unknown.hasChineseSidecar, false);
+  const externalOnly = deriveWorkTraits({ videos: [videos[1]], infos: [{ name: "ABC-123-CD2.chs.ass" }] });
+  assert.equal(externalOnly.flags.hasChineseSidecar, true);
+  assert.equal(externalOnly.flags.embeddedChinese, false);
+  assert.equal(matchesWorkTraitFilter(externalOnly, "subtitled"), true);
+  assert.match(externalOnly.editions.find(({ key }) => key === "subtitled").evidence[0], /ABC-123-CD2.chs.ass/);
+  const unmatched = deriveWorkTraits({ videos: [videos[1]], infos: [{ name: "ABC-123-CD3.zh-CN.srt" }, { name: "ABC-123-CD2.en.srt" }] });
+  assert.equal(matchesWorkTraitFilter(unmatched, "subtitled"), false);
+  const remote = deriveWorkTraits({ tags: ["外挂字幕"], hasSubtitles: true }).flags;
+  assert.equal(remote.subtitled, true);
+  assert.equal(remote.embeddedChinese, false);
+  assert.equal(remote.hasSidecar, false);
 });
 
 check("evidence is deduplicated for duplicated metadata sources", () => {

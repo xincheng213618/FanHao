@@ -12,6 +12,10 @@ assert(executablePath, "installed Chromium required");
 const path = "android-client/www/platform/content-index/channel-views.js";
 const original = execFileSync("git", ["show", `f110040d02b1eb579461248da9960e97370fa4d2:${path}`], { cwd: root, encoding: "utf8" });
 let legacy = fs.readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+const progressPattern = /^function readMangaReadingProgress\([\s\S]*?(?=^function requestMangaResume\()/m;
+const oldProgress = original.match(progressPattern)?.[0];
+assert(oldProgress && progressPattern.test(legacy));
+legacy = legacy.replace(progressPattern, () => oldProgress);
 for (const [start, end] of [["renderMangaChapterData", "createMangaChapterNavigation"],
   ["createMangaReaderProgress", "bindMangaReaderProgress"], ["bindMangaReaderProgress", "restoreRequestedMangaPage"],
   ["restoreRequestedMangaPage", "resetMangaReaderProgressTracker"]]) {
@@ -145,6 +149,42 @@ try {
         assert.deepEqual(faults, []);
         console.log(JSON.stringify({ mode: wan ? "WAN" : "LAN", variant: previous ? "baseline" : "current", ...result,
           extraRequests: requests.length - 1, extraBytes }));
+        const jumpTrigger = page.getByRole("button", { name: "跳到页码" });
+        const jumpInput = page.getByRole("textbox", { name: "图片页码" });
+        if (!previous && wan) {
+          const chapterRefresh = page.waitForResponse(response => new URL(response.url()).pathname === endpoint);
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await chapterRefresh;
+          await jumpTrigger.waitFor();
+          const jumpPage = 174;
+          const firstPage = await page.locator(".manga-reader-page").first().elementHandle();
+          assert(await page.locator(".manga-reader-page").count() < jumpPage, "deep target is outside mounted pages");
+          const reads = requests.length;
+          await jumpTrigger.tap();
+          await jumpInput.fill("181");
+          await jumpInput.press("Enter");
+          await page.getByText("请输入 1–180 之间的页码。").waitFor();
+          assert.equal(await jumpInput.getAttribute("aria-invalid"), "true");
+          const verifyJump = async (value, expected) => {
+            await jumpInput.fill(value);
+            await jumpInput.press("Enter");
+            await page.waitForFunction(({ id, expected }) => {
+              const row = document.querySelector(`[data-manga-page-position="${expected}"]`);
+              const saved = JSON.parse(localStorage.getItem("fanhao.android.mangaReadingProgress.v1"))?.[id];
+              return row && Math.abs(row.getBoundingClientRect().top - 60) <= 2
+                && document.activeElement === row && saved?.pageIndex === expected
+                && document.querySelector(".manga-reader-progress-track")?.getAttribute("aria-valuenow") === String(expected);
+            }, { id, expected });
+            assert.equal(await jumpTrigger.getAttribute("aria-expanded"), "false");
+          };
+          await verifyJump("１７４", jumpPage);
+          await jumpTrigger.tap();
+          await verifyJump("6", 6);
+          assert.equal(await firstPage.evaluate(element => element.isConnected), true, "jump retains mounted pages");
+          assert.equal(requests.length, reads, "jump uses the mounted chapter without refetching it");
+          assert.equal(new URL(page.url()).hash, url.hash);
+          console.log("Android manga page jump verified on a long WAN chapter");
+        }
         if (!previous && !wan) {
           phase = "offline";
           await page.reload({ waitUntil: "domcontentloaded" });
@@ -166,6 +206,11 @@ try {
           const requestsBeforeResume = requests.length;
           await resume.tap();
           await page.waitForFunction(() => Boolean(window.fixtureResume));
+          await jumpTrigger.evaluate(button => button.click());
+          await jumpInput.evaluate(input => {
+            input.value = "１７７";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          });
           allowChanged.resolve();
           await page.waitForFunction(({ title, target }) => {
             const anchor = document.querySelector(`[data-manga-page-position="${target}"]`);
@@ -175,6 +220,8 @@ try {
           }, { title: refreshedPayload.chapter.title, target });
           assert.equal(await cachedList.evaluate(element => element.isConnected), false, "the changed fresh payload actually replaced the reader");
           assert.equal(requests.length, requestsBeforeResume, "refresh reuses the mounted restore intent");
+          assert.equal(await jumpInput.inputValue(), "１７７", "a changed refresh preserves the active jump draft");
+          assert.equal(await jumpInput.evaluate(input => input === document.activeElement), true);
 
           const old = { ...payload, chapter: { ...payload.chapter, imageCount: 12, images: images.slice(0, 12) } };
           await page.evaluate(async ({ cacheModule, endpoint, old }) => {

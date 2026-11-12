@@ -21,12 +21,18 @@ const flush = async () => { for (let turn = 0; turn < 40; turn += 1) await Promi
 const direct = (id, extra = {}) => ({ mode: "direct", streamUrl: `/stream/${id}.mp4`, fallbackStreamUrl: `/compat/${id}`, duration: 120, videoCodec: "h264", audioCodec: "aac", ...extra });
 let fixtureId = 0, cases = 0, selectedCase = "";
 
-function fixture({ code = source, native = "success", work: givenWork } = {}) {
+function fixture({ code = source, native = "success", work: givenWork, subtitles } = {}) {
   const sequence = ++fixtureId;
   let base = `http://player-${sequence}.fixture.invalid:29998`, nextNode = 0, nextTimer = 0;
   let now = 1710000000000;
   class FixtureDate extends Date { static now() { return now; } }
   const nodes = [], writes = [], reads = [], posts = [], launches = [], timers = new Map(), listeners = new Map();
+  const subtitleReads = [], vttReads = [], releasedUrls = [];
+  let nextObjectUrl = 0;
+  class FixtureURL extends URL {
+    static createObjectURL() { return `blob:fixture-${++nextObjectUrl}`; }
+    static revokeObjectURL(url) { releasedUrls.push(url); }
+  }
   const work = givenWork || { id: `work-${sequence}`, title: "Fixture work", videos: [{ id: "A", name: "A", ext: ".mp4" }, { id: "B", name: "B", ext: ".mp4" }] };
   let playBehavior = () => Promise.resolve();
   const log = (node, kind, value) => writes.push([node.id, kind, String(value ?? "")]);
@@ -39,6 +45,7 @@ function fixture({ code = source, native = "success", work: givenWork } = {}) {
       this.tag = tag; this.id = ++nextNode; this.children = []; this.events = new Map(); this.attributes = new Map(); this.parent = null;
       this.rooted = false; this.dataset = {}; this.style = {}; this.paused = true; this.ended = false; this.duration = 120; this.readyState = 4;
       this.currentTime = 0; this.playCalls = 0; this.pauseCalls = 0; this.loadCalls = 0; nodes.push(this);
+      if (tag === "track") this.track = { mode: "disabled" };
     }
     get isConnected() { return this.rooted || Boolean(this.parent?.isConnected); }
     get parentNode() { return this.parent; }
@@ -90,12 +97,30 @@ function fixture({ code = source, native = "success", work: givenWork } = {}) {
     } } } }
   };
   globalThis.fetch = (url, options = {}) => {
-    assert.equal(new URL(url).hostname.endsWith(".fixture.invalid"), true, "fixture never requests a real host");
+    const parsed = new URL(url);
+    assert.equal(parsed.hostname.endsWith(".fixture.invalid"), true, "fixture never requests a real host");
+    const subtitleList = /^\/api\/works\/([^/]+)\/subtitles$/.exec(parsed.pathname);
+    if (subtitleList) {
+      const request = { url, options };
+      subtitleReads.push(request);
+      const videoId = parsed.searchParams.get("videoId");
+      const workId = decodeURIComponent(subtitleList[1]);
+      const payload = subtitles?.(workId, videoId, parsed);
+      return payload === "hold"
+        ? new Promise((_resolve, reject) => options.signal.addEventListener("abort", () => reject(new Error("Cancelled"))))
+        : Promise.resolve({ ok: true, headers: { get: () => null }, json: async () => ({ workId, videoId, tracks: payload || [] }) });
+    }
+    if (/\/subtitles\/tracks\//.test(parsed.pathname)) {
+      const call = { url, options, ...deferred() };
+      vttReads.push(call);
+      return call.promise;
+    }
     if (options.method === "POST") { posts.push({ url, options }); return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) }); }
     const call = { url, options, ...deferred() }; reads.push(call); return call.promise;
   };
   const sandbox = vm.createContext({ window, document, fetchJson, captureAccountOwner, isAccountOwnerCurrent,
-    formatBytes, formatNumber, formatTime, URL, URLSearchParams, AbortController, Date: FixtureDate, Promise,
+    formatBytes, formatNumber, formatTime, URL: FixtureURL, URLSearchParams, AbortController, Date: FixtureDate, Promise,
+    fetch: globalThis.fetch,
     setTimeout: window.setTimeout, clearTimeout: window.clearTimeout,
     absoluteUrl: (base, relative) => new URL(relative, base).href,
     createDetailSectionTitle: () => new Element("div"), revealDetailBlock(mount) { writes.push([mount.id, "reveal", ""]); } });
@@ -109,6 +134,11 @@ function fixture({ code = source, native = "success", work: givenWork } = {}) {
   const fail = async (index, message = "late read failure") => { reads[index].reject(new Error(message)); await flush(); };
   const snapshot = () => ({ writes: writes.length, posts: posts.length, reads: reads.length, launches: launches.length });
   return { view, work, section, mount, buttons, reads, posts, launches, nodes, writes, timers, document, attach, reply, fail, snapshot,
+    subtitleReads, vttReads, releasedUrls,
+    async replySubtitle(index) {
+      vttReads[index].resolve({ ok: true, headers: { get: () => "text/vtt; charset=utf-8" }, blob: async () => ({ size: 100 }) });
+      await flush();
+    },
     base: () => base, setBase(value) { base = value; }, setPlayBehavior(value) { playBehavior = value; },
     advanceTime(milliseconds) { now += milliseconds; },
     media: () => mount.querySelector("video"), status: () => mount.querySelector(".player-status"),
@@ -129,6 +159,73 @@ async function test(name, body, options = {}) {
 
 async function verify(code = source) {
   const options = value => ({ code, ...value });
+  const subtitleTracks = (workId, videoId) => {
+    const url = id => `/api/works/${workId}/subtitles/tracks/${id}?videoId=${videoId}`;
+    return [
+      { id: "en", label: "English", url: url("en"), language: "en", autoSelect: true },
+      { id: "zh", label: "中文字幕", url: url("zh"), language: "zh-CN", autoSelect: true },
+      { id: "wrong", label: "Wrong video", url: url("wrong").replace(/videoId=[^&]+/, "videoId=elsewhere") },
+      { id: "remote", label: "Remote", url: `https://remote.fixture.invalid${url("remote")}` }
+    ];
+  };
+  await test("native receives safe sidecars for selected video", async f => {
+    f.buttons[1].click();
+    await f.reply(0, direct("B", { mode: "remux", streamUrl: "/media/video/B/transcode?mode=remux&audio=copy" }));
+    assert.equal(f.subtitleReads.length, 1);
+    assert.equal(new URL(f.subtitleReads[0].url).searchParams.get("videoId"), "B");
+    assert.equal(f.subtitleReads[0].options.headers["X-FanHao-Account-Owner"], "guest");
+    const tracks = f.launches[0].payload.subtitleTracks;
+    assert.equal(tracks.map(track => track.id).join(","), "en,zh");
+    assert.equal(tracks.map(track => track.autoSelect).join(","), "false,true");
+    assert.equal(f.launches[0].payload.subtitleAccountOwner, "guest");
+    assert.equal(f.launches[0].payload.subtitleSeekFallbackUrl, `${f.base()}/media/video/B/transcode?mode=transcode&audio=aac`);
+    assert.equal(f.vttReads.length, 0, "native receives authenticated sidecar URLs, not copied media bytes");
+  }, options({ subtitles: subtitleTracks }));
+  await test("slow subtitle catalog never blocks playback indefinitely", async f => {
+    f.buttons[0].click();
+    await f.reply(0);
+    assert.equal(f.launches.length, 0);
+    f.runTimers(3000);
+    await flush();
+    assert.equal(f.subtitleReads[0].options.signal.aborted, true);
+    assert.equal(f.launches.length, 1);
+    assert.equal(f.launches[0].payload.subtitleTracks, undefined);
+  }, options({ subtitles: () => "hold" }));
+  await test("fallback selects subtitles, keeps timeline and retires stale cues", async f => {
+    f.buttons[0].click();
+    await f.reply(0, direct("A", { mode: "remux", streamUrl: "/remux/A" }));
+    assert.equal(f.vttReads.length, 1);
+    assert.equal(new URL(f.vttReads[0].url).pathname.split("/").at(-1), "zh");
+    assert.equal(f.vttReads[0].options.headers["X-FanHao-Account-Owner"], "guest");
+    assert.equal(f.vttReads[0].options.redirect, "error");
+    const firstVideo = f.media();
+    const firstSelect = f.mount.querySelector("select");
+    firstSelect.value = "en";
+    firstSelect.emit("change");
+    await f.replySubtitle(0);
+    assert.equal(firstVideo.querySelector("track"), null, "retired track request cannot add subtitles");
+    await f.replySubtitle(1);
+    assert.equal(firstVideo.querySelector("track").src, "blob:fixture-1");
+    assert.equal(firstVideo.querySelector("track").track.mode, "showing");
+    const seek = f.mount.querySelector(".android-stream-seek");
+    seek.value = "37";
+    seek.emit("change");
+    await flush();
+    assert.equal(f.subtitleReads.length, 1, "segmented seek keeps the current track list");
+    assert.equal(f.media().src, `${f.base()}/media/video/A/transcode?mode=transcode&audio=aac&t=37`);
+    assert.deepEqual(f.releasedUrls, ["blob:fixture-1"]);
+    assert.equal(firstVideo.querySelector("track"), null);
+    assert.equal(new URL(f.vttReads[2].url).pathname.split("/").at(-1), "en");
+    assert.equal(new URL(f.vttReads[2].url).searchParams.get("offsetSeconds"), "-37");
+    f.mount.querySelector(".full-toggle").click();
+    assert.equal(f.document.fullscreenElement, f.mount.querySelector(".android-player-shell"));
+    const select = f.mount.querySelector("select");
+    select.value = "";
+    select.emit("change");
+    await f.replySubtitle(2);
+    assert.equal(f.media().querySelector("track"), null);
+    assert.equal(f.vttReads[2].options.signal.aborted, true);
+  }, options({ native: false, subtitles: subtitleTracks }));
   await test("latest click owns native launch", async f => {
     f.buttons[0].click(); f.buttons[1].click();
     assert.equal(f.reads.length, 2);

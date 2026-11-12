@@ -6,6 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { createFileServer } from "../src/platform/server/file-server.js";
+import { createRequestHandler } from "../src/platform/server/http-app.js";
+import { readJsonFile } from "../src/platform/server/request-io.js";
+import { sendHtml, sendJson, sendText } from "../src/platform/server/responses.js";
 import { createAndroidUpdateRuntime } from "../src/modules/system/server/android-update/runtime.js";
 
 // Private APK bytes and loopback server only; never reads a published update.
@@ -15,13 +18,13 @@ const apk = path.join(channel, "测试 更新.apk");
 const manifest = path.join(channel, "latest.json");
 const replacement = path.join(channel, "old.apk");
 const bytes = Buffer.alloc(128 * 1024, 0x61);
-const original = { open: fs.promises.open, exists: fs.existsSync, stat: fs.statSync };
+const original = { open: fs.promises.open, exists: fs.existsSync, stat: fs.statSync, statAsync: fs.promises.stat, readSync: fs.readFileSync };
 const readers = new Set();
 const unhandled = [];
 const onUnhandled = error => unhandled.push(error);
 process.on("uncaughtException", onUnhandled);
 process.on("unhandledRejection", onUnhandled);
-let opened = 0, closed = 0, mode = "normal", closeGate = null, lastReader;
+let opened = 0, closed = 0, mode = "normal", closeGate = null, lastReader, metadataGate;
 let files, server;
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
@@ -38,14 +41,17 @@ try {
   files = createFileServer({ mimeTypes: {}, normalizeExt: file => path.extname(file), notFound });
   const runtime = createAndroidUpdateRuntime({
     clampInteger: value => Number(value || 0), normalizeExt: file => path.extname(file),
-    notFound, port: 0, updateDir: root, serveWholeFile: files.serveWholeFile,
-    readJsonFile(file, fallback) { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; } },
+    notFound, port: 0, updateDir: root, readJsonFile, serveWholeFile: files.serveWholeFile,
     safeChildPath(parent, name) {
       const target = path.resolve(parent, name);
       return path.dirname(target) === path.resolve(parent) ? target : null;
     },
-    sendJson(res, status, data) { res.writeHead(status); res.end(JSON.stringify(data)); }
+    sendJson
   });
+  fs.readFileSync = (...args) => {
+    assert.notEqual(args[0], manifest, "update requests must read the manifest asynchronously");
+    return original.readSync(...args);
+  };
   fs.existsSync = file => {
     assert.notEqual(file, apk, "APK requests must not block on synchronous file metadata");
     return original.exists(file);
@@ -53,6 +59,14 @@ try {
   fs.statSync = (...args) => {
     assert.notEqual(args[0], apk, "APK requests must not block on synchronous file metadata");
     return original.stat(...args);
+  };
+  fs.promises.stat = async (...args) => {
+    if (args[0] === apk && metadataGate) {
+      const gate = metadataGate;
+      gate.entered.resolve();
+      await gate.release.promise;
+    }
+    return original.statAsync(...args);
   };
   fs.promises.open = async (...args) => {
     const handle = await original.open(...args);
@@ -81,19 +95,63 @@ try {
     return handle;
   };
   const route = `/api/android/update/apk/debug/${encodeURIComponent(path.basename(apk))}`;
-  server = http.createServer(async (req, res) => {
+  const handler = createRequestHandler({
+    attachAccessAnalytics() {}, attachAccessLogger() {}, requestCorsOrigin: () => "",
+    requestAuthState: () => ({ allowed: false }), routeAuth: async () => false,
+    routeApi: runtime.routeApi, renderAndroidUpdatePage: runtime.renderPage,
+    sendLoginRequired: (_req, res) => sendText(res, 401, "Login required"),
+    sendHtml, sendJson, sendText, logError() {}
+  });
+  server = http.createServer((req, res) => {
     if (req.url === "/health") { res.end("healthy"); return; }
-    try {
-      if (!await runtime.routeApi(req, res, new URL(req.url, "http://fixture"))) notFound(res);
-    } catch {
-      if (res.destroyed) return;
-      if (res.headersSent) res.destroy();
-      else { res.writeHead(500); res.end(); }
-    }
+    return handler(req, res);
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const base = `http://127.0.0.1:${server.address().port}`;
+  const updateUrl = base + "/api/android/update?channel=debug";
+  const directoryApk = path.join(channel, "directory.apk");
+  fs.mkdirSync(directoryApk);
+  try {
+    fs.writeFileSync(manifest, JSON.stringify({ apkFile: path.basename(directoryApk), versionCode: 1 }));
+    const metadata = await fetch(updateUrl);
+    assert.equal(metadata.status, 200);
+    const update = await metadata.json();
+    assert.equal(update.available, false, "a directory must not be advertised as a downloadable update");
+    assert.equal(update.downloadUrl, "");
+    assert.match(await (await fetch(base + "/android-update")).text(), /暂无可下载版本/);
+    assert.equal((await fetch(base + "/api/android/update/apk/debug/directory.apk")).status, 404);
+    fs.writeFileSync(manifest, JSON.stringify({ apkFile: `../${path.basename(apk)}`, versionCode: 1 }));
+    assert.equal((await (await fetch(updateUrl)).json()).available, false, "a malformed manifest name must match download authorization");
+    assert.equal((await fetch(base + route)).status, 404);
+  } finally {
+    fs.rmdirSync(directoryApk);
+    fs.writeFileSync(manifest, JSON.stringify({ apkFile: path.basename(apk), versionCode: 1 }));
+  }
+  assert.equal((await fetch(base + "/api/android/update/apk/debug/%ZZ")).status, 404);
+  const latest = await (await fetch(updateUrl)).json();
+  assert.equal(latest.available, true);
+  assert.equal(latest.downloadUrl, base + route);
+  assert.equal(latest.size, bytes.length);
+  assert.match(await (await fetch(base + "/android-update")).text(), /下载最新版 APK/);
+  assert.equal((await (await fetch(updateUrl + "&currentVersionCode=1")).json()).available, false);
+
+  metadataGate = { entered: deferred(), release: deferred() };
+  const withdrawing = fetch(updateUrl);
+  await Promise.race([
+    metadataGate.entered.promise,
+    withdrawing.then(() => { throw new Error("update response completed before checking the APK"); })
+  ]);
+  assert.equal(await (await fetch(base + "/health")).text(), "healthy");
+  assert.equal(path.dirname(replacement), channel);
+  fs.renameSync(apk, replacement);
+  metadataGate.release.resolve();
+  const withdrawn = await withdrawing;
+  assert.equal(withdrawn.status, 200);
+  assert.equal((await withdrawn.json()).downloadUrl, "", "a package withdrawn during metadata I/O becomes unavailable");
+  fs.renameSync(replacement, apk);
+  metadataGate = null;
+
   const get = await fetch(base + route);
   assert.equal(get.status, 200);
   assert.deepEqual(Buffer.from(await get.arrayBuffer()), bytes);
@@ -167,6 +225,7 @@ try {
   assert.deepEqual(unhandled, []);
   console.log("android-update-streams: ok (GET/HEAD, published-name guard, async metadata, file identity, awaited close, read error, cancellation, shutdown)");
 } finally {
+  metadataGate?.release.resolve();
   closeGate?.resolve();
   for (const reader of readers) reader.destroy();
   await files?.stop();
@@ -174,6 +233,8 @@ try {
   fs.promises.open = original.open;
   fs.existsSync = original.exists;
   fs.statSync = original.stat;
+  fs.promises.stat = original.statAsync;
+  fs.readFileSync = original.readSync;
   process.off("uncaughtException", onUnhandled);
   process.off("unhandledRejection", onUnhandled);
   for (const file of [apk, manifest, replacement]) {

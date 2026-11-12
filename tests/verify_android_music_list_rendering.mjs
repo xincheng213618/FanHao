@@ -20,6 +20,7 @@ const legacyQueueRemoval = process.argv.includes("--legacy-queue-removal");
 const legacyQueueRemovalTail = process.argv.includes("--legacy-queue-removal-tail");
 const measureQueueRemoval = process.argv.includes("--measure-queue-removal");
 const queueOrderOnly = process.argv.includes("--queue-order") || legacyQueueOrder || measureQueueOrder || legacyQueueRemoval || legacyQueueRemovalTail || measureQueueRemoval;
+const batchQueueOnly = process.argv.includes("--batch-queue-only");
 const legacyContainment = process.argv.includes("--legacy-containment");
 const legacyCoverOrder = process.argv.includes("--legacy-cover-order");
 const legacyAuxiliary = process.argv.includes("--legacy-auxiliary");
@@ -30,6 +31,7 @@ const legacySearchOverviewServer = process.argv.includes("--legacy-search-overvi
 const searchOverviewOnly = process.argv.includes("--search-overview-only") || legacySearchOverview || legacySearchOverviewServer;
 const legacyComposition = process.argv.includes("--legacy-search-composition");
 const compositionOnly = process.argv.includes("--composition-only") || legacyComposition;
+const collectionSearchOnly = process.argv.includes("--collection-search-only");
 const legacyRowLayout = process.argv.includes("--legacy-row-layout");
 const legacyRowKeyboard = process.argv.includes("--legacy-row-keyboard");
 const rowLayoutOnly = process.argv.includes("--row-layout-only") || legacyRowLayout || legacyRowKeyboard;
@@ -286,10 +288,12 @@ const requestHandler = async (req, res) => {
   requests.push(`${url.pathname}${url.search}`);
   try {
     if (trackWriteFixture && await trackWriteFixture.handle(req, res, url)) return;
-    const gate = [...gates].find(item => !item.used && item.match(url));
+    const gate = [...gates].find(item => !item.used && item.match(url, req.method));
     if (gate) {
       gate.used = true; gate.url = `${url.pathname}${url.search}`; gate.method = req.method;
-      if (req.method === "PUT" && url.pathname.endsWith("/tracks/order")) {
+      if (req.method === "PUT" && url.pathname.endsWith("/tracks/order")
+        || req.method === "POST" && (url.pathname === "/api/music/playlists"
+          || /^\/api\/music\/playlists\/[^/]+\/tracks$/.test(url.pathname))) {
         const chunks = []; for await (const chunk of req) chunks.push(chunk);
         gate.input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
       }
@@ -332,6 +336,7 @@ await new Promise(resolve => alternateServer.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 const alternateBase = `http://127.0.0.1:${alternateServer.address().port}`;
 const run = async (name, task) => {
+  if (batchQueueOnly && !name.startsWith("batch queue:")) return;
   if (queueOrderOnly && !name.startsWith("queue order:")) return;
   if (miniPlayerOnly && !name.startsWith("mini player:")) return;
   if (legacyMiniKeyboard && name !== "mini player: native mouse Enter and Space roundtrips retain deep scroll and focus") return;
@@ -354,6 +359,13 @@ try {
     await verifyQueueOrderRendering();
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
     console.log(`${measureQueueOrder || measureQueueRemoval ? "DIAGNOSTIC" : "PASS"} Android music queue rendering: ${checks} actual Chromium scenarios`);
+  } else if (batchQueueOnly) {
+    await verifyMusicBatchQueue();
+    assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
+    console.log(`PASS Android music batch queue: ${checks} actual Chromium scenarios`);
+  } else if (collectionSearchOnly) {
+    await verifyCollectionSearch();
+    assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
   } else if (startupCatalogueOnly || measureStartupPlayback) {
     await verifyStartupPlayback();
     if (!measureStartupPlayback) await verifyStartupCatalogue();
@@ -507,11 +519,13 @@ try {
     await verifyMusicSortFilterLayout();
     await verifyAsyncMusicControlFocus();
     await verifyMusicTrackRows();
+    await verifyMusicBatchQueue();
     await verifyMusicTrackWrites();
     await verifyContainedRows();
     await verifyStartupPlayback();
     await verifyStartupCatalogue();
     await verifySearchOverviewOwnership();
+    await verifyCollectionSearch();
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
     console.log(`PASS Android music list rendering: ${checks} actual Chromium scenarios`);
   } else if (measureOnly) console.log("DIAGNOSTIC legacy rendering only; correctness assertions not run");
@@ -714,6 +728,98 @@ async function verifyMusicSearchComposition() {
     }
   });
 }
+
+async function verifyCollectionSearch() {
+  const rows = page => page.locator(".music-mobile-collection-results .music-mobile-track");
+  const ids = page => rows(page).evaluateAll(items => items.map(item => item.dataset.trackId));
+  await run("collection search: IME, local playlist order and narrow touch layout", async () => {
+    const library = [track(1), track(2, { title: "Deep Blue" }), track(3)];
+    const initial = hold(url => url.pathname === "/api/music/playlists/manual", data(3, 0, { tracks: library, playlist: { id: "manual", name: "收藏歌单", trackCount: 3 }, hasMore: false }));
+    const page = await newPage({ width: 320, touch: true, params: { mode: "playlist", playlistId: "manual" }, waitReady: false });
+    const search = page.getByRole("searchbox", { name: "搜索当前歌单" });
+    try {
+      await requested(initial); initial.release(); await page.waitForFunction(() => window.__ready);
+      await search.focus();
+      await search.evaluate(input => {
+        window.__collectionInput = input;
+        input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+        input.value = "Deep Blue";
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, isComposing: true }));
+      });
+      assert.deepEqual(await ids(page), ["T1", "T2", "T3"]);
+      await search.dispatchEvent("compositionend", { bubbles: true });
+      assert.deepEqual(await ids(page), ["T2"]);
+      assert.equal(await rows(page).first().getAttribute("data-track-index"), "1");
+      assert.equal(await search.evaluate(node => node === __collectionInput && node === document.activeElement
+        && node.getBoundingClientRect().right <= innerWidth && node.offsetHeight >= 44), true);
+      assert.equal(await page.locator(".music-mobile-collection-search small").textContent(), "匹配 1 / 共 3 首");
+      assert.equal(await page.evaluate(() => __fixtureParams.query), "Deep Blue");
+      await rows(page).first().press("Enter");
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T2" && __musicListFixture.state.playing);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T2", "T3"]);
+      await page.locator(".music-mobile-mini-player").getByRole("button", { name: "下一首", exact: true }).click();
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T3" && __musicListFixture.state.playing);
+      assert.equal(requests.filter(url => url === "/api/music/playlists/manual").length, 1);
+    } finally { initial.release(); await page.close(); }
+  });
+  await run("collection search: recent filename deep-link and Back clear without rereading", async () => {
+    const initial = hold(url => url.pathname === "/api/music/history", data(2, 0, { tracks: [track(4, { fileName: "P.mp3" }), track(5)], hasMore: false }));
+    const page = await newPage({ width: 320, params: { mode: "history", query: "Ｐ．ｍｐ３" }, waitReady: false });
+    try {
+      await requested(initial); initial.release(); await page.waitForFunction(() => window.__ready);
+      assert.equal(await page.getByRole("searchbox", { name: "搜索最近播放" }).inputValue(), "Ｐ．ｍｐ３");
+      assert.deepEqual(await ids(page), ["T4"]);
+      assert.equal(await page.evaluate(() => __fixtureView.handleBack()), true);
+      assert.deepEqual(await ids(page), ["T4", "T5"]);
+      assert.equal(await page.evaluate(() => __fixtureParams.query || ""), "");
+      assert.equal(requests.filter(url => url.startsWith("/api/music/history?")).length, 1);
+    } finally { initial.release(); await page.close(); }
+  });
+  await run("collection search: scoped smart pagination rejects retired and invalid replies", async () => {
+    const smart = { id: "favorites", name: "收藏歌曲", trackCount: 400 };
+    const path = (query, offset = "") => url => url.pathname === "/api/music/tracks" && url.searchParams.get("smart") === "favorites"
+      && (url.searchParams.get("q") || "") === query && (url.searchParams.get("offset") || "") === offset;
+    const body = (trackIds, hasMore = false, smartPlaylist = smart) => data(trackIds.length, 0, {
+      tracks: trackIds.map(id => track(id)), smartPlaylist, total: 3, hasMore
+    });
+    const initial = hold(path(""), body([1, 2]));
+    const old = hold(path("old"), body([90]));
+    const current = hold(path("fresh"), body([11, 12], true));
+    const next = hold(path("fresh", "2"), body([13]));
+    const bad = hold(path("bad"), body([92], false, null));
+    const retry = hold(path("bad"), body([14]));
+    const cleared = hold(path(""), body([1, 2]));
+    const abandoned = hold(path("abandoned"), body([95]));
+    const page = await newPage({ width: 320, ignoreAbort: true, params: { mode: "smart", smartId: "favorites" }, waitReady: false });
+    const search = page.getByRole("searchbox", { name: "搜索当前歌单" });
+    try {
+      await requested(initial); initial.release(); await page.waitForFunction(() => window.__ready);
+      await search.fill("old"); await search.press("Enter"); await requested(old);
+      await search.fill("fresh"); await search.press("Enter"); await requested(current); current.release();
+      await page.locator('.music-mobile-collection-results [data-track-id="T11"]').waitFor();
+      old.release();
+      await page.locator(".music-mobile-collection-results .music-mobile-load-more").click(); await requested(next); next.release();
+      await page.locator('.music-mobile-collection-results [data-track-id="T13"]').waitFor();
+      assert.deepEqual(await ids(page), ["T11", "T12", "T13"]);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T2"]);
+      assert.equal(await search.evaluate(node => node === document.activeElement || document.activeElement?.classList.contains("music-mobile-load-more") || document.activeElement === document.body), true);
+      await search.fill("bad"); await search.press("Enter"); await requested(bad); bad.release();
+      await page.getByRole("button", { name: "重试搜索" }).click(); await requested(retry); retry.release();
+      await page.locator('.music-mobile-collection-results [data-track-id="T14"]').waitFor();
+      assert.deepEqual(await ids(page), ["T14"]);
+      await page.getByRole("button", { name: "清除", exact: true }).click(); await requested(cleared); cleared.release();
+      await page.locator('.music-mobile-collection-results [data-track-id="T2"]').waitFor();
+      assert.deepEqual(await ids(page), ["T1", "T2"]);
+      assert.equal(await page.evaluate(() => __fixtureParams.query || ""), "");
+      await search.fill("abandoned"); await search.press("Enter"); await requested(abandoned);
+      await page.evaluate(() => __fixtureRoute({ mode: "library", dashboard: "0" }));
+      const late = page.waitForResponse(response => new URL(response.url()).searchParams.get("q") === "abandoned");
+      abandoned.release(); await late; await frames(page);
+      assert.equal(await page.locator(".music-mobile-collection-search").count(), 0);
+      assert.equal(await page.evaluate(() => __musicListFixture.state.data.tracks.some(track => track.id === "T95")), false);
+    } finally { for (const gate of [initial, old, current, next, bad, retry, cleared, abandoned]) gate.release(); await page.close(); }
+  });
+}
 async function newPage({ ignoreAbort = false, containment = true, width = 430, waitReady = true, params = null, routeNavigation = false, touch = false, savedPlayback = null } = {}) {
   const page = await browser.newPage({ viewport: { width, height: 900 }, hasTouch: touch }); page.on("pageerror", error => errors.push(error.message));
   if (!containment) await page.route("**/styles.css", route => route.fulfill({ contentType: "text/css", body: baselineStyles }));
@@ -753,7 +859,7 @@ function harness(url) {
   return `<!doctype html><meta charset=utf-8><link rel=stylesheet href=/styles.css><body class=music-mobile-view><main class=app-shell><section id=contentPanel class=content-panel><div class=section-head><div><p id=viewKicker class=section-label></p><h2 id=viewTitle></h2></div></div><div id=viewMeta class=view-meta></div><div id=viewContent class=content-list aria-live=polite></div></section></main><script type=module>
 import{createMusicViews}from'/modules/music/music-views.js';const els=Object.fromEntries(['viewKicker','viewTitle','viewMeta','viewContent'].map(id=>[id,document.getElementById(id)])),noop=()=>{};
 window.__fixtureActiveUrl=location.origin;window.__fixtureAlternateUrl=${JSON.stringify(alternateBase)};
-const page=createMusicViews({els,getActiveUrl:()=>__fixtureActiveUrl,setActiveBottom:noop,showView:${url.searchParams.get("routeNavigation") === "1" ? '(view,params)=>{if(view!=="music")throw new Error("Unexpected fixture route");window.__fixtureNavigation=window.__fixtureRoute(params);}' : "noop"},replaceViewParams:noop});
+const page=createMusicViews({els,getActiveUrl:()=>__fixtureActiveUrl,setActiveBottom:noop,showView:${url.searchParams.get("routeNavigation") === "1" ? '(view,params)=>{if(view!=="music")throw new Error("Unexpected fixture route");window.__fixtureNavigation=window.__fixtureRoute(params);}' : "noop"},replaceViewParams:(_view,params)=>{window.__fixtureParams=params;}});
 window.__fixtureView=page;let epoch=0,controller=null;
 window.__fixtureRoute=params=>{++epoch;controller?.abort();controller=new AbortController();const owner=epoch,signal=controller.signal,guard=()=>owner===epoch&&!signal.aborted;guard.signal=signal;return page.renderMusicList(params,guard);};
 window.__fixtureLeave=()=>{++epoch;controller?.abort();page.deactivate();};
@@ -762,6 +868,333 @@ window.__startupTask=__fixtureRoute(${JSON.stringify(JSON.parse(url.searchParams
 }
 
 async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
+
+async function verifyMusicBatchQueue() {
+  await run("batch queue: idle selections survive pagination and compose across lists", async () => {
+    const page = await newPage({ width: 320 });
+    const more = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("offset") === "80", data(2, 80, { hasMore: false }));
+    const next = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("q") === "next", {
+      ...data(1, 200), tracks: [track(81), track(201)], hasMore: false
+    });
+    const genre = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("genre") === "Synthetic genre", data(2, 300, { hasMore: false }));
+    try {
+      await page.evaluate(() => { window.__oldBatchRow = document.querySelector('[data-track-id="T1"]'); });
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).press("Enter");
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 3", exact: true }).press("Space");
+      await page.locator('[data-track-id="T1"] .music-mobile-track-text').click();
+      assert.equal(await page.evaluate(() => __oldBatchRow.isConnected), true);
+      await page.getByRole("button", { name: /加载更多/ }).click();
+      await requested(more); more.release();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 81", exact: true }).check();
+      const toolbar = await page.locator(".music-mobile-batch-queue").evaluate(node => ({
+        scroll: window.scrollY, top: node.getBoundingClientRect().top
+      }));
+      assert(toolbar.scroll > 1000 && toolbar.top >= -1 && toolbar.top < 100, "selection controls stay visible after scrolling a narrow list");
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 1", exact: true }).isChecked(), true);
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 3", exact: true }).isChecked(), true);
+      assert.match(await page.locator(".music-mobile-batch-status").innerText(), /已选 3 \/ 82 首/);
+      await page.getByRole("button", { name: "加入队列", exact: true }).click();
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T3", "T81"]);
+      assert.equal(await page.evaluate(() => __musicListFixture.audio().src), "");
+      await page.evaluate(() => { window.__nextBatchList = __fixtureRoute({ mode: "library", query: "next", searchScope: "songs" }); });
+      await requested(next); next.release();
+      await page.evaluate(() => __nextBatchList);
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      await page.getByRole("button", { name: "全选已加载", exact: true }).click();
+      await page.getByRole("button", { name: "加入队列", exact: true }).click();
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T3", "T81", "T201"]);
+      assert.match(await page.locator(".music-mobile-batch-status").innerText(), /已加入 1 首，1 首已在队列/);
+      assert.deepEqual(await page.evaluate(() => [__musicListFixture.state.current, __musicListFixture.audio().src]), [null, ""]);
+      await page.evaluate(() => { window.__genreBatchList = __fixtureRoute({ mode: "library", dashboard: "0", genre: "Synthetic genre" }); });
+      await requested(genre); genre.release();
+      await page.evaluate(() => __genreBatchList);
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.map(track => track.id)), ["T1", "T3", "T81", "T201"]);
+      await page.locator(".music-mobile-mini-player").getByRole("button", { name: "播放", exact: true }).click();
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T1" && !__musicListFixture.audio().paused);
+    } finally { more.release(); next.release(); genre.release(); await page.close(); }
+  });
+  await run("batch queue: active audio stays mounted and keeps its position", async () => {
+    const page = await newPage({ width: 390 });
+    const search = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("q") === "playing", {
+      ...data(1, 200), tracks: [track(1), track(201)], hasMore: false
+    });
+    try {
+      await page.evaluate(() => { __musicListFixture.state.gapless = false; __musicListFixture.state.crossfadeSeconds = 0; });
+      await page.getByRole("button", { name: "播放 Synthetic Track 1", exact: true }).click();
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T1" && !__musicListFixture.audio().paused);
+      await page.evaluate(() => {
+        const audio = __musicListFixture.audio(); audio.currentTime = 37;
+        window.__batchAudio = { audio, src: audio.src };
+        window.__playingBatchList = __fixtureRoute({ mode: "library", query: "playing", searchScope: "songs" });
+      });
+      await requested(search); search.release();
+      await page.evaluate(() => __playingBatchList);
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      await page.getByRole("button", { name: "全选已加载", exact: true }).click();
+      await page.getByRole("button", { name: "加入队列", exact: true }).click();
+      const result = await page.evaluate(() => {
+        const { state } = __musicListFixture, audio = __musicListFixture.audio();
+        return { id: state.current?.id, first: state.queue[0]?.id, last: state.queue.at(-1)?.id, count: state.queue.length,
+          sameAudio: audio === __batchAudio.audio && audio.src === __batchAudio.src, time: audio.currentTime, playing: !audio.paused };
+      });
+      assert.deepEqual(result, { id: "T1", first: "T1", last: "T201", count: 81, sameAudio: true, time: 37, playing: true });
+    } finally { search.release(); await page.close(); }
+  });
+  await run("batch queue: Back cancels selection and a retired account cannot apply it", async () => {
+    const page = await newPage();
+    try {
+      const start = page.getByRole("button", { name: "多选歌曲", exact: true });
+      await start.click();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 1", exact: true }).check();
+      assert.equal(await page.evaluate(() => __fixtureView.handleBack()), true);
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 1", exact: true }).count(), 0);
+      assert.equal(await start.evaluate(node => node === document.activeElement), true);
+      await start.click();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 2", exact: true }).check();
+      const result = await page.evaluate(async () => {
+        const before = __musicListFixture.state.queue;
+        const add = document.querySelector('[data-music-batch-action="add"]');
+        const { setAccountOwner } = await import("/js/account-owner.js");
+        setAccountOwner(location.origin, "account:batchOther");
+        add.click();
+        return { same: before === __musicListFixture.state.queue, count: __musicListFixture.state.queue.length, current: __musicListFixture.state.current };
+      });
+      assert.deepEqual(result, { same: true, count: 80, current: null });
+    } finally { await page.close(); }
+  });
+  await run("batch queue: create a playlist from cross-page selection without taking over playback", async () => {
+    const page = await newPage({ width: 320, routeNavigation: true });
+    const more = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("offset") === "80", data(2, 80, { hasMore: false }));
+    const create = (url, method) => method === "POST" && url.pathname === "/api/music/playlists";
+    const failure = hold(create, null, "Synthetic playlist temporarily unavailable");
+    const playlist = { id: "batch-created", name: "跨页歌单", trackCount: 1 };
+    const success = hold(create, { playlist, tracks: [track(3)] });
+    const detail = hold(url => url.pathname === "/api/music/playlists/batch-created", { ...data(1), playlist, tracks: [track(3)], total: 1, hasMore: false });
+    const posts = [];
+    page.on("request", request => { if (create(new URL(request.url()), request.method())) posts.push(request.postDataJSON()); });
+    const action = page.getByRole("button", { name: "新建歌单", exact: true });
+    const dialog = page.getByRole("dialog", { name: "新建歌单", exact: true });
+    const name = dialog.getByRole("textbox", { name: "歌单名称" });
+    try {
+      await page.evaluate(() => { __musicListFixture.state.gapless = false; __musicListFixture.state.crossfadeSeconds = 0; });
+      await page.getByRole("button", { name: "播放 Synthetic Track 1", exact: true }).click();
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T1" && !__musicListFixture.audio().paused);
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      assert.equal(await action.isDisabled(), true);
+      await page.getByRole("button", { name: /加载更多/ }).click();
+      await requested(more); more.release();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 81", exact: true }).check();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 3", exact: true }).check();
+      await page.evaluate(() => {
+        const { state } = __musicListFixture, audio = __musicListFixture.audio();
+        audio.currentTime = 37;
+        window.__beforePlaylist = { queue: state.queue, current: state.current, audio, src: audio.src };
+      });
+      await action.click();
+      await name.fill("  跨页歌单  ");
+      assert.equal(await name.evaluate(input => input === document.activeElement && input.getBoundingClientRect().right <= innerWidth), true);
+      await dialog.getByRole("button", { name: "保存 2 首歌曲" }).click();
+      await requested(failure);
+      assert.deepEqual(failure.input, { name: "跨页歌单", trackIds: ["T3", "T81"] });
+      failure.release();
+      await dialog.getByText(failure.error, { exact: true }).waitFor();
+      assert.equal(await name.inputValue(), "  跨页歌单  ");
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 81", exact: true }).isChecked(), true);
+      assert.equal(await page.evaluate(() => __fixtureView.handleBack()), true);
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await action.evaluate(button => button === document.activeElement), true);
+      await action.click();
+      assert.equal(await name.inputValue(), "  跨页歌单  ");
+      await dialog.locator("form").evaluate(form => { form.requestSubmit(); form.requestSubmit(); });
+      await requested(success);
+      assert.deepEqual(success.input, failure.input);
+      assert.deepEqual(posts, [failure.input, failure.input]);
+      success.release();
+      await page.getByText("已创建「跨页歌单」 · 1 首，1 首未加入", { exact: true }).waitFor();
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await page.getByRole("button", { name: "多选歌曲", exact: true }).evaluate(button => button === document.activeElement), true);
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 3", exact: true }).count(), 0);
+      assert.deepEqual(await page.evaluate(() => {
+        const { state } = __musicListFixture, audio = __musicListFixture.audio();
+        return [state.queue === __beforePlaylist.queue, state.current === __beforePlaylist.current,
+          audio === __beforePlaylist.audio, audio.src === __beforePlaylist.src, audio.currentTime, audio.paused, state.mode];
+      }), [true, true, true, true, 37, false, "library"]);
+      await page.getByRole("button", { name: "查看歌单", exact: true }).click();
+      await requested(detail); detail.release();
+      await page.waitForFunction(() => __musicListFixture.state.playlistId === "batch-created" && __musicListFixture.state.data?.playlist?.id === "batch-created");
+      assert.equal(await page.locator('.music-mobile-list [data-track-id="T3"]').count(), 1);
+    } finally { more.release(); failure.release(); success.release(); detail.release(); await page.close(); }
+  });
+  await run("batch queue: late playlist creation cannot publish after account and route change", async () => {
+    const page = await newPage({ ignoreAbort: true });
+    const late = hold((url, method) => method === "POST" && url.pathname === "/api/music/playlists",
+      { playlist: { id: "old-batch", name: "旧歌单", trackCount: 1 } });
+    try {
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 1", exact: true }).check();
+      await page.getByRole("button", { name: "新建歌单", exact: true }).click();
+      await page.getByRole("button", { name: "保存 1 首歌曲" }).click();
+      await requested(late);
+      await page.evaluate(async () => {
+        const { setAccountOwner } = await import("/js/account-owner.js");
+        setAccountOwner(location.origin, "account:newBatchOwner");
+      });
+      assert.equal(await page.getByRole("dialog", { name: "新建歌单" }).count(), 0);
+      await page.evaluate(() => __fixtureRoute({ mode: "library", query: "newer", searchScope: "songs" }));
+      const completed = page.waitForResponse(response => response.request().method() === "POST" && new URL(response.url()).pathname === "/api/music/playlists");
+      late.release();
+      await (await completed).finished();
+      await frames(page);
+      assert.equal(await page.getByRole("dialog", { name: "新建歌单" }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "查看歌单", exact: true }).count(), 0);
+      assert.equal(await page.getByText(/已创建「旧歌单」/).count(), 0);
+      assert.equal(await page.evaluate(() => __musicListFixture.state.query), "newer");
+    } finally { late.release(); await page.close(); }
+  });
+  await run("batch queue: add cross-page tracks to a searchable existing playlist and keep playing", async () => {
+    const page = await newPage({ width: 320, touch: true, routeNavigation: true });
+    const list = (url, method) => method === "GET" && url.pathname === "/api/music/playlists";
+    const write = (url, method) => method === "POST" && url.pathname === "/api/music/playlists/saved-mixes/tracks";
+    const target = { id: "saved-mixes", name: "Saved Mixes 现场歌单", trackCount: 14 };
+    const more = hold(url => url.pathname === "/api/music/tracks" && url.searchParams.get("offset") === "80", data(2, 80, { hasMore: false }));
+    const listFailure = hold(list, null, "Synthetic playlist catalogue unavailable");
+    const choices = hold(list, { playlists: [{ id: "other-list", name: "其他歌单", trackCount: 5 }, target] });
+    const failure = hold(write, null, "Synthetic add failed");
+    const success = hold(write, { ok: true, addedCount: 1, alreadyPresentCount: 1, unavailableCount: 1 });
+    const detail = hold(url => url.pathname === "/api/music/playlists/saved-mixes", data(1, 0, {
+      playlist: { ...target, trackCount: 15 }, tracks: [track(81)], total: 1, hasMore: false
+    }));
+    const posts = [];
+    page.on("request", request => {
+      if (write(new URL(request.url()), request.method())) posts.push({
+        body: request.postDataJSON(), account: request.headers()["x-fanhao-account-owner"]
+      });
+    });
+    const action = page.getByRole("button", { name: "添加到歌单", exact: true });
+    const dialog = page.getByRole("dialog", { name: "添加到歌单", exact: true });
+    const search = dialog.getByRole("searchbox", { name: "搜索歌单" });
+    const choice = dialog.getByRole("button", { name: /Saved Mixes 现场歌单.*14 首/ });
+    try {
+      await page.evaluate(() => { __musicListFixture.state.gapless = false; __musicListFixture.state.crossfadeSeconds = 0; });
+      await page.getByRole("button", { name: "播放 Synthetic Track 1", exact: true }).click();
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T1" && !__musicListFixture.audio().paused);
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      assert.equal(await action.isDisabled(), true);
+      await page.getByRole("button", { name: /加载更多/ }).click();
+      await requested(more); more.release();
+      for (const trackId of [81, 7, 3]) await page.getByRole("checkbox", { name: `选择 Synthetic Track ${trackId}`, exact: true }).check();
+      await page.evaluate(() => {
+        const { state } = __musicListFixture, audio = __musicListFixture.audio();
+        audio.currentTime = 39;
+        window.__beforeExistingPlaylist = { queue: state.queue, current: state.current, audio, src: audio.src };
+      });
+      await action.click();
+      await requested(listFailure); listFailure.release();
+      await dialog.getByText(listFailure.error, { exact: true }).waitFor();
+      await dialog.getByRole("button", { name: "重试读取歌单" }).click();
+      await requested(choices); choices.release();
+      await search.fill("未匹配");
+      await dialog.getByText("没有匹配的歌单", { exact: true }).waitFor();
+      await search.fill("  sAVed  ");
+      assert.equal(await dialog.getByRole("button", { name: /其他歌单/ }).count(), 0);
+      assert.equal(await choice.evaluate(node => node.getBoundingClientRect().right <= innerWidth), true);
+      const close = dialog.getByRole("button", { name: "关闭添加到歌单", exact: true });
+      await choice.press("Tab");
+      assert.equal(await close.evaluate(node => node === document.activeElement), true);
+      await close.press("Shift+Tab");
+      assert.equal(await choice.evaluate(node => node === document.activeElement), true);
+      await choice.click();
+      await requested(failure);
+      assert.equal(failure.url, "/api/music/playlists/saved-mixes/tracks?return=receipt");
+      assert.deepEqual(failure.input, { trackIds: ["T3", "T7", "T81"] });
+      failure.release();
+      await dialog.getByText(failure.error, { exact: true }).waitFor();
+      assert.equal(await search.inputValue(), "  sAVed  ");
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 81", exact: true }).isChecked(), true);
+      await choice.evaluate(node => { node.click(); node.click(); });
+      await requested(success);
+      assert.deepEqual(posts, [
+        { body: failure.input, account: "guest" }, { body: failure.input, account: "guest" }
+      ]);
+      success.release();
+      await page.getByText("「Saved Mixes 现场歌单」新增 1 首，1 首已在歌单，1 首不可用", { exact: true }).waitFor();
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await page.getByRole("button", { name: "多选歌曲", exact: true }).evaluate(node => node === document.activeElement), true);
+      assert.deepEqual(await page.evaluate(() => {
+        const { state } = __musicListFixture, audio = __musicListFixture.audio();
+        const before = __beforeExistingPlaylist;
+        return [state.queue === before.queue, state.current === before.current, audio === before.audio,
+          audio.src === before.src, audio.currentTime, audio.paused, state.mode];
+      }), [true, true, true, true, 39, false, "library"]);
+      await page.getByRole("button", { name: "查看歌单", exact: true }).click();
+      await requested(detail); detail.release();
+      await page.waitForFunction(() => __musicListFixture.state.data?.playlist?.id === "saved-mixes");
+    } finally { for (const gate of [more, listFailure, choices, failure, success, detail]) gate.release(); await page.close(); }
+  });
+  await run("batch queue: empty existing playlist picker can return or create without losing the selection", async () => {
+    const page = await newPage();
+    const action = page.getByRole("button", { name: "添加到歌单", exact: true });
+    const dialog = page.getByRole("dialog", { name: "添加到歌单", exact: true });
+    try {
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 3", exact: true }).check();
+      await action.click();
+      await dialog.getByText("还没有歌单", { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => __fixtureView.handleBack()), true);
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await action.evaluate(node => node === document.activeElement), true);
+      await action.click();
+      await dialog.getByRole("button", { name: "新建歌单", exact: true }).click();
+      await page.getByRole("dialog", { name: "新建歌单", exact: true }).getByRole("button", { name: "保存 1 首歌曲" }).waitFor();
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Synthetic Track 3", exact: true }).isChecked(), true);
+    } finally { await page.close(); }
+  });
+  await run("batch queue: late existing playlist receipt cannot publish after switching accounts", async () => {
+    const page = await newPage({ ignoreAbort: true });
+    const choices = hold((url, method) => method === "GET" && url.pathname === "/api/music/playlists",
+      { playlists: [{ id: "previous-account", name: "Previous Account Playlist", trackCount: 1 }] });
+    const late = hold((url, method) => method === "POST" && url.pathname === "/api/music/playlists/previous-account/tracks",
+      { ok: true, addedCount: 1, alreadyPresentCount: 0, unavailableCount: 0 });
+    const dialog = page.getByRole("dialog", { name: "添加到歌单", exact: true });
+    try {
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 1", exact: true }).check();
+      await page.getByRole("button", { name: "添加到歌单", exact: true }).click();
+      await requested(choices); choices.release();
+      await dialog.getByRole("button", { name: /Previous Account Playlist/ }).click();
+      await requested(late);
+      await page.evaluate(async () => {
+        const { setAccountOwner } = await import("/js/account-owner.js");
+        setAccountOwner(location.origin, "account:newBatchPlaylistOwner");
+        await __fixtureRoute({ mode: "library", dashboard: "0" });
+      });
+      assert.equal(await dialog.count(), 0);
+      const completed = page.waitForResponse(response => response.request().method() === "POST" && response.url().includes("/previous-account/tracks"));
+      late.release();
+      await (await completed).finished();
+      await frames(page);
+      assert.equal(await page.getByRole("button", { name: "查看歌单", exact: true }).count(), 0);
+      assert.equal(await page.getByText(/Previous Account Playlist/).count(), 0);
+    } finally { choices.release(); late.release(); await page.close(); }
+  });
+  await run("batch queue: playlist size limit does not truncate the selected songs", async () => {
+    const page = await newPage();
+    try {
+      await seed(page, 2001);
+      await page.getByRole("button", { name: "多选歌曲", exact: true }).click();
+      await page.getByRole("button", { name: "全选已加载", exact: true }).click();
+      const create = page.getByRole("button", { name: "新建歌单", exact: true });
+      assert.equal(await create.isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "添加到歌单", exact: true }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "加入队列", exact: true }).isEnabled(), true);
+      assert.match(await page.locator(".music-mobile-batch-status").innerText(), /每次最多向歌单添加 2,000 首/);
+      await page.getByRole("checkbox", { name: "选择 Synthetic Track 1", exact: true }).uncheck();
+      assert.equal(await create.isEnabled(), true);
+      await create.click();
+      await page.getByRole("button", { name: "保存 2,000 首歌曲", exact: true }).waitFor();
+    } finally { await page.close(); }
+  });
+}
 
 async function paintedQueueCounters(page, trackIds) {
   const session = await page.context().newCDPSession(page);
@@ -879,6 +1312,164 @@ async function verifyQueueOrderRendering() {
     } finally { await page.close(); }
   });
   if (measureQueueOrder) return;
+  await run("queue order: direct position moves a deep track while keeping queue rows, focus and playback", async () => {
+    const page = await setup(1000, false, { width: 320, height: 568 });
+    const dialog = page.getByRole("dialog", { name: "移动到位置", exact: true });
+    const field = dialog.getByRole("textbox", { name: /队列位置/ });
+    const target = page.locator(queueRows + '[data-track-id="T997"]');
+    const trigger = target.getByRole("button", { name: "移动到位置", exact: true });
+    try {
+      await trigger.scrollIntoViewIfNeeded();
+      const bounds = await trigger.boundingBox();
+      assert(bounds.width >= 44 && bounds.height >= 44 && bounds.x + bounds.width <= 320);
+      const before = requests.length;
+      await page.evaluate(() => { window.__beforePositionRows = [...document.querySelectorAll(".music-mobile-queue-item")]; });
+      await trigger.click();
+      await dialog.getByText("Synthetic Track 997 · 第 997 首", { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => __fixtureView.handleBack()), true);
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await trigger.evaluate(button => button === document.activeElement), true);
+
+      await trigger.click();
+      await dialog.getByRole("button", { name: "移到当前曲后", exact: true }).click();
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.slice(0, 3).map(track => track.id)), ["T1", "T997", "T2"]);
+      assert.equal(await trigger.evaluate(button => button === document.activeElement), true);
+      assert.equal(await target.evaluate(row => {
+        const rect = row.getBoundingClientRect(), area = row.parentElement.getBoundingClientRect();
+        return rect.top >= area.top - 1 && rect.bottom <= area.bottom + 1;
+      }), true);
+
+      await trigger.click();
+      assert.equal(await dialog.getByRole("button", { name: "移到当前曲后", exact: true }).isDisabled(), true);
+      await field.fill("1001");
+      await field.press("Enter");
+      await dialog.getByText("请输入 1–1,000 之间的整数。", { exact: true }).waitFor();
+      assert.equal(await field.getAttribute("aria-invalid"), "true");
+      await field.fill("１０００");
+      await field.press("Enter");
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await page.locator(queueRows).last().getAttribute("data-track-id"), "T997");
+      assert.equal(await target.getByRole("button", { name: "下移", exact: true }).isDisabled(), true);
+      assert.equal(await page.locator(queueRows + '[data-track-id="T1000"]').getByRole("button", { name: "下移", exact: true }).isEnabled(), true);
+
+      await trigger.click();
+      await dialog.getByRole("button", { name: "移到队首", exact: true }).click();
+      assert.equal(await page.locator(queueRows).first().getAttribute("data-track-id"), "T997");
+      assert.equal(await target.getByRole("button", { name: "上移", exact: true }).isDisabled(), true);
+      assert.equal(await page.evaluate(() => __beforePositionRows.every(row => row.isConnected)), true);
+      await trigger.click();
+      await dialog.getByRole("button", { name: "移到当前曲后", exact: true }).click();
+      assert.deepEqual(await page.evaluate(() => __musicListFixture.state.queue.slice(0, 3).map(track => track.id)), ["T1", "T997", "T2"]);
+      assert.equal(requests.length, before, "position moves never open or reload a track");
+      const result = await identity(page);
+      assertPlayer(result);
+      assert.equal(result.shellCalls, 0);
+    } finally { await page.close(); }
+  });
+  await run("queue order: playlist rollback retires a stale position choice and keeps playback", async () => {
+    const page = await setup(300, true);
+    const dialog = page.getByRole("dialog", { name: "移动到位置", exact: true });
+    const target = page.locator(queueRows + '[data-track-id="T2"]');
+    const trigger = target.getByRole("button", { name: "移动到位置", exact: true });
+    const gate = hold(url => url.pathname === "/api/music/playlists/queue-fixture/tracks/order", null, "synthetic position failure");
+    try {
+      await trigger.click();
+      await dialog.getByRole("button", { name: "移到队尾", exact: true }).click();
+      await requested(gate);
+      assert.equal(gate.method, "PUT");
+      assert.equal(gate.input.trackIds.length, 300);
+      assert.deepEqual(gate.input.trackIds.slice(0, 3), ["T1", "T3", "T4"]);
+      assert.equal(gate.input.trackIds.at(-1), "T2");
+
+      await trigger.click();
+      await dialog.getByText("Synthetic Track 2 · 第 300 首", { exact: true }).waitFor();
+      gate.release();
+      await page.evaluate(() => Promise.all(__queueOrderTasks));
+      assert.equal(await page.locator(queueRows).nth(1).getAttribute("data-track-id"), "T2");
+      await dialog.getByRole("button", { name: "移到队首", exact: true }).click();
+      await dialog.getByText("队列已变化，请关闭后重新选择位置。", { exact: true }).waitFor();
+      const stale = await dialog.getByRole("button", { name: "移到队首", exact: true }).elementHandle();
+      await page.evaluate(async () => {
+        const { setAccountOwner } = await import("/js/account-owner.js");
+        setAccountOwner(location.origin, "account:queuePositionFixture");
+      });
+      await stale.evaluate(button => button.click());
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await page.locator(queueRows).nth(1).getAttribute("data-track-id"), "T2");
+      assertPlayer(await identity(page));
+    } finally { gate.release(); await page.close(); }
+  });
+  await run("queue order: search one thousand tracks, locate the original row and play from results", async () => {
+    const page = await setup(1000, false, { width: 320, height: 700 });
+    const trigger = page.getByRole("button", { name: "搜索播放队列", exact: true });
+    const dialog = page.getByRole("dialog", { name: "搜索播放队列", exact: true });
+    const search = dialog.getByRole("searchbox", { name: "搜索队列歌曲" });
+    const target = page.locator(queueRows + '[data-track-id="T997"]');
+    const detail = hold(url => url.pathname === "/api/music/tracks/T998", { track: track(998), lyrics: [] });
+    const detailReads = [];
+    page.on("request", request => {
+      const url = new URL(request.url());
+      if (request.method() === "GET" && /^\/api\/music\/tracks\//.test(url.pathname)) detailReads.push(url.pathname);
+    });
+    try {
+      const bounds = await trigger.boundingBox();
+      assert(bounds.width >= 44 && bounds.height >= 44 && bounds.x + bounds.width <= 320);
+      await trigger.click();
+      await dialog.getByText("可搜索队列中的 1,000 首歌曲", { exact: true }).waitFor();
+      assert.equal(await search.evaluate(node => node === document.activeElement), true);
+      await search.fill("Synthetic Artist");
+      await dialog.getByText("匹配 1,000 首", { exact: true }).waitFor();
+      assert.equal(await dialog.locator("li").count(), 30);
+      await dialog.getByRole("button", { name: "显示更多歌曲", exact: true }).click();
+      assert.equal(await dialog.locator("li").count(), 60);
+      assert.equal(await dialog.getByRole("button", { name: "当前歌曲「Synthetic Track 1」", exact: true }).isDisabled(), true);
+      assert.equal(await page.evaluate(() => __fixtureView.handleBack()), true);
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+
+      await trigger.click();
+      await search.fill("ｓｙｎｔｈｅｔｉｃ album 997");
+      const hit = dialog.getByRole("button", { name: /定位.*Synthetic Track 997.*第 997 首/ });
+      await hit.waitFor();
+      const mountedRow = await target.elementHandle();
+      await hit.click();
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await mountedRow.evaluate(row => row === document.activeElement && row.isConnected), true);
+      assert.equal(await target.evaluate(row => {
+        const list = row.parentElement, rect = row.getBoundingClientRect(), area = list.getBoundingClientRect();
+        return rect.top >= area.top - 1 && rect.bottom <= area.bottom + 1;
+      }), true);
+      assertPlayer(await identity(page));
+      assert.deepEqual(detailReads, []);
+
+      await trigger.click();
+      await search.fill("Track 998");
+      const input = await search.elementHandle();
+      await page.evaluate(() => __musicListFixture.render());
+      assert.equal(await input.evaluate(node => node.isConnected && node === document.activeElement && node.value === "Track 998"), true);
+      await dialog.getByRole("button", { name: "播放「Synthetic Track 998」", exact: true }).click();
+      await requested(detail); detail.release();
+      await page.waitForFunction(() => __musicListFixture.state.current?.id === "T998" && !__musicListFixture.audio().paused);
+      assert.equal(await dialog.count(), 0);
+      assert.deepEqual(detailReads, ["/api/music/tracks/T998"]);
+    } finally { detail.release(); await page.close(); }
+  });
+  await run("queue order: search rows cannot operate after switching accounts", async () => {
+    const page = await setup(20);
+    const dialog = page.getByRole("dialog", { name: "搜索播放队列", exact: true });
+    try {
+      await page.getByRole("button", { name: "搜索播放队列", exact: true }).click();
+      await dialog.getByRole("searchbox", { name: "搜索队列歌曲" }).fill("Track 20");
+      const old = await dialog.getByRole("button", { name: "播放「Synthetic Track 20」", exact: true }).elementHandle();
+      await page.evaluate(async () => {
+        const { setAccountOwner } = await import("/js/account-owner.js");
+        setAccountOwner(location.origin, "account:queueSearchFixture");
+      });
+      await old.evaluate(node => node.click());
+      assert.equal(await dialog.count(), 0);
+      assert.equal(await page.evaluate(() => __musicListFixture.state.current?.id), "T1");
+    } finally { await page.close(); }
+  });
   for (const count of [300, 1000]) for (const removals of [1, 10]) await run(`queue order: ${count} tracks ${removals} removals retain all surviving rows and player`, async () => {
     const samples = [];
     for (let repeat = 0; repeat < 3; repeat++) {

@@ -59,6 +59,7 @@ function harness(input = source, { count = 12, limit = 36 } = {}) {
     readCachedJson: async (base, path) => cache.get(JSON.stringify([base, path])) || null,
     writeCachedJson: async (base, path, value) => { calls.cacheWrites.push({ base, path }); cache.set(JSON.stringify([base, path]), { payload: plain(value), updatedAt: "synthetic" }); },
     fetchJson: async (base, path, options = {}) => {
+      if (path.startsWith("/api/gallery-media/continue-watching?")) return { items: [] };
       assert([A, B].includes(base), "Synthetic origins only"); const url = new URL(path, base);
       const kind = path.startsWith("/api/image-library/items?") ? "list" : path.startsWith("/api/gallery-media/") ? "detail" : path.startsWith("/api/playinfo/") ? "info" : "unknown";
       assert.notEqual(kind, "unknown", `Unexpected API ${path}`);

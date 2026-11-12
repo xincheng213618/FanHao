@@ -1,24 +1,24 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-76f4b0fadf4d";
-import { fetchJson } from "./js/api.js?v=assets-76f4b0fadf4d";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-06c1d7f13464";
+import { fetchJson } from "./js/api.js?v=assets-06c1d7f13464";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, captureCachedJsonFence, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-76f4b0fadf4d";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-76f4b0fadf4d";
-import { getElements } from "./js/dom.js?v=assets-76f4b0fadf4d";
-import { installBottomLayout } from "./js/bottom-layout.js?v=assets-76f4b0fadf4d";
-import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-76f4b0fadf4d";
+import { cacheAgeText, captureCachedJsonFence, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-06c1d7f13464";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-06c1d7f13464";
+import { getElements } from "./js/dom.js?v=assets-06c1d7f13464";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-06c1d7f13464";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-06c1d7f13464";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-76f4b0fadf4d";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-76f4b0fadf4d";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-76f4b0fadf4d";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-76f4b0fadf4d";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-06c1d7f13464";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-06c1d7f13464";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-06c1d7f13464";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-06c1d7f13464";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-76f4b0fadf4d";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-76f4b0fadf4d";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-76f4b0fadf4d";
-import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-76f4b0fadf4d";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-06c1d7f13464";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-06c1d7f13464";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-06c1d7f13464";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-06c1d7f13464";
 
 const els = getElements();
 const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
@@ -224,6 +224,7 @@ function readLastViewState() {
 function rememberViewState(view = currentView, params = currentViewParams) {
   const cleanParams = sanitizeViewParams(view, params || {});
   if (!shouldRememberView(view, cleanParams)) return;
+  if (view === "photoDetail") delete cleanParams.browseToken;
   localStorage.setItem(LAST_VIEW_STORAGE_KEY, JSON.stringify({
     view,
     params: cleanParams,
@@ -254,9 +255,11 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "works") {
     const favorite = ["1", "true", "yes"].includes(String(params.favorite || "").trim().toLowerCase());
     const folder = favorite ? String(params.folder || "").trim().slice(0, 96) : "";
+    const query = favorite ? String(params.query || "").trim().slice(0, 120).trimEnd().replace(/[\uD800-\uDFFF]/gu, "\uFFFD") : "";
     return {
       ...(favorite ? { favorite: "1" } : {}),
-      ...(folder && folder !== "all" ? { folder } : {})
+      ...(folder && folder !== "all" ? { folder } : {}),
+      ...(query ? { query } : {})
     };
   }
   if (view === "search") {
@@ -266,10 +269,14 @@ function sanitizeViewParams(view, params = {}) {
   if (view === "people") {
     return { scope: String(params.scope || "main").trim().toLowerCase() === "western" ? "western" : "main" };
   }
-  if (view === "personDetail") return {
-    personId: String(params.personId || ""),
-    scope: String(params.scope || "main").trim().toLowerCase() === "western" ? "western" : "main"
-  };
+  if (view === "personDetail") {
+    const query = String(params.query || "").trim().slice(0, 120).trimEnd().replace(/[\uD800-\uDFFF]/gu, "\uFFFD");
+    return {
+      personId: String(params.personId || ""),
+      scope: String(params.scope || "main").trim().toLowerCase() === "western" ? "western" : "main",
+      ...(query ? { query } : {})
+    };
+  }
   if (view === "workDetail") return { workId: String(params.workId || "") };
   if (view === "studioDetail") return { studioId: String(params.studioId || ""), seriesId: String(params.seriesId || "all") || "all" };
   if (view === "categories") {
@@ -280,11 +287,14 @@ function sanitizeViewParams(view, params = {}) {
     const prefix = String(params.prefix || params.codePrefix || "").trim().replaceAll("_", "-").toUpperCase();
     return { prefix, ...(String(params.family || "") === "1" || params.family === true ? { family: "1" } : {}) };
   }
-  if (view === "photoDetail") return { id: String(params.id || "") };
+  if (view === "photoDetail") {
+    const browseToken = String(params.browseToken || "");
+    return { id: String(params.id || ""), ...(/^[a-z0-9-]{1,40}$/u.test(browseToken) ? { browseToken } : {}) };
+  }
   if (view === "mangaDetail") return { id: String(params.id || "") };
   if (view === "mangaChapter") return { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "") };
   if (view === "novelSearch") return { query: String(params.query || params.q || "").trim() };
-  if (view === "novelDetail") return { id: String(params.id || "") };
+  if (view === "novelDetail") return { id: String(params.id || ""), ...(typeof params.sourceRealm === "string" && params.sourceRealm ? { sourceRealm: params.sourceRealm } : {}) };
   if (view === "novelReader") {
     const result = { id: String(params.id || ""), chapterIndex: String(params.chapterIndex || params.chapter || "1") };
     for (const key of ["chapterId", "catalogRevision", "sourceRealm"]) {
@@ -422,6 +432,7 @@ function readViewStateFromHash(hash = window.location.hash) {
   if (view !== "settings" && !RESTORABLE_VIEWS.has(view)) return null;
 
   const params = Object.fromEntries(new URLSearchParams(rawQuery));
+  if (view === "photoDetail") delete params.browseToken;
   const cleanParams = sanitizeViewParams(view, params);
   if (view !== "settings" && !shouldRememberView(view, cleanParams)) return null;
   return { view, params: cleanParams };
@@ -431,6 +442,8 @@ function viewRouteHash(view, params = {}) {
   const cleanParams = sanitizeViewParams(view, params || {});
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(cleanParams)) {
+    // The album list lives in this document's photo module and history.
+    if (view === "photoDetail" && key === "browseToken") continue;
     if (value !== undefined && value !== null && value !== "") query.set(key, value);
   }
   const suffix = query.toString();
@@ -1534,7 +1547,8 @@ function openNativeLibraryRoute(options = {}) {
   if (first === "favorites") {
     showView("works", {
       favorite: "1",
-      ...(query.get("folder") ? { folder: query.get("folder") } : {})
+      folder: query.get("folder"),
+      query: query.get("q")
     }, navigation);
     return true;
   }
@@ -1664,6 +1678,7 @@ function openNativeLibraryRoute(options = {}) {
       author: query.get("author") || "all",
       source: query.get("source") || query.get("origin") || "liked",
       sort: query.get("sort") || "published",
+      media: query.get("media") || query.get("type") || undefined,
       account: query.get("account") || "all"
     }, navigation);
     return true;
@@ -2192,7 +2207,8 @@ function goBack() {
   if (androidModuleRegistry?.handleBack(currentView, currentViewParams)) return;
   if (currentView === "mangaChapter" && currentViewParams.id) {
     const previous = viewStack.at(-1);
-    if (previous?.view === "mangaDetail" && String(previous.params?.id || "") === String(currentViewParams.id)) {
+    if (previous?.view === "mangaDetail" && String(previous.params?.id || "") === String(currentViewParams.id)
+      || previous?.view === "channel" && normalizeChannelMode(previous.params?.mode) === "manga") {
       returnToStackView();
       return;
     }

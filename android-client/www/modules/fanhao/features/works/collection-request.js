@@ -3,6 +3,7 @@ export function workCollectionPath(view, {
   folderId = "",
   limit = 48,
   offset = 0,
+  query = "",
   sort = "updated"
 } = {}) {
   const endpoint = view === "favorites" ? "favorites" : "history";
@@ -13,5 +14,6 @@ export function workCollectionPath(view, {
     sort: String(sort || "updated")
   });
   if (endpoint === "favorites" && folderId && folderId !== "all") params.set("folder", String(folderId));
+  if (endpoint === "favorites" && query) params.set("q", query);
   return `/api/${endpoint}?${params}`;
 }

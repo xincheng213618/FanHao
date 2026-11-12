@@ -270,7 +270,53 @@ const defaults = count => folder("default", "默认收藏", count);
   await cache.clearCachedJsonByPrefixes(origin, ["/api/history", "/api/works"], { accountScope: captureAccountOwner(origin) });
   assert.equal(await cache.readCachedJson(origin, path), null, "ownerless legacy entries belong to the guest scope");
 }
-console.log("android-account-folders-state: passed (operation ordering, delete/recreate, object updates, account switch, refresh isolation and scoped cache cleanup)");
+{
+  const origin = "http://folder-batch-owner.fixture";
+  setAccountOwner(origin, "account:alpha");
+  const response = deferred();
+  const calls = [];
+  const oldWork = { id: "101", favorite: true, favoriteFolderId: "default" };
+  const currentWork = { id: "101", favorite: true, favoriteFolderId: "beta-only" };
+  let library = { works: [oldWork] };
+  const feature = createFavoriteFolderFeature({ getActiveUrl: () => origin, getLibrary: () => library,
+    clearCachedJsonByPrefix: async () => { assert.fail("an old batch cannot invalidate a new account's cache"); },
+    api: async (_base, pathname, options) => { calls.push([pathname, options]); return response.promise; } });
+  feature.rememberFolders([defaults(1), folder("later", "甲的夹")]);
+  const pending = feature.moveFavoritesToFolder(["101", "101"], "later");
+  await tick();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], "/api/favorites/batch-move");
+  assert.deepEqual(calls[0][1].body, { workIds: ["101"], folderId: "later" });
+  assert.equal(calls[0][1].accountScope.owner, "account:alpha");
+  assert.equal(oldWork.favoriteFolderId, "default", "batch membership changes only on a confirmed receipt");
+  setAccountOwner(origin, "account:beta");
+  library = { works: [currentWork] };
+  feature.reset();
+  response.resolve({ ok: true, workIds: ["101"], folderId: "later", folders: [defaults(0), folder("later", "甲的夹", 1)] });
+  await assert.rejects(pending, { code: "ACCOUNT_CHANGED" });
+  assert.equal(currentWork.favoriteFolderId, "beta-only");
+  assert.deepEqual(feature.folders(), []);
+}
+{
+  const origin = "http://folder-direct-owner.fixture";
+  setAccountOwner(origin, "account:alpha");
+  const entered = deferred(), response = deferred();
+  const oldWork = { id: "101", favorite: false }, currentWork = { id: "101", favorite: true, favoriteFolderId: "beta-only" };
+  let library = { works: [oldWork] };
+  const feature = createFavoriteFolderFeature({ getActiveUrl: () => origin, getLibrary: () => library,
+    clearCachedJsonByPrefix: async () => assert.fail("an old direct save cannot invalidate the new account"),
+    api: async () => { entered.resolve(); return response.promise; } });
+  const saving = assert.rejects(feature.saveFavoriteToFolder(oldWork, "later", () => assert.fail("retired direct save cannot publish")), /账号/);
+  await entered.promise;
+  setAccountOwner(origin, "account:beta");
+  library = { works: [currentWork] };
+  feature.reset();
+  response.resolve({ ok: true, workId: "101", favorite: true, favoriteFolder: { folderId: "later", folderName: "稍后" }, folders: [folder("later", "稍后", 1)] });
+  await saving;
+  assert.deepEqual(oldWork, { id: "101", favorite: false });
+  assert.equal(currentWork.favoriteFolderId, "beta-only");
+}
+console.log("android-account-folders-state: passed (operation ordering, delete/recreate, object updates, batch owner isolation, refresh isolation and scoped cache cleanup)");
 if (process.env.FANHAO_FOLDER_STATE_ONLY === "1") process.exit(0);
 
 const executablePath = [process.env.CHROME_PATH, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"].find(file => file && fs.existsSync(file));
@@ -389,7 +435,194 @@ try {
     } else if (result.change === 'account') assert.deepEqual(result.a, { sentinel: 'new account unchanged' });
     else assert.equal(result.a, null);
   }
-  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await verifyBatchMove(page, account, later.id);
+  await verifyDirectFolderSave(page, account, later.id);
+  const overflow = await page.evaluate(() => ({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth,
+    elements: [...document.querySelectorAll("body *")].filter(node => node.getBoundingClientRect().right > innerWidth)
+      .slice(0, 12).map(node => [node.className, node.getBoundingClientRect().right]) }));
+  assert(overflow.scrollWidth <= overflow.width, `favorite page must fit the viewport: ${JSON.stringify(overflow)}`);
   assert.deepEqual(errors, []);
-  console.log("android-account-folders-browser: passed (management drawer, rename/delete/default migration/recreation, captured-server action cache and account/object reuse fences)");
+  console.log("android-account-folders-browser: passed (management drawer, rename/delete/default migration/recreation, cross-page batch move and retry, direct card save and retry, late batch receipt, captured-server action cache and account/object reuse fences)");
 } finally { await browser.close(); await fixture.close(); }
+
+async function verifyDirectFolderSave(page, account, targetId) {
+  const saved = await api("/api/works/102");
+  if (saved.work.favorite) await api("/api/favorites/102", "POST", {});
+  const work = (await api("/api/works/102")).work;
+  const writes = [];
+  let hold = null;
+  await page.route(origin + "/api/favorites/102", async route => {
+    assert.equal(route.request().method(), "PUT");
+    writes.push(route.request().postDataJSON());
+    if (writes.length === 1) return route.fulfill({ status: 503, json: { error: "合成收藏保存失败" } });
+    if (hold) { hold.entered.resolve(); await hold.release.promise; }
+    return route.continue();
+  });
+  await page.route(origin + "/android-direct-folder-fixture", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="/android/styles.css"><link rel="stylesheet" href="/android/modules/fanhao/styles.css"><body><main class="content-panel" data-view="personDetail"><div id="direct-cards" class="work-list cover-grid"></div></main><script type="module" src="/android-direct-folder-fixture.js"></script></body></html>` }));
+  await page.route(origin + "/android-direct-folder-fixture.js", route => route.fulfill({ contentType: "text/javascript; charset=utf-8", body: `
+    import { createWorkCards } from '/android/modules/fanhao/features/works/cards.js';
+    import { createFavoriteFolderFeature } from '/android/modules/fanhao/features/works/favorite-folders.js';
+    import { setAccountOwner } from '/android/js/account-owner.js';
+    setAccountOwner(location.origin, ${JSON.stringify(`account:${account.user.id}`)});
+    const original=fetch.bind(window); window.fetch=(input,options={})=>original(input,{...options,headers:{...options.headers,Authorization:${JSON.stringify(`Bearer ${token}`)}}});
+    const root = document.querySelector('#direct-cards');
+    const work = ${JSON.stringify(work)};
+    const libraryWork = structuredClone(work);
+    const favoriteFolders = createFavoriteFolderFeature({ getActiveUrl: () => location.origin, getLibrary: () => ({ works: [libraryWork] }) });
+    const navigations = [];
+    const cards = createWorkCards({ getActiveUrl: () => location.origin, roots: [root], showView: (...args) => navigations.push(args), favoriteFolders });
+    root.append(cards.createWorkCard(work, { coverGrid: true }));
+    window.directFolderFixture = { work, libraryWork, navigations };
+  ` }));
+  await page.goto(origin + "/android-direct-folder-fixture");
+  const card = page.locator('[data-work-detail-id="102"]');
+  const trigger = card.getByRole("button", { name: /^收藏到/ });
+  const picker = page.getByRole("dialog", { name: "收藏到…", exact: true });
+  const choice = picker.getByRole("button", { name: /稍后再看/ });
+  assert((await trigger.boundingBox()).height >= 44);
+  await trigger.press("Enter");
+  await choice.click();
+  await picker.getByText("合成收藏保存失败", { exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => directFolderFixture.work.favorite), false);
+  assert.equal(await choice.evaluate(node => document.activeElement === node), true);
+  await choice.press("Enter");
+  await picker.waitFor({ state: "hidden" });
+  const change = card.getByRole("button", { name: /^改夹.*稍后再看/ });
+  assert.equal(await change.evaluate(node => document.activeElement === node), true);
+  assert.deepEqual(await page.evaluate(() => [directFolderFixture.work.favorite, directFolderFixture.libraryWork.favoriteFolderName, directFolderFixture.navigations.length]), [true, "稍后再看", 0]);
+  assert.equal(await card.locator(".work-cover-badge.favorite").textContent(), "已收藏");
+  assert.deepEqual(writes, [{ folderId: targetId }, { folderId: targetId }]);
+
+  await change.click();
+  const same = page.waitForResponse(response => response.request().method() === "PUT" && response.url() === origin + "/api/favorites/102");
+  await choice.click();
+  const sameReceipt = await (await same).json();
+  assert.ok(sameReceipt.favoriteFolder.createdAt);
+  await picker.waitFor({ state: "hidden" });
+  await change.click();
+  hold = { entered: deferred(), release: deferred() };
+  try {
+    const other = page.waitForResponse(response => response.request().method() === "PUT" && response.url() === origin + "/api/favorites/102");
+    await picker.getByRole("button", { name: /默认收藏/ }).click();
+    await hold.entered.promise;
+    await page.keyboard.press("Escape");
+    await picker.waitFor({ state: "hidden" });
+    await change.click();
+    await choice.click();
+    await picker.getByText("此作品的收藏操作正在处理，请稍后再试", { exact: true }).waitFor();
+    assert.equal(writes.length, 4);
+    hold.release.resolve();
+    const otherReceipt = await (await other).json();
+    assert.equal(otherReceipt.favoriteFolder.createdAt, sameReceipt.favoriteFolder.createdAt);
+    await page.keyboard.press("Escape");
+    await card.getByRole("button", { name: /^改夹.*默认收藏/ }).waitFor();
+    assert.deepEqual(await page.evaluate(() => directFolderFixture.navigations), []);
+  } finally { hold.release.resolve(); }
+}
+
+async function verifyBatchMove(page, account, laterId) {
+  await api("/api/favorites/102", "POST", {});
+  await page.setViewportSize({ width: 320, height: 620 });
+  let failPage = true;
+  await page.route(url => url.pathname === "/api/favorites" && Number(url.searchParams.get("limit")) > 1, route => {
+    if (!failPage) return route.continue();
+    failPage = false;
+    return route.fulfill({ status: 503, json: { error: "合成分页读取失败" } });
+  });
+  const writes = [];
+  let gate = null;
+  await page.route(url => url.pathname === "/api/favorites/batch-move", async route => {
+    assert.equal(route.request().method(), "PUT");
+    writes.push(route.request().postDataJSON());
+    if (writes.length === 1) return route.fulfill({ status: 503, json: { error: "合成移动失败" } });
+    if (gate) { gate.entered.resolve(); await gate.release.promise; }
+    return route.continue();
+  });
+  await page.route(origin + "/android-batch-fixture", route => route.fulfill({ contentType: "text/html; charset=utf-8", body: `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>收藏批量移动</title><link rel="stylesheet" href="/android/styles.css"><link rel="stylesheet" href="/android/modules/fanhao/styles.css"><body><main class="app-shell"><section class="content-panel" data-view="works" data-feed-view="true"><div class="section-head"><small id="kicker"></small><h2 id="title"></h2></div><div id="meta" class="view-meta"></div><div id="content" class="content-list"></div></section></main><nav class="bottom-nav"><button>首页</button></nav><script type="module" src="/android-batch-fixture.js"></script></body></html>` }));
+  await page.route(origin + "/android-batch-fixture.js", route => route.fulfill({ contentType: "text/javascript; charset=utf-8", body: `
+    import { createWorkViews } from '/android/modules/fanhao/work-views.js';
+    import { setAccountOwner } from '/android/js/account-owner.js';
+    setAccountOwner(location.origin, ${JSON.stringify(`account:${account.user.id}`)});
+    const nativeFetch=fetch.bind(window);
+    window.fetch=(input,options={})=>nativeFetch(input,{...options,headers:{...options.headers,Authorization:${JSON.stringify(`Bearer ${account.token}`)}}});
+    const els={viewKicker:document.querySelector('#kicker'),viewTitle:document.querySelector('#title'),viewMeta:document.querySelector('#meta'),viewContent:document.querySelector('#content')};
+    let params={favorite:'1',folder:'default'}, limit=1, life;
+    function render(){
+      window.dispatchEvent(new CustomEvent('fanhaoViewWillRender'));
+      life?.abort();
+      const owner=life=new AbortController();
+      const guard=()=>owner===life&&!owner.signal.aborted;
+      guard.signal=owner.signal;
+      return views.renderAllWorks(params,guard);
+    }
+    const views=createWorkViews({els,getActiveUrl:()=>location.origin,getCurrentView:()=>'works',getCurrentParams:()=>params,
+      getWorksLimit:()=>limit,increaseWorksLimit:step=>{limit+=step;},renderCurrentView:render,renderCurrentViewPreservingScroll:render,
+      replaceViewParams:(_view,next)=>{params=next;},showView:(view,next)=>{if(view!=='works')throw new Error('selection opened a detail');params=next;limit=1;return render();},
+      setActiveBottom(){},onUserStateChange(){}});
+    window.batchFixture={close:views.closeFavoriteBatch};
+    await render();` }));
+  await page.goto(origin + "/android-batch-fixture");
+  const first = page.locator('[data-work-detail-id="101"]');
+  const second = page.locator('[data-work-detail-id="102"]');
+  const open = page.getByRole("button", { name: "批量移动", exact: true });
+  const toolbar = page.locator(".favorite-batch-toolbar");
+  await first.waitFor();
+  assert.equal(await second.count(), 0);
+  await open.click();
+  await first.press("Space");
+  assert.equal(await first.getAttribute("role"), "checkbox");
+  assert.equal(await first.getAttribute("aria-checked"), "true");
+  assert.equal(await page.evaluate(() => {
+    const bar = document.querySelector(".favorite-batch-toolbar").getBoundingClientRect();
+    const nav = document.querySelector(".bottom-nav").getBoundingClientRect();
+    return bar.left >= 0 && bar.right <= innerWidth && bar.bottom <= nav.top;
+  }), true);
+  await page.locator(".load-more button").click();
+  const retryPage = page.getByRole("button", { name: "重试读取收藏" });
+  await retryPage.waitFor();
+  await toolbar.getByText("已选 1 部", { exact: true }).waitFor();
+  await retryPage.click();
+  await second.waitFor();
+  assert.equal(await first.getAttribute("aria-checked"), "true", "pagination must carry the selected IDs");
+  await second.click();
+  await toolbar.getByRole("button", { name: "移至收藏夹" }).click();
+  const picker = page.getByRole("dialog", { name: "将 2 部作品移至收藏夹" });
+  const target = picker.getByRole("button", { name: "稍后再看", exact: true });
+  assert.equal(await picker.getByRole("button", { name: "默认收藏", exact: true }).count(), 0);
+  await target.click();
+  await picker.getByText("合成移动失败", { exact: true }).waitFor();
+  assert.equal(await first.getAttribute("aria-checked"), "true");
+  assert.equal(await second.getAttribute("aria-checked"), "true");
+  assert.equal((await api("/api/favorites?folder=default")).total, 2);
+  await target.click();
+  await page.getByText("已将 2 部作品归入「稍后再看」", { exact: true }).waitFor();
+  const expected = { workIds: ["101", "102"], folderId: laterId };
+  assert.deepEqual(writes, [expected, expected]);
+  assert.equal((await api(`/api/favorites?folder=${encodeURIComponent(laterId)}`)).total, 2);
+  assert.equal(await toolbar.count(), 0);
+  assert.equal(await first.count(), 0);
+
+  await page.getByRole("button", { name: "稍后再看，2 个作品", exact: true }).click();
+  await first.waitFor();
+  await open.click();
+  await first.click();
+  assert.equal(await page.evaluate(() => batchFixture.close()), true);
+  assert.equal(await first.getAttribute("role"), "button", "Back exits selection without navigating");
+  assert.equal(await open.evaluate(node => node === document.activeElement), true);
+  await open.click();
+  await toolbar.getByRole("button", { name: "选中已显示" }).click();
+  await toolbar.getByRole("button", { name: "移至收藏夹" }).click();
+  const singlePicker = page.getByRole("dialog", { name: "将 1 部作品移至收藏夹" });
+  gate = { entered: deferred(), release: deferred() };
+  await singlePicker.getByRole("button", { name: "默认收藏", exact: true }).click();
+  await gate.entered.promise;
+  await singlePicker.getByRole("button", { name: /关闭/ }).click();
+  await page.getByRole("button", { name: "默认收藏，0 个作品", exact: true }).click();
+  await page.getByText("“默认收藏”里还没有收藏。", { exact: true }).waitFor();
+  gate.release.resolve();
+  await first.waitFor();
+  assert.equal(await toolbar.count(), 0, "a late move receipt must not restore selection from the old folder");
+  assert.equal(await first.getAttribute("role"), "button");
+  assert.equal(await page.locator(".favorite-batch-notice").count(), 0);
+  assert.deepEqual(writes.at(-1), { workIds: ["101"], folderId: "default" });
+}

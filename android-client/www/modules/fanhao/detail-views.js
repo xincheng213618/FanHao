@@ -1,18 +1,18 @@
-import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-76f4b0fadf4d";
-import { cacheAgeText } from "../../js/cache.js?v=assets-76f4b0fadf4d";
+import { createAndroidVideoSection } from "../../js/android-player.js?v=assets-06c1d7f13464";
+import { cacheAgeText } from "../../js/cache.js?v=assets-06c1d7f13464";
 import { createDetailSectionTitle } from "../../js/detail-ui.js";
 import { extractWorkCode, formatBytes, formatNumber } from "../../js/format.js";
 import { createInfoPreviewSection } from "../../js/info-preview.js";
-import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-76f4b0fadf4d";
-import { getWorkSource } from "../../js/work-source.js?v=assets-76f4b0fadf4d";
-import { personDetailPath } from "./features/people/detail-request.js?v=assets-76f4b0fadf4d";
-import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-76f4b0fadf4d";
-import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-76f4b0fadf4d";
-import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-76f4b0fadf4d";
-import { createWorkActions } from "./features/works/actions.js?v=assets-76f4b0fadf4d";
-import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-76f4b0fadf4d";
-import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-76f4b0fadf4d";
-import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-76f4b0fadf4d";
+import { absoluteUrl, createFallbackCover, imageUrlForWork, loadPreviewImage, portraitUrlForPerson } from "../../js/image.js?v=assets-06c1d7f13464";
+import { getWorkSource } from "../../js/work-source.js?v=assets-06c1d7f13464";
+import { personDetailPath } from "./features/people/detail-request.js?v=assets-06c1d7f13464";
+import { createPersonDetailHero } from "./features/people/detail-hero.js?v=assets-06c1d7f13464";
+import { createPersonDetailWorkToolbar } from "./features/people/detail-work-toolbar.js?v=assets-06c1d7f13464";
+import { mergePersonIdentity } from "./features/people/person-portrait.js?v=assets-06c1d7f13464";
+import { createWorkActions } from "./features/works/actions.js?v=assets-06c1d7f13464";
+import { createWorkDetailToolbar } from "./features/works/detail-toolbar.js?v=assets-06c1d7f13464";
+import { createAndroidWorkMoveController } from "./features/works/work-move.js?v=assets-06c1d7f13464";
+import { createWorkPreviewMedia } from "./features/works/preview-media.js?v=assets-06c1d7f13464";
 
 const PLAY_OPEN_COOLDOWN_MS = 1400;
 export function createDetailViews(context) {
@@ -77,7 +77,7 @@ export function createDetailViews(context) {
     const title = els.moduleChrome?.querySelector("[data-fanhao-detail-title]");
     if (title) title.textContent = String(value || "").trim() || "详情";
   };
-  async function renderPersonDetail(personId, requestedScope = "main", isActive = () => true) {
+  async function renderPersonDetail(personId, requestedScope = "main", isActive = () => true, query = "") {
     videoSection.deactivate();
     const scope = String(requestedScope || "main").toLowerCase() === "western" ? "western" : "main";
     const activeUrl = getActiveUrl();
@@ -85,35 +85,61 @@ export function createDetailViews(context) {
     els.viewKicker.textContent = "演员";
     els.viewTitle.textContent = "正在加载";
     els.viewMeta.textContent = "";
-    els.viewContent.innerHTML = `<div class="loading-row">正在加载演员资料</div>`;
+    const identity = document.createElement("div");
+    identity.hidden = true;
+    const results = document.createElement("div");
+    results.className = "person-detail-work-results";
+    const loading = document.createElement("div");
+    loading.className = "loading-row";
+    loading.textContent = "正在加载作品";
+    results.append(loading);
+    const search = createPersonWorkSearch(query, (value) => {
+      const nextQuery = value.trim();
+      if (!isActive() || !search.isConnected || nextQuery === query) return;
+      showView("personDetail", { personId, scope, query: nextQuery }, { skipHistory: true, replaceHistory: true });
+    });
+    els.viewContent.replaceChildren(identity, createDetailSectionTitle("作品", ""), search, results);
     const selectedYear = getPersonWorkYear(personId);
-    const path = personDetailPath(personId, { ...getWorkListRequestState(), scope, year: selectedYear, limit: getWorksLimit() });
+    const path = personDetailPath(personId, { ...getWorkListRequestState(), scope, year: selectedYear, limit: getWorksLimit(), query });
     let renderedCache = false;
+    let toolbar = null;
     const indexedPerson = findPersonInLibrary(personId);
+    const renderPersonPreview = (person, options) => {
+      setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
+      els.viewTitle.textContent = "演员详情";
+      identity.replaceChildren(renderPersonHero(person, options));
+      identity.hidden = false;
+    };
     if (indexedPerson) renderPersonPreview(indexedPerson);
     const renderPersonData = (data) => {
       const person = mergePersonIdentity(indexedPerson, data.person);
       const works = data.works || [];
-      setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
-      els.viewTitle.textContent = "演员详情";
-      els.viewMeta.textContent = "";
-      els.viewContent.innerHTML = "";
-      els.viewContent.append(renderPersonHero(person, { filmographyCount: data.filmographyCount }));
-      els.viewContent.append(createDetailSectionTitle("作品", ""));
-      renderWorks(works, "这个演员下面还没有作品。", {
+      const total = Number(data.total ?? works.length);
+      renderPersonPreview(person, { filmographyCount: data.filmographyCount });
+      results.replaceChildren();
+      if (query && total > 0) {
+        const count = document.createElement("p");
+        count.className = "person-detail-work-count";
+        count.setAttribute("role", "status");
+        count.textContent = `找到 ${formatNumber(total)} 部作品`;
+        results.append(count);
+      }
+      renderWorks(works, query ? "没有符合当前搜索和筛选的作品。" : "这个演员下面还没有作品。", {
+        container: results,
         facets: data.facets,
-        total: data.total || works.length,
-        activeFilterTotal: data.total || works.length,
+        total,
+        activeFilterTotal: total,
         coverGrid: true,
         hidePerson: true,
         hideControls: true,
-        hasServerMore: works.length < Number(data.total || works.length),
+        hasServerMore: works.length < total,
         onLoadMore: () => {
           increaseWorksLimit(48);
           return renderCurrentViewPreservingScroll();
         }
       });
-      els.viewContent.append(createPersonDetailWorkToolbar({
+      toolbar?.remove();
+      toolbar = createPersonDetailWorkToolbar({
         filterMode: getWorkFilterMode(),
         filterOptions: getWorkFilterOptions(works, data.facets),
         yearMode: data.year || selectedYear,
@@ -123,30 +149,38 @@ export function createDetailViews(context) {
         onFilterChange: (value) => setWorkFilterMode(value, { replace: true }),
         onYearChange: (value) => setPersonWorkYear(personId, value),
         onSortChange: setWorkSortMode
-      }));
+      });
+      els.viewContent.append(toolbar);
     };
     try {
       const result = await pageDataService.load(activeUrl, path, {
         signal: isActive.signal,
         isActive,
         onCached(data) {
-          if (!data?.person) return;
+          if (!data?.person || (query && data.query !== query)) return;
           renderedCache = true;
           renderPersonData(data);
         }
       });
       if (!result || !isActive()) return;
-      if (!result.unchanged) renderPersonData(result.data);
+      if (query && result.data?.query !== query) throw new Error("请更新电脑端后再按番号或标题查找该演员的作品。");
+      if (!result.unchanged || !renderedCache) renderPersonData(result.data);
     } catch (error) {
       if (!isActive()) return;
-      if (renderedCache) {
-        renderMessage("电脑端暂时连不上，当前显示的是本地缓存。", "quiet", false);
-      } else if (renderPersonFallback(personId, error)) {
-        return;
-      } else {
-        els.viewTitle.textContent = "演员";
-        renderMessage(detailErrorMessage(error, "演员资料读取失败，请检查服务连接"), "error");
-      }
+      if (!indexedPerson && !renderedCache) els.viewTitle.textContent = "演员";
+      const message = document.createElement("div");
+      message.className = `message-box ${renderedCache ? "quiet" : "error"} person-detail-work-error`;
+      message.setAttribute("role", renderedCache ? "status" : "alert");
+      const label = document.createElement("span");
+      label.textContent = renderedCache ? "作品列表暂时无法刷新，当前显示本地缓存。"
+        : detailErrorMessage(error, "作品列表暂时无法读取，请检查服务连接");
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.textContent = "重试";
+      retry.addEventListener("click", () => { if (isActive() && retry.isConnected) renderCurrentView(); });
+      message.append(label, retry);
+      if (renderedCache) results.prepend(message);
+      else results.replaceChildren(message);
     }
   }
 
@@ -165,33 +199,6 @@ export function createDetailViews(context) {
     renderCurrentView();
     return true;
   }
-  function renderPersonPreview(person) {
-    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
-    els.viewTitle.textContent = "演员详情";
-    els.viewMeta.textContent = "";
-    els.viewContent.innerHTML = "";
-    els.viewContent.append(renderPersonHero(person));
-    els.viewContent.append(createDetailSectionTitle("作品", ""));
-    const loading = document.createElement("div");
-    loading.className = "loading-row";
-    loading.textContent = "正在加载作品";
-    els.viewContent.append(loading);
-  }
-
-  function renderPersonFallback(personId, error) {
-    const person = findPersonInLibrary(personId);
-    if (!person) return false;
-
-    setDetailChromeTitle(person.actorProfile?.displayName || person.name || "演员详情");
-    els.viewTitle.textContent = "演员详情";
-    els.viewMeta.textContent = "";
-    els.viewContent.innerHTML = "";
-    els.viewContent.append(renderPersonHero(person));
-    els.viewContent.append(createDetailSectionTitle("作品", ""));
-    renderMessage(`作品列表暂时无法加载：${detailErrorMessage(error, "请检查服务连接")}`, "quiet", false);
-    return true;
-  }
-
   function findPersonInLibrary(personId) {
     const people = getLibrary()?.people || [];
     return people.find((person) => person.id === personId) || null;
@@ -206,6 +213,7 @@ export function createDetailViews(context) {
     els.viewMeta.textContent = "";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载作品详情</div>`;
     let renderedCache = false;
+    let filePicker = null;
     const applyWorkHeader = (data, cacheEntry = null) => {
       const work = data.work;
       const code = extractWorkCode(work);
@@ -239,11 +247,17 @@ export function createDetailViews(context) {
       if (!factPanel) {
         if (fallbackInfoPanel) els.viewContent.append(fallbackInfoPanel);
       }
-      els.viewContent.append(createWorkDetailToolbar({
+      const toolbar = createWorkDetailToolbar({
         work,
         onPlay: playDefaultVideo,
+        onBrowseFiles: (trigger) => {
+          filePicker = videoSection.openFilePicker(playbackSection, work, trigger);
+        },
         factsTarget: factPanel || fallbackInfoPanel
-      }));
+      });
+      els.viewContent.append(toolbar);
+      if (filePicker) filePicker.update(playbackSection, work,
+        toolbar.querySelector(".work-video-picker-action") || toolbar.querySelector("button"));
       void workMove.attach(work, { isActive });
     };
     try {
@@ -725,6 +739,45 @@ export function createDetailViews(context) {
     renderPersonDetail,
     renderWorkDetail
   };
+}
+
+function createPersonWorkSearch(query, onSearch) {
+  const form = document.createElement("form");
+  form.className = "person-detail-work-search";
+  form.setAttribute("role", "search");
+  const input = document.createElement("input");
+  input.type = "search";
+  input.placeholder = "查找该演员的番号或标题";
+  input.setAttribute("aria-label", "查找该演员的作品");
+  input.enterKeyHint = "search";
+  input.autocomplete = "off";
+  input.maxLength = 120;
+  input.value = query;
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.textContent = "查找";
+  form.append(input, submit);
+  if (query) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "清除";
+    clear.setAttribute("aria-label", "清除作品搜索");
+    clear.addEventListener("click", () => onSearch(""));
+    form.append(clear);
+  }
+  let composing = false, candidateSubmit = false;
+  input.addEventListener("compositionstart", () => { composing = true; candidateSubmit = false; });
+  input.addEventListener("compositionend", () => { composing = false; });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") candidateSubmit = composing || event.isComposing || event.keyCode === 229;
+  });
+  submit.addEventListener("pointerdown", () => { candidateSubmit = false; });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (composing || candidateSubmit) { candidateSubmit = false; return; }
+    onSearch(input.value);
+  });
+  return form;
 }
 
 function personScopeForWork(work) {

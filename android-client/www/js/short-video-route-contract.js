@@ -41,6 +41,11 @@ export function normalizeShortVideoSearchTab(value) {
   return ["all", "videos", "authors"].includes(tab) ? tab : "all";
 }
 
+export function normalizeShortVideoMedia(value) {
+  const media = String(value || "").trim().toLowerCase();
+  return media === "video" || media === "gallery" ? media : "all";
+}
+
 export function canonicalShortVideoViewParams(view, params = {}) {
   const query = String(params.query || params.q || "").trim();
   const author = String(params.author || "all").trim() || "all";
@@ -50,11 +55,13 @@ export function canonicalShortVideoViewParams(view, params = {}) {
   const authorFilter = normalizeFollowingAuthorFilter(params.authorFilter);
   const authorAccountStatus = normalizeAuthorAccountStatus(params.authorAccountStatus || params.account);
   const searchTab = normalizeShortVideoSearchTab(params.searchTab || params.tab);
+  const media = normalizeShortVideoMedia(params.media || params.type);
   return {
     ...(query ? { query } : {}),
     ...(author !== "all" ? { author } : {}),
     ...(source !== DEFAULT_SHORT_VIDEO_SOURCE ? { source } : {}),
     ...(sort !== DEFAULT_SHORT_VIDEO_SORT ? { sort } : {}),
+    ...(media !== "all" ? { media } : {}),
     ...(source === "following" && authorSort !== "followed" ? { authorSort } : {}),
     ...(source === "following" && authorFilter !== "all" ? { authorFilter } : {}),
     ...(source === "authors" && authorAccountStatus !== "all" ? { account: authorAccountStatus } : {}),

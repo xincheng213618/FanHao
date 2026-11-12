@@ -14,6 +14,7 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.media3.common.util.UnstableApi;
 
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -164,6 +165,15 @@ public class FanHaoPlayerPlugin extends Plugin {
       intent.putExtra(NativePlayerActivity.EXTRA_FALLBACK_URL, call.getString("fallbackUrl"));
       intent.putExtra(NativePlayerActivity.EXTRA_TITLE, call.getString("title"));
       intent.putExtra(NativePlayerActivity.EXTRA_SUBTITLE, call.getString("subtitle"));
+      JSArray subtitleTracks = call.getArray("subtitleTracks");
+      if (subtitleTracks != null && subtitleTracks.length() <= 64) {
+        String encodedTracks = subtitleTracks.toString();
+        if (encodedTracks.length() <= 64 * 1024) {
+          intent.putExtra(NativePlayerActivity.EXTRA_SUBTITLE_TRACKS, encodedTracks);
+          intent.putExtra(NativePlayerActivity.EXTRA_SUBTITLE_ACCOUNT_OWNER, call.getString("subtitleAccountOwner"));
+          intent.putExtra(NativePlayerActivity.EXTRA_SUBTITLE_SEEK_FALLBACK_URL, call.getString("subtitleSeekFallbackUrl"));
+        }
+      }
       intent.putExtra(NativePlayerActivity.EXTRA_PROGRESS_URL, progressUrl);
       intent.putExtra(NativePlayerActivity.EXTRA_PROGRESS_AUTH_TOKEN, ownerToken);
       intent.putExtra(NativePlayerActivity.EXTRA_WORK_ID, call.getString("workId"));
@@ -172,6 +182,27 @@ public class FanHaoPlayerPlugin extends Plugin {
       intent.putExtra(NativePlayerActivity.EXTRA_POSITION, call.getDouble("position", 0.0));
       intent.putExtra(NativePlayerActivity.EXTRA_DURATION, call.getDouble("duration", 0.0));
       if (receiver != null) intent.putExtra(NativePlayerActivity.EXTRA_PROGRESS_RECEIVER, receiver);
+      boolean previousEpisode = "gallery-media".equals(mode) && call.getBoolean("previousEpisode", false);
+      boolean nextEpisode = "gallery-media".equals(mode) && call.getBoolean("nextEpisode", false);
+      boolean episodePicker = "gallery-media".equals(mode) && call.getBoolean("episodePicker", false);
+      if (previousEpisode || nextEpisode || episodePicker) {
+        intent.putExtra(NativePlayerActivity.EXTRA_PREVIOUS_EPISODE, previousEpisode);
+        intent.putExtra(NativePlayerActivity.EXTRA_NEXT_EPISODE, nextEpisode);
+        intent.putExtra(NativePlayerActivity.EXTRA_EPISODE_PICKER, episodePicker);
+        getActivity().runOnUiThread(() -> {
+          if (destroyed || getActivity().isFinishing() || getActivity().isDestroyed()) {
+            call.reject("播放器连接已关闭");
+            return;
+          }
+          try {
+            startActivityForResult(call, intent, "playEpisodeResult");
+            activeProgressReceiver = receiver;
+          } catch (RuntimeException error) {
+            call.reject("无法打开原生播放器", error);
+          }
+        });
+        return;
+      }
       Log.i(TAG, "Opening native player: " + url);
       getActivity().startActivity(intent);
       activeProgressReceiver = receiver;
@@ -182,6 +213,29 @@ public class FanHaoPlayerPlugin extends Plugin {
     } catch (Exception error) {
       call.reject("无法打开原生播放器", error);
     }
+  }
+
+  @ActivityCallback
+  private void playEpisodeResult(PluginCall call, ActivityResult activityResult) {
+    // Capacitor shares its last Activity call slot across this plugin's result
+    // launchers. A short-feed call or restored call cannot select an episode.
+    if (call == null || !"gallery-media".equals(call.getString("mode")) || PluginCall.CALLBACK_ID_DANGLING.equals(call.getCallbackId())) return;
+    boolean previousEpisode = call.getBoolean("previousEpisode", false);
+    boolean nextEpisode = call.getBoolean("nextEpisode", false);
+    boolean episodePicker = call.getBoolean("episodePicker", false);
+    if (!previousEpisode && !nextEpisode && !episodePicker) return;
+    JSObject result = new JSObject();
+    result.put("opened", true);
+    Intent data = activityResult.getData();
+    if (!destroyed && activityResult.getResultCode() == Activity.RESULT_OK && data != null) {
+      int step = data.getIntExtra(NativePlayerActivity.EXTRA_EPISODE_STEP, 0);
+      if (episodePicker && data.getBooleanExtra(NativePlayerActivity.EXTRA_EPISODE_PICKER, false)) {
+        result.put("episodePicker", true);
+      } else if ((step == -1 && previousEpisode) || (step == 1 && nextEpisode)) {
+        result.put("episodeStep", step);
+      }
+    }
+    call.resolve(result);
   }
 
   private static boolean hasText(String value) {
@@ -237,7 +291,7 @@ public class FanHaoPlayerPlugin extends Plugin {
 
   @ActivityCallback
   private void playShortFeedResult(PluginCall call, ActivityResult activityResult) {
-    if (call == null) return;
+    if (call == null || !hasText(call.getString("videos"))) return;
     String expectedBase = NativeShortVideoActionState.serverScope(call.getString("baseUrl"));
     Intent data = activityResult == null ? null : activityResult.getData();
     JSObject result = shortFeedResult(expectedBase, activityResult == null ? Activity.RESULT_CANCELED : activityResult.getResultCode(), data);

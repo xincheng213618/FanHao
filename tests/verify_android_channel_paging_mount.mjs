@@ -145,7 +145,7 @@ async function snapshot(page) {
     return { view: __channelAudit.host.navigation.currentView(), params: __channelAudit.host.navigation.currentParams(), data: active?.page?.data,
       title: document.querySelector("#viewTitle").textContent, meta: document.querySelector("#viewMeta").textContent,
       cards: [...document.querySelectorAll("#viewContent .channel-card")].map(node => ({ item: __channelAudit.cards.get(node), text: node.querySelector(".channel-summary")?.textContent, aria: node.getAttribute("aria-label"), className: node.className })),
-      controls: [...document.querySelectorAll("#viewContent > :not(.channel-list):not(.photo-masonry-list):not(.channel-more)")].map(node => node.textContent), more: document.querySelector("#viewContent .channel-more")?.textContent || "" };
+      controls: [...document.querySelectorAll("#viewContent > :not(.channel-list):not(.photo-masonry-list):not(.channel-more):not(.media-watch-entry)")].map(node => node.textContent), more: document.querySelector("#viewContent .channel-more")?.textContent || "" };
   });
 }
 async function more(f, count) { await f.page.evaluate(() => document.querySelector("#viewContent .channel-more").click()); await ready(f.page, count); }
@@ -277,7 +277,10 @@ try {
     compare(scale.current.api, scale.before.api, "network retains true offset page requests");
     console.log(JSON.stringify({ comparisons, negativeControl: negative, scale }));
     assert.equal(scale.before.cards, 39600); assert.equal(scale.current.cards, 7200, "actual host creates only each new page's cards");
-    assert.ok(scale.current.elements < 60000, "actual host DOM work remains proportional to accepted rows");
+    assert.equal(await next.page.locator("#viewContent .media-watch-entry").count(), 1);
+    const watchCardElements = await next.page.locator("#viewContent .media-watch-card, #viewContent .media-watch-card > .media-watch-toggle").count();
+    assert.equal(watchCardElements, 14400, "each movie adds one wrapper and one independent watchlist action");
+    assert.ok(scale.current.elements - watchCardElements < 60000, "actual host DOM work remains proportional to accepted rows");
     await verifyFailure(nextSurface); await verifyRetirement(nextSurface); await verifyPhotoAdapter(nextSurface); await verifyAccount(nextSurface); const native = await verifyNative(nextSurface);
     assert.deepEqual(failures, []);
     console.log(JSON.stringify({ comparisons, native }));

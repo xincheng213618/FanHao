@@ -136,6 +136,7 @@ for (const [file, script] of [
   ['public/modules/novels/reader-refinements.css', 'verify:novel-book-recovery-browser'],
   ['tests/verify_novel_bookmarks.mjs', 'verify:novel-bookmarks-browser'],
   ['public/modules/novels/bookmarks.js', 'verify:novel-bookmarks-browser'],
+  ['public/modules/novels/bookmark-shelf.js', 'verify:novel-bookmarks-browser'],
   ['public/modules/novels/novel-page.js', 'verify:novel-bookmarks-browser'],
   ['public/modules/novels/reader-refinements.css', 'verify:novel-bookmarks-browser'],
   ['tests/verify_novel_author_browser.mjs', 'verify:novel-author-browser'],
@@ -200,6 +201,9 @@ for (const [file, script] of [
   ['public/modules/tools/tools-page.js', 'verify:tools-txt-browser'],
   ['public/modules/tools/txt-format-tool.js', 'verify:tools-txt-browser'],
   ['public/modules/tools/styles.css', 'verify:tools-txt-browser'],
+  ['src/modules/tools/server/txt-format-service.js', 'verify:tools-txt-browser'],
+  ['src/platform/server/stored-zip-stream.js', 'verify:tools-txt-browser'],
+  ['src/platform/server/stored-zip-stream.js', 'verify:manga-streams'],
   ['public/js/standalone-host.js', 'verify:tools-txt-browser'],
   ['tests/verify_music_playback_recovery.mjs', 'verify:music-playback-recovery-browser'],
   ['public/modules/music/player/engine.js', 'verify:music-playback-recovery-browser'],
@@ -1175,6 +1179,7 @@ for (const [file, command] of [['src/platform/server/archive-image-service.js', 
 }
 assert.deepEqual(selectScripts(['tests/fixtures/archive_image_helper_fixture.mjs']).scripts, ['verify:archive-images', 'verify:gallery-db', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_web_gallery_requests.mjs']).scripts, ['verify:photo-reader-browser', 'verify:gallery-image-retry', 'verify:gallery-page-jump', 'verify:gallery-reader-width', 'verify:gallery-visible-loading', 'verify:gallery-image-pan', 'verify:gallery-fullscreen-browser', 'verify:gallery-catalog-recovery-browser', 'verify:gallery-summary-recovery-browser', 'verify:photo-reader', 'verify:gallery-keyboard-pan-browser', 'verify:gallery-zoom-anchor-browser', 'verify:gallery-range-metadata-browser', 'verify:imports']);
+assert(selectScripts(['public/modules/media/watchlist.js']).scripts.includes('verify:photo-reader-browser'));
 assert.deepEqual(selectScripts(['tests/diagnose_web_gallery_navigation.mjs']).scripts, ['verify:photo-reader-browser', 'verify:gallery-image-retry', 'verify:gallery-page-jump', 'verify:gallery-reader-width', 'verify:gallery-visible-loading', 'verify:gallery-image-pan', 'verify:gallery-fullscreen-browser', 'verify:gallery-catalog-recovery-browser', 'verify:gallery-summary-recovery-browser', 'verify:photo-reader', 'verify:gallery-keyboard-pan-browser', 'verify:gallery-zoom-anchor-browser', 'verify:gallery-range-metadata-browser', 'verify:imports']);
 assert(selectScripts(['src/modules/media/server/runtime.js']).scripts.includes('verify:gallery-cover-async'));
 assert(selectScripts(['src/platform/server/video-probe-service.js']).scripts.includes('verify:video-probe-cache'));

@@ -7,6 +7,33 @@ body.music-mobile-view .music-mobile-playlist-hero {
   background: var(--surface-soft);
 }
 
+body.music-mobile-view .music-mobile-collection-search {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  margin: 0 0 8px;
+}
+
+body.music-mobile-view .music-mobile-collection-search :is(input, button) {
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+  padding: 0 12px;
+}
+
+body.music-mobile-view .music-mobile-collection-search small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+body.music-mobile-view .music-mobile-collection-search small:empty { display: none; }
+
 body.music-mobile-view .music-mobile-playlist-topbar {
   display: grid;
   min-height: 44px;

@@ -1,8 +1,40 @@
-import { fetchJson } from "./api.js?v=assets-76f4b0fadf4d";
+import { fetchJson } from "./api.js?v=assets-06c1d7f13464";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
 import { captureAccountOwner, isAccountOwnerCurrent } from "./account-owner.js";
+import { openMobileActionSheet } from "./mobile-action-sheet.js?v=assets-06c1d7f13464";
+
+const VIDEO_PICKER_PAGE_SIZE = 40;
+
+function normalizeFileSearch(value) {
+  return String(value ?? "").normalize("NFKC").toLowerCase().replaceAll("\\", "/");
+}
+
+function createVideoFileRow(video, onPlay, showPath = false) {
+  const row = document.createElement("div");
+  row.className = "file-row";
+  const info = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = video.title || video.name;
+  const meta = document.createElement("span");
+  const progress = video.progress?.percent ? ` · 看到 ${Math.floor(video.progress.percent)}%` : "";
+  meta.textContent = [video.ext, formatBytes(video.size)].filter(Boolean).join(" · ") + progress;
+  info.append(title, meta);
+  if (showPath && video.relativePath && video.relativePath !== title.textContent) {
+    const path = document.createElement("span");
+    path.className = "work-video-picker-path";
+    path.textContent = video.relativePath;
+    info.append(path);
+  }
+  const play = document.createElement("button");
+  play.type = "button";
+  play.textContent = video.progress?.percent ? "继续播放" : "播放";
+  play.setAttribute("aria-label", `${play.textContent} ${title.textContent}`);
+  play.addEventListener("click", () => { if (row.isConnected) onPlay(); });
+  row.append(info, play);
+  return row;
+}
 
 export function createAndroidVideoSection(context) {
   const { getActiveUrl } = context;
@@ -22,6 +54,7 @@ export function createAndroidVideoSection(context) {
     // Retire callbacks before pause/load can synchronously deliver media events.
     owner.rendering = null;
     rendering.controller.abort();
+    rendering.releaseSubtitle?.();
     if (rendering.fallbackTimer != null) window.clearTimeout(rendering.fallbackTimer);
     if (rendering.video) {
       rendering.video.pause();
@@ -47,7 +80,7 @@ export function createAndroidVideoSection(context) {
       || isActive.signal?.aborted || !isAccountOwnerCurrent(accountScope)) return null;
     deactivate();
     const owner = { mount, baseUrl, accountScope, isActive, section: scope.section,
-      workId: work.id, videoId: videoFile.id, showFiles: scope.showFiles,
+      workId: work.id, videoId: videoFile.id, showFiles: scope.showFiles, subtitleId: null,
       controller: new AbortController(), rendering: null };
     currentPlayback = owner;
     if (isActive.signal) {
@@ -91,24 +124,7 @@ export function createAndroidVideoSection(context) {
     const list = document.createElement("div");
     list.className = "file-list";
     for (const video of work.videos || []) {
-      const row = document.createElement("div");
-      row.className = "file-row";
-      const info = document.createElement("div");
-      const title = document.createElement("strong");
-      title.textContent = video.title || video.name;
-      const meta = document.createElement("span");
-      const progress = video.progress?.percent ? ` · 看到 ${Math.floor(video.progress.percent)}%` : "";
-      meta.textContent = `${video.ext || ""} · ${formatBytes(video.size)}${progress}`;
-      info.append(title, meta);
-
-      const play = document.createElement("button");
-      play.type = "button";
-      play.textContent = video.progress?.percent ? "继续播放" : "播放";
-      play.addEventListener("click", () => {
-        playVideo(playerMount, work, video, { autoplay: true });
-      });
-      row.append(info, play);
-      list.append(row);
+      list.append(createVideoFileRow(video, () => playVideo(playerMount, work, video, { autoplay: true })));
     }
 
     if (!work.videos?.length) {
@@ -120,6 +136,89 @@ export function createAndroidVideoSection(context) {
 
     section.append(list);
     return section;
+  }
+
+  function openFilePicker(section, work, trigger) {
+    let mount = null;
+    let currentWork = null;
+    let currentTrigger = trigger;
+    const sheet = openMobileActionSheet({ title: "视频文件", trigger: () => currentTrigger });
+    sheet.panel.classList.add("work-video-picker");
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "work-video-picker-search";
+    search.placeholder = "搜索文件名或路径";
+    search.autocapitalize = "off";
+    search.spellcheck = false;
+    search.setAttribute("aria-label", search.placeholder);
+    const status = document.createElement("div");
+    status.className = "work-video-picker-status";
+    status.setAttribute("role", "status");
+    const results = document.createElement("div");
+    results.className = "work-video-picker-results";
+    const list = document.createElement("div");
+    list.className = "file-list";
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "fanhao-sort-option work-video-picker-more";
+    more.textContent = "显示更多文件";
+    results.append(list, more);
+    sheet.panel.append(search, status, results);
+
+    let entries = [];
+    let matches = [];
+    let rendered = 0;
+    let composing = false;
+
+    function choose(video) {
+      if (mount && sheet.close()) void playVideo(mount, currentWork, video, { autoplay: true });
+    }
+
+    function appendMatches(moveFocus = false) {
+      const next = matches.slice(rendered, rendered + VIDEO_PICKER_PAGE_SIZE)
+        .map(({ video }) => createVideoFileRow(video, () => choose(video), true));
+      rendered += next.length;
+      list.append(...next);
+      more.hidden = rendered >= matches.length;
+      if (moveFocus) next[0]?.querySelector("button")?.focus();
+    }
+
+    function renderMatches() {
+      const terms = normalizeFileSearch(search.value).trim().split(/\s+/u).filter(Boolean);
+      matches = entries.filter(({ text }) => terms.every(term => text.includes(term)));
+      if (!entries.length) status.textContent = "这个作品没有视频文件";
+      else if (!matches.length) status.textContent = "没有匹配的视频文件";
+      else if (terms.length) status.textContent = `匹配 ${formatNumber(matches.length)} / ${formatNumber(entries.length)} 个文件`;
+      else status.textContent = `共 ${formatNumber(entries.length)} 个文件`;
+      list.replaceChildren();
+      rendered = 0;
+      results.scrollTop = 0;
+      appendMatches();
+    }
+
+    function update(nextSection, nextWork, nextTrigger) {
+      if (!sheet.overlay.isConnected) return;
+      mount = nextSection.querySelector(".android-player-mount");
+      currentWork = nextWork;
+      currentTrigger = nextTrigger;
+      entries = (nextWork.videos || []).map(video => ({
+        video, text: normalizeFileSearch([video.title, video.name, video.relativePath, video.ext].join(" "))
+      }));
+      renderMatches();
+    }
+
+    search.addEventListener("compositionstart", () => { composing = true; });
+    search.addEventListener("compositionend", () => { composing = false; renderMatches(); });
+    search.addEventListener("input", event => { if (!composing && !event.isComposing) renderMatches(); });
+    search.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !composing && !event.isComposing && matches.length === 1) {
+        event.preventDefault();
+        choose(matches[0].video);
+      }
+    });
+    more.addEventListener("click", () => appendMatches(true));
+    update(section, work, trigger);
+    return { update };
   }
 
   async function playDefaultVideo(section, work) {
@@ -142,6 +241,7 @@ export function createAndroidVideoSection(context) {
     mount.innerHTML = `<div class="loading-row">正在准备播放</div>`;
     revealDetailBlock(mount);
 
+    owner.subtitleTracks = readSubtitleTracks(owner);
     let playInfo = null;
     try {
       playInfo = await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, {
@@ -149,6 +249,7 @@ export function createAndroidVideoSection(context) {
       });
     } catch (error) {
       if (!ownsPlayback(owner)) return false;
+      owner.cancelSubtitleLookup?.();
       mount.innerHTML = "";
       mount.append(createPlayerErrorBox(error.message || "播放地址准备失败，请重试", {
         retry: () => { if (ownsPlayback(owner)) return playVideo(mount, work, videoFile, options); }
@@ -158,7 +259,7 @@ export function createAndroidVideoSection(context) {
     }
 
     if (!ownsPlayback(owner)) return false;
-    const opened = await openNativePlayer(activeUrl, work, videoFile, playInfo, resume);
+    const opened = await openNativePlayer(owner, work, videoFile, playInfo, resume);
     if (!ownsPlayback(owner)) return false;
     if (opened) {
       mount.innerHTML = "";
@@ -168,16 +269,69 @@ export function createAndroidVideoSection(context) {
     return renderAndroidPlayer(owner, work, videoFile, { ...options, playInfo, startAt: resume });
   }
 
-  async function openNativePlayer(activeUrl, work, videoFile, playInfo, resume) {
+  function readSubtitleTracks(owner) {
+    if (!owner.workId || !owner.videoId) return Promise.resolve([]);
+    const endpoint = `/api/works/${encodeURIComponent(owner.workId)}/subtitles`;
+    const query = new URLSearchParams({ videoId: owner.videoId });
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    owner.cancelSubtitleLookup = cancel;
+    owner.controller.signal.addEventListener("abort", cancel, { once: true });
+    const timer = window.setTimeout(cancel, 3000);
+    return fetchJson(owner.baseUrl, `${endpoint}?${query}`, { accountScope: owner.accountScope, signal: controller.signal })
+      .then(payload => {
+        if (controller.signal.aborted || String(payload?.workId) !== String(owner.workId)
+          || String(payload?.videoId) !== String(owner.videoId) || !Array.isArray(payload.tracks)) return [];
+        const tracks = [];
+        const ids = new Set();
+        const origin = new URL(owner.baseUrl).origin;
+        for (const track of payload.tracks) {
+          if (!track || typeof track.id !== "string" || !track.id || track.id.length > 256 || ids.has(track.id)) continue;
+          let url;
+          try { url = new URL(track.url, owner.baseUrl); } catch { continue; }
+          if (url.origin !== origin || url.username || url.password || url.hash
+            || url.pathname !== `${endpoint}/tracks/${encodeURIComponent(track.id)}`
+            || url.searchParams.get("videoId") !== String(owner.videoId)) continue;
+          url.search = new URLSearchParams({ videoId: owner.videoId }).toString();
+          if (url.href.length > 1024) continue;
+          const language = String(track.language || "und").slice(0, 35);
+          const label = String(track.label || track.id).slice(0, 200);
+          const chinese = /^zh(?:[-_]|$)|^(?:chi|zho)$/i.test(language) || /中文|简体|繁体|中字|簡體|繁體/.test(label);
+          tracks.push({ id: track.id, url: url.href, language, label, autoSelect: track.autoSelect === true && chinese });
+          ids.add(track.id);
+        }
+        return tracks;
+      })
+      .catch(() => [])
+      .finally(() => {
+        window.clearTimeout(timer);
+        owner.controller.signal.removeEventListener("abort", cancel);
+        owner.cancelSubtitleLookup = null;
+      });
+  }
+
+  async function openNativePlayer(owner, work, videoFile, playInfo, resume) {
     const plugin = nativePlayerPlugin();
     if (!plugin?.play) return false;
 
     try {
+      const tracks = await owner.subtitleTracks;
+      if (!ownsPlayback(owner)) return false;
+      const subtitleTracks = tracks.slice(0, 64);
+      const automaticTrack = tracks.find(track => track.autoSelect);
+      if (automaticTrack && !subtitleTracks.includes(automaticTrack)) subtitleTracks[63] = automaticTrack;
+      while (JSON.stringify(subtitleTracks).length > 64 * 1024) {
+        const last = subtitleTracks.pop();
+        if (last === automaticTrack) subtitleTracks[subtitleTracks.length - 1] = last;
+      }
+      const activeUrl = owner.baseUrl;
       const directUrl = absoluteUrl(activeUrl, `/media/video/${encodeURIComponent(videoFile.id)}`);
       const nativeFallbackInfo = playInfo?.mode === "direct" && playInfo.fallbackStreamUrl
         ? { ...playInfo, mode: "transcode", streamUrl: playInfo.fallbackStreamUrl }
         : playInfo;
       const fallbackUrl = nativeFallbackInfo ? streamUrlFor(activeUrl, nativeFallbackInfo, 0) : "";
+      const subtitleSeekFallbackUrl = subtitleTracks.length && nativeFallbackInfo?.mode === "remux"
+        ? streamUrlFor(activeUrl, transcodePlayInfo(playInfo, videoFile), 0) : "";
       const progressUrl = absoluteUrl(activeUrl, `/api/progress/${encodeURIComponent(videoFile.id)}`);
       const subtitle = [work.personDisplayName || work.personName, videoFile.ext, playInfo ? playModeText(playInfo) : "直连播放"].filter(Boolean).join(" · ");
       await plugin.play({
@@ -185,6 +339,7 @@ export function createAndroidVideoSection(context) {
         fallbackUrl,
         title: work.title || work.directoryName || videoFile.title || videoFile.name || "播放",
         subtitle,
+        ...(subtitleTracks.length ? { subtitleTracks, subtitleAccountOwner: owner.accountScope.owner, subtitleSeekFallbackUrl } : {}),
         progressUrl,
         workId: work.id,
         videoId: videoFile.id,
@@ -214,13 +369,18 @@ export function createAndroidVideoSection(context) {
       revealDetailBlock(mount);
     }
     try {
-      const playInfo = options.playInfo || await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, {
+      let playInfo = options.playInfo || await fetchJson(activeUrl, `/api/playinfo/${encodeURIComponent(videoFile.id)}`, {
         accountScope, signal: rendering.controller.signal
       });
+      const resume = Number(options.startAt ?? videoFile.progress?.position ?? 0);
+      if (playInfo.mode === "remux" && resume >= 1 && (await owner.subtitleTracks).length) {
+        // Copy mode can begin at an earlier keyframe. Re-encode resumed segments
+        // so the player and the shifted sidecar have the same time origin.
+        playInfo = transcodePlayInfo(playInfo, videoFile);
+      }
       if (!ownsRender()) return false;
       const isSegmentedStream = playInfo.mode !== "direct";
-      const resume = Number(options.startAt ?? videoFile.progress?.position ?? 0);
-      const streamOffset = isSegmentedStream ? Math.max(0, resume) : 0;
+      const streamOffset = isSegmentedStream ? Math.max(0, Math.floor(resume)) : 0;
       mount.innerHTML = "";
       const playerShell = document.createElement("div");
       playerShell.className = "android-player-shell";
@@ -327,6 +487,7 @@ export function createAndroidVideoSection(context) {
       });
 
       playerShell.append(video, label, status, actions);
+      attachWebSubtitles({ owner, rendering, video, playerShell, streamOffset, ownsRender });
       const requestPlay = (onRejected) => {
         if (!ownsRender()) return;
         try {
@@ -343,6 +504,7 @@ export function createAndroidVideoSection(context) {
           playInfo,
           streamOffset,
           status,
+          fullscreenTarget: playerShell,
           isCurrent: ownsRender,
           requestPlay,
           onSeek: (nextPosition, autoplay) => {
@@ -385,6 +547,97 @@ export function createAndroidVideoSection(context) {
       revealDetailBlock(mount);
       return false;
     }
+  }
+
+  function attachWebSubtitles({ owner, rendering, video, playerShell, streamOffset, ownsRender }) {
+    let request = null;
+    let trackElement = null;
+    let objectUrl = "";
+    const clear = () => {
+      request?.abort();
+      request = null;
+      trackElement?.remove();
+      trackElement = null;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = "";
+    };
+    rendering.releaseSubtitle = clear;
+    void owner.subtitleTracks.then(tracks => {
+      if (!ownsRender() || !tracks.length) return;
+      const row = document.createElement("div");
+      row.className = "android-player-subtitles";
+      const select = document.createElement("select");
+      select.setAttribute("aria-label", "字幕轨道");
+      const status = document.createElement("span");
+      status.setAttribute("role", "status");
+      const retry = createPlayerButton("重试字幕", () => void selectTrack());
+      retry.hidden = true;
+      const choices = [{ id: "", label: "关闭字幕" }, ...tracks];
+      for (const track of choices) {
+        const option = document.createElement("option");
+        option.value = track.id;
+        option.textContent = track.label;
+        select.append(option);
+      }
+      select.value = owner.subtitleId ?? tracks.find(track => track.autoSelect)?.id ?? "";
+      row.append(select, status, retry);
+      playerShell.append(row);
+
+      async function selectTrack() {
+        if (!ownsRender()) return;
+        clear();
+        status.textContent = "";
+        retry.hidden = true;
+        const track = tracks.find(item => item.id === select.value);
+        if (!track) return;
+        const url = new URL(track.url);
+        url.searchParams.set("offsetSeconds", String(-streamOffset));
+        const controller = request = new AbortController();
+        const isCurrent = () => ownsRender() && request === controller;
+        status.textContent = "正在读取字幕…";
+        const showError = () => {
+          if (!isCurrent()) return;
+          status.textContent = "字幕加载失败";
+          retry.hidden = false;
+        };
+        try {
+          const headers = { "X-FanHao-Client": "android" };
+          if (owner.accountScope.owner !== "pending") headers["X-FanHao-Account-Owner"] = owner.accountScope.owner;
+          const response = await fetch(url.href, {
+            signal: controller.signal,
+            redirect: "error",
+            headers
+          });
+          const maxVttBytes = 8 * 1024 * 1024;
+          if (!response.ok || !/^text\/vtt(?:\s*;|$)/i.test(response.headers.get("Content-Type") || "")
+            || Number(response.headers.get("Content-Length")) > maxVttBytes) {
+            throw new Error("Subtitle unavailable");
+          }
+          const data = await response.blob();
+          if (!isCurrent()) return;
+          if (!data.size || data.size > maxVttBytes) throw new Error("Invalid subtitle size");
+          objectUrl = URL.createObjectURL(data);
+          const element = trackElement = document.createElement("track");
+          element.kind = "subtitles";
+          element.label = track.label;
+          element.srclang = track.language;
+          element.src = objectUrl;
+          element.addEventListener("load", () => { if (isCurrent()) status.textContent = ""; });
+          element.addEventListener("error", showError);
+          video.append(element);
+          element.track.mode = "showing";
+        } catch {
+          showError();
+        }
+      }
+
+      select.addEventListener("change", () => {
+        if (!ownsRender()) return;
+        owner.subtitleId = select.value;
+        void selectTrack();
+      });
+      void selectTrack();
+    });
   }
 
   function streamUrlFor(activeUrl, playInfo, startAt) {
@@ -478,7 +731,7 @@ export function createAndroidVideoSection(context) {
     return box;
   }
 
-  function createSegmentedControls({ video, playInfo, streamOffset, status, onSeek, isCurrent, requestPlay }) {
+  function createSegmentedControls({ video, playInfo, streamOffset, status, fullscreenTarget, onSeek, isCurrent, requestPlay }) {
     const controls = document.createElement("div");
     controls.className = "android-stream-controls";
 
@@ -566,7 +819,8 @@ export function createAndroidVideoSection(context) {
       if (document.fullscreenElement) {
         document.exitFullscreen?.();
       } else {
-        video.requestFullscreen?.();
+        const target = fullscreenTarget.requestFullscreen ? fullscreenTarget : video;
+        target.requestFullscreen?.().catch(() => {});
       }
     });
 
@@ -582,6 +836,7 @@ export function createAndroidVideoSection(context) {
 
   return {
     createVideoList,
+    openFilePicker,
     playDefaultVideo,
     deactivate
   };

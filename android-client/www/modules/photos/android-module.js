@@ -1,6 +1,9 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-76f4b0fadf4d";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-06c1d7f13464";
 import { PHOTO_ALBUM_SORT_OPTIONS, PHOTO_COLLECTION_SORT_OPTIONS } from "../../platform/content-index/photo-catalog.js";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-76f4b0fadf4d";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { discardPhotoPosition, readPhotoPositions, savePhotoPosition } from "./reading-positions.js";
+import { openPhotoResumeHistory } from "./resume-history.js?v=assets-06c1d7f13464";
+import { openMangaCatalogSearch } from "./manga-catalog-search.js?v=assets-06c1d7f13464";
 
 const DEFAULT_CATEGORY = "我喜欢的";
 const CATEGORY_PRIORITY = [DEFAULT_CATEGORY, "all", "[XIUREN] 秀人网", "[COS]", "内购私拍", "日本写真集", "韩国写真集", "国模"];
@@ -33,7 +36,7 @@ export function createAndroidModule({ host }) {
     },
     routes: [
       { view: "channel", match: (params) => ["photo", "manga"].includes(host.normalizeChannelMode(params.mode)), render: (params, guard) => channelViews.renderChannel(params, guard) },
-      { view: "photoDetail", render: (params, guard) => channelViews.renderPhotoDetail(params.id, guard) },
+      { view: "photoDetail", render: (params, guard) => channelViews.renderPhotoDetail(params.id, guard, params.browseToken) },
       { view: "mangaDetail", render: (params, guard) => channelViews.renderMangaDetail(params.id, guard) },
       { view: "mangaChapter", render: (params, guard) => channelViews.renderMangaChapter(params.id, params.chapterIndex, guard) }
     ],
@@ -58,7 +61,11 @@ function createChannelContext(host, updateChrome, showPhotoCatalog) {
     getMangaImageLimit: host.limits.getMangaImages,
     increaseMangaImageLimit: host.limits.increaseMangaImages,
     openInLibrary: host.navigation.openInLibrary,
-    showPhotoDetail: (id) => host.navigation.showView("photoDetail", { id }, { push: true }),
+    showPhotoDetail: (id, { browseToken, replace = false } = {}) => host.navigation.showView(
+      "photoDetail",
+      { id, browseToken },
+      replace ? { skipHistory: true, replaceHistory: true } : { push: true }
+    ),
     showPhotoCatalog,
     showMangaDetail: (id) => host.navigation.showView("mangaDetail", { id }, { push: true }),
     showMangaLibrary: () => host.navigation.showView("channel", { mode: "manga" }, { resetStack: true }),
@@ -79,6 +86,8 @@ function createChannelContext(host, updateChrome, showPhotoCatalog) {
     requestConfirmation: host.ui.confirm,
     goBack: host.navigation.goBack,
     getMediaViewer: () => host.mediaViewer,
+    openMangaCatalogSearch,
+    photoPositions: { read: readPhotoPositions, save: savePhotoPosition, discard: discardPhotoPosition, openHistory: openPhotoResumeHistory },
     recordRecentContent: host.recent.record,
     onChannelFavoriteChange: host.favorites.onChannelFavoriteChange,
     updateModuleChrome: updateChrome,

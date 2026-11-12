@@ -7,7 +7,8 @@ import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepar
 import { captureCachedJsonFence } from "../../android-client/www/js/cache.js";
 
 export const channelAccountBoundary = Object.freeze({
-  accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, captureCachedJsonFence
+  accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner, captureCachedJsonFence, queueMicrotask,
+  createMediaWatchlist: () => null // Browser layout fixtures exercise the real local storage and sheet.
 });
 
 // Deterministic DOM/event/clock boundaries only. Production constructs the menu,

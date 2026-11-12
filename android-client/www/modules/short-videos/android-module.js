@@ -1,5 +1,5 @@
-import { createShortVideoViews } from "./index.js?v=assets-76f4b0fadf4d";
-import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-76f4b0fadf4d";
+import { createShortVideoViews } from "./index.js?v=assets-06c1d7f13464";
+import { DEFAULT_SORT, FOLLOWING_AUTHOR_SORT_OPTIONS, SHORT_VIDEO_SORT_OPTIONS, normalizeFollowingAuthorFilter, normalizeFollowingAuthorSort, normalizeSearchTab, normalizeSortForSource, normalizeSource } from "./shared.js?v=assets-06c1d7f13464";
 
 const sortDialogClosers = new WeakMap();
 
@@ -64,6 +64,7 @@ function renderShortVideoChrome({ container, view, params }, host, shortVideoVie
           author: "all",
           source: value,
           sort: normalizeSortForSource(value, params.sort),
+          ...(params.media && params.media !== "all" ? { media: params.media } : {}),
           ...(value === "following" ? {
             authorSort: normalizeFollowingAuthorSort(params.authorSort),
             authorFilter: normalizeFollowingAuthorFilter(params.authorFilter)
@@ -99,6 +100,7 @@ function openShortVideoSearch(host, shortVideoViews, overrides = {}) {
     source: authorScoped ? source : "all",
     tab: authorScoped ? "authors" : normalizeSearchTab(state.searchTab),
     sort: normalizeSortForSource(source, state.sort),
+    ...(state.media && state.media !== "all" ? { media: state.media } : {}),
     ...(source === "authors" ? { account: state.authorAccountStatus || "all" } : {})
   }, { push: true });
   host.ui.scrollToTop();

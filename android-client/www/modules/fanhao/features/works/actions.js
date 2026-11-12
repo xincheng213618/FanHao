@@ -1,8 +1,8 @@
-import { postJson } from "../../../../js/api.js?v=assets-76f4b0fadf4d";
+import { postJson } from "../../../../js/api.js?v=assets-06c1d7f13464";
 import { updateCachedWorkDetail } from "./detail-cache.js";
 import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
-import { openFanhaoSheet } from "../../sheet.js?v=assets-76f4b0fadf4d";
-import { syncFavoriteButton } from "./favorite-folders.js?v=assets-76f4b0fadf4d";
+import { openFanhaoSheet } from "../../sheet.js?v=assets-06c1d7f13464";
+import { syncFavoriteButton } from "./favorite-folders.js?v=assets-06c1d7f13464";
 export function createWorkActions(deps) {
   const {
     detailErrorMessage,
@@ -34,14 +34,14 @@ export function createWorkActions(deps) {
       options: [
         { label: "迁移作品 / 查看状态", hidden: !work?.id || work.missingLocal, select: () => workMove?.openForWork?.(work) },
         {
-          label: work.favoriteFolderName ? `移动收藏 · 当前 ${work.favoriteFolderName}` : "移动到收藏夹",
-          hidden: !work.favorite,
+          label: work.favoriteFolderName ? `收藏到… · 当前 ${work.favoriteFolderName}` : "收藏到…",
+          hidden: !work?.id || work.missingLocal || !favoriteFolders,
           closeOnSelect: false,
           select: (_value, _button, close) => {
             close();
-            favoriteFolders?.openMovePicker(work, {
+            favoriteFolders.openSavePicker(work, {
               trigger,
-              onMoved: () => syncFavoriteButton(favoriteButton, work)
+              onSaved: () => syncFavoriteButton(favoriteButton, work)
             });
           }
         },

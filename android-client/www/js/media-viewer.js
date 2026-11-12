@@ -1,3 +1,5 @@
+import { createImagePageJump } from "./image-page-jump.js";
+
 export function createMediaViewer() {
   const AUTO_HIDE_MS = 2500;
   const SWIPE_THRESHOLD = 46;
@@ -15,6 +17,8 @@ export function createMediaViewer() {
   let swipeTracking = false;
   let activeImage = null;
   let activeImageUrl = "";
+  let pageJumpForm = null;
+  let pageJumpButton = null;
 
   function bindImageTrigger(element, imageUrl, title = "") {
     if (!element || !imageUrl) return;
@@ -139,6 +143,39 @@ export function createMediaViewer() {
     });
     progress.addEventListener("change", commitScrub);
     controlBar.append(progressRow, progress);
+    if (options.pageJump) {
+      const jump = createImagePageJump({
+        getPageCount: () => viewerState.items.length,
+        isCurrent: () => Boolean(viewerState),
+        onJump: page => {
+          const index = viewerState.items.findIndex(item => item.page === page);
+          if (index < 0) throw new Error("没有找到这张图片。");
+          dismissPageJump();
+          return showImageAt(index, { keepControls: true });
+        }
+      });
+      pageJumpForm = jump.form;
+      pageJumpForm.hidden = true;
+      pageJumpButton = document.createElement("button");
+      pageJumpButton.type = "button";
+      pageJumpButton.className = "media-viewer-page-jump-toggle";
+      pageJumpButton.textContent = "跳到页码";
+      pageJumpButton.setAttribute("aria-expanded", "false");
+      pageJumpButton.addEventListener("click", () => {
+        if (dismissPageJump()) return;
+        pageJumpForm.hidden = false;
+        pageJumpButton.setAttribute("aria-expanded", "true");
+        setControlsVisible(true, false);
+        jump.input.focus({ preventScroll: true });
+      });
+      overlay.addEventListener("keydown", event => {
+        if (event.key !== "Escape" || !dismissPageJump()) return;
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      progressRow.append(pageJumpButton);
+      controlBar.append(pageJumpForm);
+    }
 
     shell.append(stage, head, controlBar);
     overlay.append(shell);
@@ -161,7 +198,7 @@ export function createMediaViewer() {
     const index = Number.isFinite(requestedIndex) && requestedIndex >= 0
       ? Math.min(list.length - 1, requestedIndex)
       : Math.max(0, matchedIndex);
-    return { items: list, index, sourceKey: String(options.sourceKey || "") };
+    return { items: list, index, sourceKey: String(options.sourceKey || ""), onImageReady: options.onImageReady };
   }
 
   function normalizeViewerItems(items = []) {
@@ -169,7 +206,8 @@ export function createMediaViewer() {
       ? items
           .map((item) => ({
             url: typeof item === "string" ? item : item?.url,
-            title: typeof item === "string" ? "" : item?.title || item?.name || ""
+            title: typeof item === "string" ? "" : item?.title || item?.name || "",
+            ...(Number.isSafeInteger(item?.page) ? { page: item.page } : {})
           }))
           .filter((item) => item.url)
       : [];
@@ -194,7 +232,8 @@ export function createMediaViewer() {
     viewerState = {
       items: list,
       index,
-      sourceKey: viewerState.sourceKey
+      sourceKey: viewerState.sourceKey,
+      onImageReady: viewerState.onImageReady
     };
     isScrubbing = false;
     renderCurrentImage();
@@ -229,6 +268,7 @@ export function createMediaViewer() {
       progress.disabled = viewerState.items.length <= 1;
     }
     if (progressValue) progressValue.textContent = `第 ${viewerState.index + 1} / ${viewerState.items.length} 张`;
+    if (pageJumpButton) pageJumpButton.hidden = viewerState.items.length < 2;
     overlay.querySelector(".media-viewer-nav.prev")?.toggleAttribute("disabled", viewerState.items.length <= 1 || viewerState.index <= 0);
     overlay.querySelector(".media-viewer-nav.next")?.toggleAttribute("disabled", viewerState.items.length <= 1 || viewerState.index >= viewerState.items.length - 1);
     preloadNearbyImages();
@@ -253,7 +293,11 @@ export function createMediaViewer() {
     setImageStatus("loading");
     const isCurrent = () => activeImage === img && overlay?.contains(img);
     img.onload = () => {
-      if (isCurrent()) setImageStatus("ready");
+      if (isCurrent()) {
+        setImageStatus("ready");
+        const current = viewerState?.items[viewerState.index];
+        if (current?.url === activeImageUrl) viewerState.onImageReady?.(current);
+      }
     };
     img.onerror = () => {
       if (isCurrent()) {
@@ -443,7 +487,17 @@ export function createMediaViewer() {
   }
 
   function toggleControls() {
+    if (dismissPageJump()) return;
     setControlsVisible(!controlsVisible);
+  }
+
+  function dismissPageJump() {
+    if (!pageJumpForm || pageJumpForm.hidden) return false;
+    pageJumpForm.hidden = true;
+    pageJumpButton.setAttribute("aria-expanded", "false");
+    pageJumpButton.focus({ preventScroll: true });
+    setControlsVisible(true);
+    return true;
   }
 
   function suppressSyntheticClick() {
@@ -459,7 +513,7 @@ export function createMediaViewer() {
     controlsVisible = visible;
     overlay.classList.toggle("media-viewer-controls-hidden", !visible);
     window.clearTimeout(controlsHideTimer);
-    if (!visible || !scheduleHide || isScrubbing) return;
+    if (!visible || !scheduleHide || isScrubbing || pageJumpForm?.hidden === false) return;
     controlsHideTimer = window.setTimeout(() => {
       setControlsVisible(false, false);
     }, AUTO_HIDE_MS);
@@ -486,6 +540,8 @@ export function createMediaViewer() {
     overlay.remove();
     overlay = null;
     viewerState = null;
+    pageJumpForm = null;
+    pageJumpButton = null;
     controlsVisible = true;
     isScrubbing = false;
     suppressNextClick = false;
@@ -504,9 +560,10 @@ export function createMediaViewer() {
     if (!isOpen()) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      close();
+      if (!dismissPageJump()) close();
       return;
     }
+    if (event.target?.closest?.(".image-page-jump")) return;
     if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       showRelativeImage(event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1, { keepControls: true });

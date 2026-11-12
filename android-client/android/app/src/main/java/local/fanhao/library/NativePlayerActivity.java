@@ -1,6 +1,7 @@
 package local.fanhao.library;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -17,17 +18,20 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.Nullable;
+import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.datasource.HttpDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.PlayerView;
 
 @UnstableApi
@@ -38,6 +42,9 @@ public class NativePlayerActivity extends Activity {
   public static final String EXTRA_FALLBACK_URL = "fallbackUrl";
   public static final String EXTRA_TITLE = "title";
   public static final String EXTRA_SUBTITLE = "subtitle";
+  public static final String EXTRA_SUBTITLE_TRACKS = "subtitleTracks";
+  public static final String EXTRA_SUBTITLE_ACCOUNT_OWNER = "subtitleAccountOwner";
+  public static final String EXTRA_SUBTITLE_SEEK_FALLBACK_URL = "subtitleSeekFallbackUrl";
   public static final String EXTRA_PROGRESS_URL = "progressUrl";
   public static final String EXTRA_WORK_ID = "workId";
   public static final String EXTRA_VIDEO_ID = "videoId";
@@ -46,6 +53,10 @@ public class NativePlayerActivity extends Activity {
   public static final String EXTRA_DURATION = "duration";
   public static final String EXTRA_PROGRESS_RECEIVER = "progressReceiver";
   public static final String EXTRA_PROGRESS_AUTH_TOKEN = "progressAuthToken";
+  public static final String EXTRA_PREVIOUS_EPISODE = "previousEpisode";
+  public static final String EXTRA_NEXT_EPISODE = "nextEpisode";
+  public static final String EXTRA_EPISODE_STEP = "episodeStep";
+  public static final String EXTRA_EPISODE_PICKER = "episodePicker";
 
   private final Handler handler = new Handler(Looper.getMainLooper());
   private NativePlaybackProgress progress;
@@ -64,6 +75,7 @@ public class NativePlayerActivity extends Activity {
   private boolean fallbackTried;
   private long lastProgressAt;
   private long streamOffsetMs;
+  private NativePlayerSubtitles subtitles;
 
   private final Runnable statusHideRunnable = new Runnable() {
     @Override
@@ -95,10 +107,14 @@ public class NativePlayerActivity extends Activity {
 
     String url = stringExtra(EXTRA_URL);
     fallbackUrl = stringExtra(EXTRA_FALLBACK_URL);
+    String subtitleSeekFallbackUrl = stringExtra(EXTRA_SUBTITLE_SEEK_FALLBACK_URL);
     title = stringExtra(EXTRA_TITLE);
     subtitle = stringExtra(EXTRA_SUBTITLE);
     progressUrl = stringExtra(EXTRA_PROGRESS_URL);
     workId = stringExtra(EXTRA_WORK_ID);
+    subtitles = NativePlayerSubtitles.read(
+      url, workId, stringExtra(EXTRA_VIDEO_ID), stringExtra(EXTRA_SUBTITLE_TRACKS)
+    );
     ResultReceiver progressReceiver = getIntent().getParcelableExtra(EXTRA_PROGRESS_RECEIVER);
     progress = createProgress(progressReceiver, progressUrl, getIntent().getStringExtra(EXTRA_PROGRESS_AUTH_TOKEN));
     probedDurationSeconds = getIntent().getDoubleExtra(EXTRA_DURATION, 0.0);
@@ -106,7 +122,23 @@ public class NativePlayerActivity extends Activity {
 
     buildUi();
     hideSystemBars();
-    player = new ExoPlayer.Builder(this).build();
+    ExoPlayer.Builder builder = new ExoPlayer.Builder(this);
+    if (!subtitles.isEmpty()) {
+      builder.setMediaSourceFactory(new DefaultMediaSourceFactory(subtitles.createDataSourceFactory(
+        this, url, getIntent().getStringExtra(EXTRA_PROGRESS_AUTH_TOKEN), stringExtra(EXTRA_SUBTITLE_ACCOUNT_OWNER)
+      )).setLoadOnlySelectedTracks(true));
+      playerView.setShowSubtitleButton(true);
+    }
+    player = builder.build();
+    if (!subtitles.isEmpty()) {
+      player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
+        .setPreferredTextLanguages()
+        .setPreferredTextLabels(subtitles.preferredLabels())
+        .setPreferredTextRoleFlags(0)
+        .setSelectUndeterminedTextLanguage(false)
+        .setIgnoredTextSelectionFlags(C.SELECTION_FLAG_FORCED)
+        .build());
+    }
     playerView.setPlayer(player);
     player.addListener(new Player.Listener() {
       @Override
@@ -131,7 +163,10 @@ public class NativePlayerActivity extends Activity {
           fallbackTried = true;
           showStatus("直连失败，切换智能播放", true);
           long fallbackPositionMs = Math.max(0, streamOffsetMs + player.getCurrentPosition());
-          String fallbackPlaybackUrl = withFallbackSeek(fallbackUrl, fallbackPositionMs);
+          String fallbackSource = !subtitles.isEmpty() && fallbackPositionMs >= 1000 && hasText(subtitleSeekFallbackUrl)
+            && ServerAuthSession.origin(url).equals(ServerAuthSession.origin(subtitleSeekFallbackUrl))
+            ? subtitleSeekFallbackUrl : fallbackUrl;
+          String fallbackPlaybackUrl = withFallbackSeek(fallbackSource, fallbackPositionMs);
           streamOffsetMs = streamOffsetFromUrl(fallbackPlaybackUrl);
           playUrl(fallbackPlaybackUrl, 0);
           return;
@@ -300,7 +335,34 @@ public class NativePlayerActivity extends Activity {
       ViewGroup.LayoutParams.WRAP_CONTENT
     ));
     bar.addView(textColumn, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+    if (getIntent().getBooleanExtra(EXTRA_PREVIOUS_EPISODE, false)) {
+      addEpisodeButton(bar, "上一集", new Intent().putExtra(EXTRA_EPISODE_STEP, -1));
+    }
+    if (getIntent().getBooleanExtra(EXTRA_EPISODE_PICKER, false)) {
+      addEpisodeButton(bar, "选集", new Intent().putExtra(EXTRA_EPISODE_PICKER, true));
+    }
+    if (getIntent().getBooleanExtra(EXTRA_NEXT_EPISODE, false)) {
+      addEpisodeButton(bar, "下一集", new Intent().putExtra(EXTRA_EPISODE_STEP, 1));
+    }
     return bar;
+  }
+
+  private void addEpisodeButton(LinearLayout bar, String label, Intent result) {
+    Button button = new Button(this, null, android.R.attr.borderlessButtonStyle);
+    button.setText(label);
+    button.setTextColor(Color.WHITE);
+    button.setTextSize(14);
+    button.setShadowLayer(dp(2), 0, dp(1), 0xCC000000);
+    button.setGravity(Gravity.CENTER);
+    button.setMinWidth(dp(68));
+    button.setPadding(dp(6), 0, dp(6), 0);
+    button.setFocusable(true);
+    button.setOnClickListener(view -> {
+      if (isFinishing()) return;
+      setResult(RESULT_OK, result);
+      finish();
+    });
+    bar.addView(button, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(48)));
   }
 
   private void removeControllerScrims() {
@@ -348,7 +410,10 @@ public class NativePlayerActivity extends Activity {
   private void playUrl(String url, long positionMs) {
     if (player == null || !hasText(url)) return;
     Log.i(TAG, "playUrl: " + url);
-    player.setMediaItem(MediaItem.fromUri(Uri.parse(url)));
+    player.setMediaItem(new MediaItem.Builder()
+      .setUri(Uri.parse(url))
+      .setSubtitleConfigurations(subtitles.configurations(streamOffsetMs))
+      .build());
     player.prepare();
     if (positionMs > 5000) player.seekTo(positionMs);
     player.setPlayWhenReady(true);

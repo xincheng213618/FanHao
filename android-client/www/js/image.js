@@ -1,4 +1,4 @@
-import { captureCachedImageFence, readCachedImage, writeCachedImage } from "./cache.js?v=assets-76f4b0fadf4d";
+import { captureCachedImageFence, readCachedImage, writeCachedImage } from "./cache.js?v=assets-06c1d7f13464";
 
 const IMAGE_PREPARE_RETRY_DELAYS_MS = Object.freeze([700, 900, 1200, 1600, 2200, 3000]);
 
@@ -21,7 +21,8 @@ export function portraitUrlForPerson(person) {
 }
 
 export function imageUrlForWork(work) {
-  return work?.coverId ? `/media/image/${encodeURIComponent(work.coverId)}` : work?.cachedCover?.coverUrl || work?.remoteCoverUrl || "";
+  return work?.coverId ? `/media/image/${encodeURIComponent(work.coverId)}`
+    : work?.cachedCover?.coverUrl || work?.remoteCoverUrl || work?.infoSummary?.imageUrl || "";
 }
 
 export async function loadPreviewImage(target, imageUrl, options = {}) {

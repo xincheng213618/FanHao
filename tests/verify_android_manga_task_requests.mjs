@@ -218,6 +218,19 @@ test("current update continues after ordinary module deactivation and refreshes 
   assert.equal(h.calls.writes[0][3].fence.account.origin, h.A);
   assert.equal(h.calls.fetch.length, 3);
 });
+test("a partial update publishes saved chapters and keeps its failure state", async input => {
+  const h = harness(input); h.render(); h.network.push({ job: running("current") });
+  await h.tasks.startMangaUpdate(comic("current"));
+  const poll = h.tasks.watchMangaUpdate("same-comic");
+  const partial = { ...running("current"), status: "failed", comicAvailable: true, failedChapters: 1,
+    message: "采集未完成，1 章未完整保存" };
+  h.network.push({ job: partial }, { comic: comic("saved before failure"), update: partial });
+  await h.tick(); await poll;
+  assert(h.els.viewContent.textContent.includes("saved before failure"));
+  assert(h.els.viewContent.textContent.includes(partial.message));
+  assert.equal(h.calls.writes.length, 1);
+  assert.equal(h.calls.fetch.length, 3);
+});
 test("new source same-ID update can start and old poll finalization cannot remove its monitor", async input => {
   const h = harness(input), old = deferred(), fresh = deferred(); h.render("old"); h.tasks.seed(running());
   h.network.push(old); const oldPoll = h.tasks.watchMangaUpdate("same-comic"); await h.tick();

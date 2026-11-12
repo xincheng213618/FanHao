@@ -425,6 +425,47 @@
   font-weight: 700;
 }
 
+.work-video-picker {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  justify-self: center;
+  width: min(100%, 560px);
+  height: min(480px, 78dvh);
+}
+
+.work-video-picker-search {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 0 12px;
+  font: inherit;
+}
+
+.work-video-picker-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.work-video-picker-results {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.work-video-picker .file-row .work-video-picker-path {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.work-video-picker-more {
+  width: 100%;
+  margin-top: 8px;
+}
+
 .fanhao-sort-option {
   min-height: 44px;
   border: 1px solid var(--line);
@@ -457,6 +498,34 @@ body.fanhao-work-detail-view .bottom-nav {
   display: none;
 }
 
+.person-detail-work-search,
+.person-detail-work-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.person-detail-work-search input,
+.person-detail-work-search button,
+.person-detail-work-error button {
+  min-height: 44px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+}
+
+.person-detail-work-search input { flex: 1 1 auto; width: 100%; min-width: 0; }
+.person-detail-work-search button,
+.person-detail-work-error button { flex: 0 0 auto; color: var(--blue); font-weight: 800; }
+.person-detail-work-search :is(input, button):focus-visible,
+.person-detail-work-error button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.person-detail-work-results { display: grid; min-width: 0; gap: 8px; }
+.person-detail-work-count { margin: 0; color: var(--muted); font-size: 12px; }
+.person-detail-work-error { justify-content: space-between; }
+
 .person-detail-work-toolbar,
 .work-detail-toolbar,
 .fanhao-search-result-toolbar {
@@ -485,6 +554,10 @@ body.fanhao-work-detail-view .bottom-nav {
 
 .work-detail-toolbar {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.work-detail-toolbar.has-video-picker {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .person-detail-work-toolbar > button,
@@ -1000,6 +1073,135 @@ body.fanhao-search-page-view .bottom-nav {
   color: var(--blue);
 }
 
+.favorite-search-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.favorite-search-form :is(input, button) {
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+}
+
+.favorite-search-form button { min-width: 44px; font-size: 13px; font-weight: 750; }
+.favorite-search-form button[hidden] { display: none; }
+.favorite-search-form :is(input, button):focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+.favorite-folder-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.favorite-folder-controls > .favorite-folder-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.favorite-folder-controls > button,
+.favorite-batch-toolbar button,
+.favorite-batch-retry {
+  flex: 0 0 auto;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--blue);
+  padding: 6px 11px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 850;
+  touch-action: manipulation;
+}
+
+.favorite-batch-active {
+  padding-bottom: 92px;
+}
+
+.favorite-batch-active .work-card[aria-checked] .work-card-grid-person {
+  pointer-events: none;
+}
+
+.favorite-batch-active .work-card[aria-checked] .work-cover-frame::after {
+  position: absolute;
+  z-index: 2;
+  inset-block-start: 5px;
+  inset-inline-end: 5px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: rgba(7, 12, 24, .65);
+  color: #fff;
+  content: "";
+  pointer-events: none;
+}
+
+.favorite-batch-active .work-card[aria-checked="true"] .work-cover-frame::after {
+  background: var(--mobile-accent);
+  content: "✓";
+}
+
+.favorite-batch-active .work-card[aria-checked="true"] .work-cover-frame {
+  outline: 2px solid var(--mobile-accent);
+  outline-offset: -2px;
+}
+
+.favorite-batch-toolbar {
+  position: fixed;
+  z-index: 29;
+  inset-inline: 0;
+  bottom: calc(var(--fanhao-bottom-nav-height) + 5px);
+  display: flex;
+  width: min(calc(100% - 16px), 544px);
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin-inline: auto;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--nav-surface);
+  box-shadow: 0 3px 14px rgba(7, 12, 24, .18);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.favorite-batch-toolbar .favorite-batch-move {
+  background: var(--button-soft);
+}
+
+.favorite-batch-toolbar button:disabled {
+  opacity: .52;
+}
+
+.favorite-batch-message,
+.favorite-batch-notice {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.favorite-batch-message:empty,
+.favorite-batch-notice:empty {
+  display: none;
+}
+
 .favorite-folder-overlay {
   position: fixed;
   inset: 0;
@@ -1015,6 +1217,24 @@ body.fanhao-search-page-view .bottom-nav {
   border: 0;
   background: rgba(7, 12, 24, .46);
 }
+
+.work-card-folder-button {
+  justify-self: start;
+  min-height: 44px;
+  min-width: 44px;
+  max-width: 100%;
+  border: 0;
+  border-radius: 6px;
+  padding: 4px 6px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.work-card-folder-button.active { color: var(--mobile-accent); }
+.work-card-folder-button:focus-visible { outline: 2px solid var(--mobile-accent); outline-offset: -2px; }
 
 .favorite-folder-sheet {
   position: relative;

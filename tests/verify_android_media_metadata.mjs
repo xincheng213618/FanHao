@@ -82,6 +82,7 @@ function harness(input = source, options = {}) {
     readCachedJson: async () => options.cached || null, writeCachedJson: async (...args) => { calls.cacheWrites.push(plain(args)); },
     async fetchJson(base, path, request = {}) {
       calls.fetch.push({ base, path, request }); assert.equal(base, ORIGIN, "Fixture never leaves synthetic origin");
+      if (path.startsWith("/api/gallery-media/continue-watching?")) return { items: [] };
       if (queued.length) { const next = queued.shift(); if (next instanceof Error) throw next; return await next; }
       if (path.startsWith("/api/image-library/items?")) return listPayload(item, mode);
       if (path.startsWith("/api/gallery-media/")) return { item: detailItem };

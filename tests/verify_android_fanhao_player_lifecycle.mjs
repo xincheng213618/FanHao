@@ -14,6 +14,9 @@ const read = (path) => fs.readFileSync(new URL(`../${path}`, import.meta.url), "
 const playerSource = read("android-client/www/js/android-player.js").replace(/^import[^\n]*\n/gm, "")
   .replace("export function createAndroidVideoSection", "function createAndroidVideoSection");
 const detailSource = read("android-client/www/modules/fanhao/detail-views.js");
+const toolbarSource = read("android-client/www/modules/fanhao/features/works/detail-toolbar.js")
+  .replace(/^import[^\n]*\n/gm, "").replace(/^export /gm, "");
+const sheetSource = read("android-client/www/js/mobile-action-sheet.js").replace(/^export /gm, "");
 function take(name) {
   const start = new RegExp(`^  async function ${name}\\(`, "m").exec(detailSource)?.index;
   assert(start != null, `actual detail entry ${name}`);
@@ -41,6 +44,9 @@ function fixture({ player = playerSource, details = detailMethods, native = fals
     constructor(tag) {
       this.tag = tag; this.children = []; this.parent = null; this.rooted = false; this.events = new Map();
       this.attributes = new Map(); this.style = {}; this.dataset = {}; this.paused = true; this.ended = false;
+      this.className = ""; this.value = ""; this.classList = {
+        add: name => { this.className = [this.className, name].filter(Boolean).join(" "); }
+      };
       this.duration = 120; this.currentTime = 0; this.readyState = 4;
       this.playCalls = 0; this.pauseCalls = 0; this.loadCalls = 0;
     }
@@ -53,6 +59,8 @@ function fixture({ player = playerSource, details = detailMethods, native = fals
     }
     removeChild(node) { this.children = this.children.filter(child => child !== node); node.parent = null; return node; }
     remove() { this.parent?.removeChild(this); }
+    contains(node) { return node === this || this.children.some(child => child.contains(node)); }
+    focus() { document.activeElement = this; }
     set innerHTML(value) { this.html = String(value); for (const child of this.children) child.parent = null; this.children = []; }
     get innerHTML() { return this.html || ""; }
     replaceChildren(...nodes) { this.innerHTML = ""; this.append(...nodes); }
@@ -60,11 +68,14 @@ function fixture({ player = playerSource, details = detailMethods, native = fals
       const values = this.events.get(name) || []; values.push({ callback, once: options.once === true }); this.events.set(name, values);
     }
     removeEventListener(name, callback) { this.events.set(name, (this.events.get(name) || []).filter(entry => entry.callback !== callback)); }
-    emit(name) {
+    emit(name, values = {}) {
+      const event = { type: name, target: this, currentTarget: this, defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; }, ...values };
       for (const entry of [...(this.events.get(name) || [])]) {
         if (entry.once) this.removeEventListener(name, entry.callback);
-        entry.callback({ type: name, target: this, currentTarget: this });
+        entry.callback(event);
       }
+      return event;
     }
     set src(value) { this.attributes.set("src", String(value)); }
     get src() { return this.attributes.get("src") || ""; }
@@ -83,6 +94,9 @@ function fixture({ player = playerSource, details = detailMethods, native = fals
   }
   const document = { createElement: tag => new Element(tag), body: new Element("body") };
   document.body.rooted = true;
+  document.querySelector = selector => document.body.querySelector(selector);
+  const viewContent = document.createElement("main");
+  document.body.append(viewContent);
   const window = globalThis.window = {
     setTimeout(callback, delay) { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
     clearTimeout: id => timers.delete(id),
@@ -95,27 +109,31 @@ function fixture({ player = playerSource, details = detailMethods, native = fals
       posts.push({ url, options });
       return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) });
     }
+    if (/\/subtitles$/.test(new URL(url).pathname)) {
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ tracks: [] }) });
+    }
     const request = { url, options, ...deferred() }; reads.push(request); return request.promise;
   };
   const playerContext = vm.createContext({ window, document, fetchJson, captureAccountOwner, isAccountOwnerCurrent,
     formatBytes, formatNumber, formatTime, absoluteUrl, URL, URLSearchParams, AbortController, Date, Promise,
     createDetailSectionTitle: () => new Element("div"), revealDetailBlock() {} });
-  const factory = vm.runInContext(player + "\ncreateAndroidVideoSection;", playerContext);
+  const factory = vm.runInContext(sheetSource + "\n" + player + "\ncreateAndroidVideoSection;", playerContext);
+  const closeSheet = vm.runInContext("closeMobileActionSheet", playerContext);
   const videoSection = factory({ getActiveUrl: () => base });
   const ui = () => new Element("div");
   const detailContext = vm.createContext({
     videoSection, workMove: { detach() {}, attach: async () => {} }, setActiveBottom() {},
-    els: { viewContent: document.body, viewKicker: {}, viewTitle: {}, viewMeta: {} },
+    els: { viewContent, viewKicker: {}, viewTitle: {}, viewMeta: {} },
     extractWorkCode: () => "", cacheAgeText: () => "", setDetailChromeTitle() {}, workPersonName: () => "",
     createWorkDetailHero(value, play) { heroPlays.push(play); return ui(); }, createWorkFactPanel: () => null,
     previewMedia: { render: () => null }, infoSection: { createInlineInfoPanel: () => null },
-    createWorkPeoplePanel: () => null, createWorkDetailToolbar: ui, renderMessage() {}, detailErrorMessage: error => error.message,
+    createWorkPeoplePanel: () => null, document, formatNumber, renderMessage() {}, detailErrorMessage: error => error.message,
     workDetailDataService: { load(id, options) { const request = { id, options, ...deferred() }; detailsReads.push(request); return request.promise; } },
     getPersonWorkYear: () => "all", getActiveUrl: () => base, personDetailPath: () => "/fixture-person",
     getWorkListRequestState: () => ({}), getWorksLimit: () => 18, findPersonInLibrary: () => null,
     pageDataService: { load(url, path, options) { const request = { url, path, options, ...deferred() }; detailsReads.push(request); return request.promise; } }
   });
-  vm.runInContext(details + "\nthis.detailEntries = { renderWorkDetail, renderPersonDetail };", detailContext);
+  vm.runInContext(toolbarSource + "\n" + details + "\nthis.detailEntries = { renderWorkDetail, renderPersonDetail };", detailContext);
   const guard = () => {
     const controller = new AbortController();
     const active = () => !controller.signal.aborted;
@@ -137,9 +155,10 @@ function fixture({ player = playerSource, details = detailMethods, native = fals
       play: heroPlays.at(-1) };
   };
   return { reads, posts, launches, detailsReads, heroPlays, videoSection, document, entries: detailContext.detailEntries,
-    guard, reply, cacheDetail, media: () => document.body.querySelector("video"),
+    guard, reply, cacheDetail, closeSheet, media: () => document.body.querySelector("video"),
+    emitWindow(name) { for (const listener of listeners.get(name) || []) listener(); },
     async fresh(route, value, unchanged = false) { route.request.resolve({ data: page(value), unchanged }); await route.pending; await flush(); },
-    cleanup() { videoSection.deactivate(); timers.clear(); }
+    cleanup() { closeSheet(false); videoSection.deactivate(); timers.clear(); }
   };
 }
 
@@ -228,6 +247,75 @@ async function verify({ player = playerSource, details = detailMethods, only = "
     await f.fresh(route, route.value, true);
     assert.equal(f.media(), old); assert.equal(old.currentTime, 19); assert.equal(old.pauseCalls, 0);
   });
+  await test("only multi-file works have the file picker", async f => {
+    const route = f.cacheDetail(work("work", ["A"]));
+    assert.equal(f.document.querySelector(".work-video-picker-action"), null);
+    await f.fresh(route, work("work", ["A", "B"]));
+    assert(f.document.querySelector(".work-video-picker-action"));
+    assert.equal(f.document.querySelector(".work-detail-toolbar").children.length, 3);
+    assert.equal(f.reads.length, 0, "building the toolbar does not prepare playback");
+  });
+  await test("file picker searches beyond mounted rows and plays the chosen file", async f => {
+    const value = work("many", Array.from({ length: 1001 }, (_, index) => `video-${index}`));
+    Object.assign(value.videos.at(-1), {
+      title: "同名标题", name: "SYN 1080p.mkv", relativePath: "Season/Subfolder/Final.mkv",
+      progress: { percent: 32, position: 38 }
+    });
+    const route = f.cacheDetail(value);
+    f.document.querySelector(".work-video-picker-action").emit("click");
+    const search = f.document.querySelector(".work-video-picker-search");
+    const status = f.document.querySelector(".work-video-picker-status");
+    const more = f.document.querySelector(".work-video-picker-more");
+    const rows = () => f.document.querySelector(".file-list").children;
+    assert.equal(rows().length, 40, "opening the picker mounts one page of rows");
+    more.emit("click");
+    assert.equal(rows().length, 80);
+    assert.equal(f.document.activeElement, rows()[40].querySelector("button"));
+    search.value = "not a match";
+    search.emit("input");
+    assert.equal(rows().length, 0);
+    assert.equal(status.textContent, "没有匹配的视频文件");
+    search.emit("compositionstart");
+    search.value = "ＳＵＢＦＯＬＤＥＲ\\ＦＩＮＡＬ １０８０Ｐ";
+    search.emit("input", { isComposing: true });
+    assert.equal(rows().length, 0, "IME composition keeps the existing search results");
+    search.emit("compositionend");
+    assert.equal(rows().length, 1, "query searches path and file name across all rows");
+    assert.equal(rows()[0].querySelector(".work-video-picker-path").textContent, "Season/Subfolder/Final.mkv");
+    assert.equal(more.hidden, true);
+    assert.equal(f.reads.length, 0, "search and pagination do not prepare playback");
+    assert(search.emit("keydown", { key: "Enter" }).defaultPrevented);
+    assert.equal(f.document.querySelector(".work-video-picker"), null);
+    assert.equal(new URL(f.reads[0].url).pathname, "/api/playinfo/video-1000");
+    await f.reply(0);
+    assert.equal(f.launches[0]?.videoId, "video-1000");
+    assert.equal(f.launches[0]?.position, 38);
+    await f.fresh(route, value, true);
+  }, { native: true });
+  await test("open file picker follows detail refresh and restores the live opener", async f => {
+    const route = f.cacheDetail(work("work", ["A", "B"]));
+    const originalTrigger = f.document.querySelector(".work-video-picker-action");
+    originalTrigger.emit("click");
+    const search = f.document.querySelector(".work-video-picker-search");
+    search.value = "B";
+    search.emit("input");
+    const removedRow = f.document.querySelector(".file-list").children[0];
+    await f.fresh(route, work("work", ["A", "BC"]));
+    const liveTrigger = f.document.querySelector(".work-video-picker-action");
+    assert.notEqual(liveTrigger, originalTrigger);
+    assert.equal(search.value, "B");
+    assert.equal(f.document.querySelector(".file-row").querySelector("strong").textContent, "BC", "picker shows refreshed files");
+    removedRow.querySelector("button").emit("click");
+    assert.equal(f.reads.length, 0);
+    assert(f.closeSheet(), "the shared Back handler can close the picker");
+    assert.equal(f.document.activeElement, liveTrigger);
+    liveTrigger.emit("click");
+    const liveButton = f.document.querySelector(".file-row").querySelector("button");
+    f.emitWindow("fanhaoViewWillRender");
+    assert.equal(f.document.querySelector(".work-video-picker"), null);
+    liveButton.emit("click");
+    assert.equal(f.reads.length, 0, "retired sheet clicks cannot launch playback");
+  });
 }
 
 try {
@@ -243,7 +331,9 @@ try {
     ["detail route signal", detailMethods.replace("isActive, preservePlayback: true", "isActive: () => true, preservePlayback: true"),
       "detail forwards its real route signal", /actual detail mount must forward its route signal/],
     ["prepare before DOM retirement", detailMethods.replace("const playbackSection = videoSection.createVideoList(work, {", 'els.viewContent.innerHTML = "";\n      const playbackSection = videoSection.createVideoList(work, {'),
-      "same-work fresh detail preserves pending play", /fresh same-work detail must keep the pending playback section/]
+      "same-work fresh detail preserves pending play", /fresh same-work detail must keep the pending playback section/],
+    ["open picker refresh", detailMethods.replace("if (filePicker) filePicker.update", "if (false) filePicker.update"),
+      "open file picker follows detail refresh and restores the live opener", /picker shows refreshed files/]
   ];
   for (const [name, details, only, expected] of mutations) {
     assert.notEqual(details, detailMethods, `${name}: actual wiring must change`);

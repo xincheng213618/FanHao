@@ -8,15 +8,20 @@ export function createWorkDetailToolbar(options = {}) {
   toolbar.className = "work-detail-toolbar";
   toolbar.setAttribute("aria-label", "作品详情快捷操作");
 
-  toolbar.append(
-    createToolbarButton("播放", playStatus(videos.length, progress), options.onPlay, {
-      disabled: videos.length === 0,
-      pendingLabel: "正在打开"
-    }),
-    createToolbarButton("资料", targetStatus(options.factsTarget, ".work-fact-row"), () => revealTarget(options.factsTarget), {
-      disabled: !options.factsTarget
-    })
-  );
+  toolbar.append(createToolbarButton("播放", playStatus(videos.length, progress), options.onPlay, {
+    disabled: videos.length === 0,
+    pendingLabel: "正在打开"
+  }));
+  if (videos.length > 1 && options.onBrowseFiles) {
+    const browse = createToolbarButton("视频文件", `${formatNumber(videos.length)} 个`, options.onBrowseFiles);
+    browse.className = "work-video-picker-action";
+    browse.setAttribute("aria-haspopup", "dialog");
+    toolbar.classList.add("has-video-picker");
+    toolbar.append(browse);
+  }
+  toolbar.append(createToolbarButton("资料", targetStatus(options.factsTarget, ".work-fact-row"), () => revealTarget(options.factsTarget), {
+    disabled: !options.factsTarget
+  }));
   return toolbar;
 }
 
@@ -38,7 +43,7 @@ function createToolbarButton(label, value, action, options = {}) {
       current.textContent = options.pendingLabel;
     }
     try {
-      await action?.();
+      await action?.(button);
     } catch {
       // The target section or player owns its detailed error state.
     } finally {

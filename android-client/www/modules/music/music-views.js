@@ -1,27 +1,30 @@
-import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-76f4b0fadf4d";
+import { deleteJson as deleteMusicApiJson, fetchJson as fetchMusicApiJson, postJson as postMusicApiJson, putJson as putMusicApiJson } from "../../js/api.js?v=assets-06c1d7f13464";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "../../js/account-owner.js";
-import { absoluteUrl } from "../../js/image.js?v=assets-76f4b0fadf4d";
+import { absoluteUrl } from "../../js/image.js?v=assets-06c1d7f13464";
 import { formatBytes, formatCompact, formatNumber } from "../../js/format.js";
-import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-76f4b0fadf4d";
-import { createMusicSearchController } from "./music-search-controller.js?v=assets-76f4b0fadf4d";
-import { createMusicSheets } from "./music-sheets.js?v=assets-76f4b0fadf4d";
-import { createMusicHomeView } from "./music-home-view.js?v=assets-76f4b0fadf4d";
-import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-76f4b0fadf4d";
-import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-76f4b0fadf4d";
-import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-76f4b0fadf4d";
-import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-76f4b0fadf4d";
-import { createMusicListPagination } from "./music-list-pagination.js?v=assets-76f4b0fadf4d";
-import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-76f4b0fadf4d";
-import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-76f4b0fadf4d";
-import { createMusicLibraryView } from "./music-library-view.js?v=assets-76f4b0fadf4d";
-import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-76f4b0fadf4d";
+import { buildTrackVersionGroups, findTrackVersionGroup, getTrackVersionInfo } from "./track-versions.js?v=assets-06c1d7f13464";
+import { createMusicSearchController } from "./music-search-controller.js?v=assets-06c1d7f13464";
+import { createMusicSheets } from "./music-sheets.js?v=assets-06c1d7f13464";
+import { createMusicHomeView } from "./music-home-view.js?v=assets-06c1d7f13464";
+import { createMusicPlaylistView } from "./music-playlist-view.js?v=assets-06c1d7f13464";
+import { createMusicAutoCollectionView } from "./music-auto-collection-view.js?v=assets-06c1d7f13464";
+import { createMusicHistoryActionsView } from "./music-history-actions-view.js?v=assets-06c1d7f13464";
+import { createMusicListRequestBuilder } from "./music-list-request.js?v=assets-06c1d7f13464";
+import { createMusicListPagination } from "./music-list-pagination.js?v=assets-06c1d7f13464";
+import { createMusicBatchQueue } from "./music-batch-queue.js?v=assets-06c1d7f13464";
+import { openMusicQueueSearch } from "./music-queue-search.js?v=assets-06c1d7f13464";
+import { openMusicQueuePosition } from "./music-queue-position.js?v=assets-06c1d7f13464";
+import { createMusicCatalogueRequests } from "./music-catalogue-requests.js?v=assets-06c1d7f13464";
+import { createMusicCatalogueRefresh } from "./music-catalogue-refresh.js?v=assets-06c1d7f13464";
+import { createMusicLibraryView } from "./music-library-view.js?v=assets-06c1d7f13464";
+import { createMusicLibrarySort } from "./music-library-sort.js?v=assets-06c1d7f13464";
 import { createMusicControlFocus } from "./music-control-focus.js";
-import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-76f4b0fadf4d";
-import { createMusicCollectionView } from "./music-collection-view.js?v=assets-76f4b0fadf4d";
-import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-76f4b0fadf4d";
-import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-76f4b0fadf4d";
-import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-76f4b0fadf4d";
-import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-76f4b0fadf4d";
+import { createMusicTrackPreferences } from "./music-track-preferences.js?v=assets-06c1d7f13464";
+import { createMusicCollectionView } from "./music-collection-view.js?v=assets-06c1d7f13464";
+import { createMusicProgressWriter } from "./music-progress-writer.js?v=assets-06c1d7f13464";
+import { createMusicProgressSession, createMusicPlayedReport } from "./progress-session.js?v=assets-06c1d7f13464";
+import { captureMusicProgressOwner, sendMusicProgress } from "./progress-transport.js?v=assets-06c1d7f13464";
+import { createMusicAudioSourceStore } from "./music-audio-source.js?v=assets-06c1d7f13464";
 import {
   DEFAULT_MODE,
   DEFAULT_SORT,
@@ -80,9 +83,9 @@ import {
   clearPlaybackQueuePreference,
   readLastTrackPreference,
   writeLastTrackPreference
-} from "./music-state.js?v=assets-76f4b0fadf4d";
+} from "./music-state.js?v=assets-06c1d7f13464";
 
-export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-76f4b0fadf4d";
+export { selectTrackByVersionStrategy, shuffleTrackQueue } from "./music-state.js?v=assets-06c1d7f13464";
 
 const DEFAULT_LIMIT = 80;
 const AUTO_COLLECTION_LIMIT = 300;
@@ -105,6 +108,7 @@ export function createMusicViews(deps) {
     dashboard: true,
     searchScope: "all",
     query: "",
+    collectionQuery: "",
     sort: DEFAULT_SORT,
     artistSort: "count",
     albumSort: "updated",
@@ -218,6 +222,8 @@ export function createMusicViews(deps) {
   let progressBindings = [];
   const mountedTrackLists = new WeakMap();
   let mountedQueueList = null;
+  let queueSearch = null;
+  let queuePosition = null;
   let playbackRowsGeneration = 0;
   let playbackRowsKey = "";
   let currentLyricIndex = -1;
@@ -226,6 +232,9 @@ export function createMusicViews(deps) {
   let sleepTimerInterval = 0;
   let pendingSearchFocus = null;
   let mountedSearchController = null;
+  let collectionSearchRequest = null;
+  let collectionSearchError = "";
+  let collectionDataOwner = null;
   let lyricSearchController = null;
   let mountedSearchToken = 0;
   let audioFadeToken = 0;
@@ -250,6 +259,19 @@ export function createMusicViews(deps) {
   let mountedMusicShell = null;
   let mountedFullPlayer = null;
   let musicRenderGuard = null;
+  let batchListOwner = null;
+  let batchQueueOwner = null;
+  let previewQueue = null;
+  const batchQueue = createMusicBatchQueue({
+    isCurrent: ownsBatchList,
+    appendTracks: appendBatchTracks,
+    createPlaylist: createPlaylistFromBatch,
+    listPlaylists: listPlaylistsForBatch,
+    addToPlaylist: addTracksToPlaylistFromBatch,
+    openPlaylist: playlist => openPlaylistSearchMatch({ kind: "user", item: playlist }),
+    defaultPlaylistName,
+    formatNumber
+  });
   const trackPreferences = createMusicTrackPreferences({
     send: (owner, id, field, value) => fetchMusicApiJson(owner.sourceUrl,
       `/api/music/tracks/${encodeURIComponent(id)}/${field}`, {
@@ -282,7 +304,8 @@ export function createMusicViews(deps) {
     collapseDuplicateTracks,
     render: renderMusicUiPreservingSearch,
     setLoadingState: setMusicPaginationLoadingState,
-    appendPage: appendMusicTrackPage
+    appendPage: appendMusicTrackPage,
+    replaceQueue: replacePreviewQueue
   });
   const {
     clearSearchHistory,
@@ -544,8 +567,12 @@ export function createMusicViews(deps) {
     controlFocus.retain(focusIntent);
     let routeCurrent = () => false;
     try {
+      retireBatchList();
+      ownsBatchPlaybackQueue();
       cancelMusicPagination();
       mountedSearchController?.abort();
+      cancelCollectionSearch();
+      collectionSearchError = "";
       moduleActive = true;
       const generation = ++musicRenderGeneration;
       const activeUrl = getActiveUrl();
@@ -629,6 +656,11 @@ export function createMusicViews(deps) {
     if (state.mode === "artists") state.searchScope = "artists";
     else if (state.mode === "albums") state.searchScope = "albums";
     else if (state.mode !== "library") state.searchScope = "all";
+    state.collectionQuery = collectionScope() ? state.query : "";
+    if (collectionScope()) {
+      state.query = "";
+      state.searchOpen = false;
+    }
     if (!["library", "artists", "albums"].includes(state.mode)) {
       state.artistId = "";
       state.albumId = "";
@@ -639,10 +671,12 @@ export function createMusicViews(deps) {
   }
 
   async function loadMusic(renderGuard = null) {
+    retireBatchList();
     cancelMusicPagination();
     const requestUrl = getActiveUrl();
-    const { mode, query } = state;
+    const { mode, query, collectionQuery } = state;
     const isSearchCurrent = () => requestUrl === getActiveUrl() && state.mode === mode && state.query === query
+      && (mode !== "smart" || state.collectionQuery === collectionQuery)
       && (!renderGuard || renderGuard());
     const unifiedSearch = state.mode === "library" && Boolean(state.query);
     const lyricOnlySearch = unifiedSearch && state.searchScope === "lyrics";
@@ -680,6 +714,7 @@ export function createMusicViews(deps) {
       const isCurrent = () => isSearchCurrent() && isAccountOwnerCurrent(account);
       isCurrent.signal = renderGuard?.signal;
       if (!isCurrent()) return;
+      validateCollectionSearch(data);
       applyLoadedMusicData(data);
       els.viewTitle.textContent = musicTitle();
       els.viewMeta.textContent = musicMeta(data);
@@ -697,13 +732,14 @@ export function createMusicViews(deps) {
       if (!isSearchCurrent()) return;
       state.loading = false;
       state.status = error?.message || "音乐库读取失败";
+      if (collectionQuery && mode === "smart") collectionSearchError = state.status;
       renderShell();
     } finally {
       sections?.release();
     }
   }
 
-  function applyLoadedMusicData(data = {}) {
+  function applyLoadedMusicData(data = {}, { keepQueue = false } = {}) {
     const rawTracks = Array.isArray(data.tracks) ? data.tracks : [];
     const visibleTracks = state.mode === "library" && state.query ? collapseDuplicateTracks(rawTracks) : rawTracks;
     state.data = ["artists", "albums"].includes(state.mode)
@@ -712,8 +748,15 @@ export function createMusicViews(deps) {
     state.summary = data.summary || state.summary;
     state.smartPlaylist = data.smartPlaylist || selectedSmartPlaylist();
     state.playlist = data.playlist || selectedPlaylist();
-    if (!["artists", "albums"].includes(state.mode) && !state.query) state.queue = visibleTracks;
+    if (!keepQueue && !["artists", "albums"].includes(state.mode) && !state.query
+      && !(state.mode === "smart" && state.collectionQuery)) replacePreviewQueue(visibleTracks);
+    const sourceUrl = getActiveUrl();
+    const account = accountPayloadOwner(data) || captureAccountOwner(sourceUrl);
+    batchListOwner = { sourceUrl, account, key: batchListKey() };
+    const scope = collectionScope();
+    collectionDataOwner = scope ? { scope, sourceUrl, account, query: state.mode === "smart" ? state.collectionQuery : "" } : null;
     state.hasMore = Boolean(data.hasMore);
+    if (keepQueue && pendingTrackSelection) return;
     state.loading = false;
     state.status = state.mode === "artists"
       ? (Array.isArray(data.artists) && data.artists.length ? "" : "没有匹配的歌手")
@@ -888,6 +931,7 @@ export function createMusicViews(deps) {
     controlFocus.retain(focusIntent);
     let requestCurrent = () => false;
     try {
+      retireBatchList();
       cancelMusicPagination();
       const value = String(query || "").trim();
       if (normalizeSearchComparison(state.query) !== normalizeSearchComparison(value)) {
@@ -1210,10 +1254,18 @@ export function createMusicViews(deps) {
 
   function renderShell() {
     if (!moduleActive || !els.viewContent) return;
+    closeQueuePosition(false);
     reconcileTrackPreferences();
+    const focusedCollectionInput = els.viewContent.querySelector(".music-mobile-collection-search input");
+    const collectionFocus = focusedCollectionInput?.dataset.query === state.collectionQuery
+      && document.activeElement === focusedCollectionInput
+      ? { scope: focusedCollectionInput.dataset.scope, value: focusedCollectionInput.value,
+          start: focusedCollectionInput.selectionStart, end: focusedCollectionInput.selectionEnd,
+          direction: focusedCollectionInput.selectionDirection } : null;
     const capturedSearchFocus = controlFocus.current() ? null : captureMusicSearchFocus();
     if (capturedSearchFocus) pendingSearchFocus = capturedSearchFocus;
     const searchFocus = pendingSearchFocus;
+    const batchFocus = batchQueue.captureFocus(els.viewContent);
     playbackSettingsSession = null;
     progressBindings = [];
     currentLyricIndex = -1;
@@ -1243,15 +1295,11 @@ export function createMusicViews(deps) {
           collectionView.renderBrowserContent()
         );
       } else if (playlistDetail) {
-        const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
         shell.append(renderPlaylistHero(), renderPlaylistListHeader());
-        if (state.loading || tracks.length) shell.append(renderTrackList({ showLoadMore: false }));
-        else shell.append(renderPlaylistEmpty());
+        shell.append(renderCollectionSearch(), renderCollectionSearchResults());
       } else if (autoCollectionDetail) {
-        const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
         shell.append(renderAutoCollectionHero(), renderAutoCollectionListHeader());
-        if (state.loading || tracks.length) shell.append(renderTrackList());
-        else shell.append(renderAutoCollectionEmpty());
+        shell.append(renderCollectionSearch(), renderCollectionSearchResults());
       } else if (focusedLibrary) {
         const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
         shell.append(focusedLibraryView.renderHeader(openMusicSearch), focusedLibraryView.renderToolbar());
@@ -1295,6 +1343,17 @@ export function createMusicViews(deps) {
     els.viewMeta.textContent = state.status || musicMeta(state.data);
     updatePlaybackUi();
     restoreMusicSearchFocus(searchFocus);
+    if (collectionFocus?.scope === collectionScope()) {
+      const input = shell.querySelector(".music-mobile-collection-search input");
+      if (input && !input.disabled) {
+        input.value = collectionFocus.value;
+        input.focus({ preventScroll: true });
+        input.setSelectionRange?.(collectionFocus.start, collectionFocus.end, collectionFocus.direction || "none");
+      }
+    }
+    batchQueue.restoreFocus(els.viewContent, batchFocus);
+    if (queueSearch?.isCurrent()) queueSearch.refresh();
+    else closeQueueSearch(false);
     if (state.fullscreen) updateLyricHighlight(true);
     if (state.pendingCurrentReveal && !state.loading && !state.fullscreen) {
       schedulePendingCurrentReveal();
@@ -1737,7 +1796,9 @@ export function createMusicViews(deps) {
     if (clear) clear.hidden = !state.query;
     const nextSummary = renderSearchSummaryRegion();
     summary.replaceChildren(...nextSummary.childNodes);
+    const batchFocus = batchQueue.captureFocus(content);
     content.replaceChildren(renderSearchContent());
+    batchQueue.restoreFocus(content, batchFocus);
     refreshMountedSearchSuggestions();
     els.viewTitle.textContent = musicTitle();
     els.viewMeta.textContent = state.status || musicMeta(state.data);
@@ -2536,7 +2597,8 @@ export function createMusicViews(deps) {
     const content = renderTrackList({
       tracks: visibleGroups.map((item) => item.primary).filter(Boolean),
       versionGroups: visibleGroups,
-      showLoadMore: !preview
+      showLoadMore: !preview,
+      batchQueue: !preview
     });
     const group = renderSearchResultGroup("songs", "歌曲", searchVersionGroupMeta(versionGroups, tracks.length), content, {
       onPlay: tracks.length ? playSearchResults : null,
@@ -3014,6 +3076,202 @@ export function createMusicViews(deps) {
     return selected ? [selected, ...rest] : rest;
   }
 
+  function collectionScope() {
+    if (state.mode === "history") return "history";
+    if (state.mode === "playlist" && state.playlistId) return `playlist:${state.playlistId}`;
+    if (state.mode === "smart" && state.smartId) return `smart:${state.smartId}`;
+    return "";
+  }
+
+  function collectionDataCurrent() {
+    return collectionDataOwner?.scope === collectionScope() && collectionDataOwner.sourceUrl === getActiveUrl()
+      && isAccountOwnerCurrent(collectionDataOwner.account)
+      && (state.mode !== "smart" || collectionDataOwner.query === state.collectionQuery);
+  }
+
+  function validateCollectionSearch(data) {
+    if (state.mode === "smart" && state.collectionQuery && data?.smartPlaylist?.id !== state.smartId) {
+      throw new Error("无法确认当前智能歌单，请重试");
+    }
+  }
+
+  function cancelCollectionSearch() {
+    if (!collectionSearchRequest) return;
+    window.clearTimeout(collectionSearchRequest.timer);
+    collectionSearchRequest.controller.abort();
+    collectionSearchRequest = null;
+  }
+
+  function applyCollectionSearch(value, immediate = false) {
+    const scope = collectionScope();
+    const owner = mountedMusicShell;
+    if (!scope || !ownsMusicShell(owner) || owner.sourceUrl !== getActiveUrl() || !isAccountOwnerCurrent(owner.account)
+      || musicRenderGuard?.signal?.aborted || (musicRenderGuard && !musicRenderGuard())) return;
+    const query = String(value || "").trim();
+    if (query === state.collectionQuery && !collectionSearchError) {
+      if (immediate && collectionSearchRequest?.timer) {
+        window.clearTimeout(collectionSearchRequest.timer);
+        void readCollectionSearch(collectionSearchRequest);
+      }
+      return;
+    }
+    cancelCollectionSearch();
+    cancelMusicPagination();
+    batchQueue.reset();
+    collectionSearchError = "";
+    state.collectionQuery = query;
+    const route = musicRouteParams();
+    replaceViewParams?.("music", route, { replaceHistory: true });
+    if (ownsMusicShell(owner)) owner.route = JSON.stringify(route);
+    if (state.mode === "smart") {
+      if (!pendingTrackSelection) state.loading = false;
+      const sourceUrl = getActiveUrl();
+      const request = { scope, sourceUrl, query, generation: musicRenderGeneration, guard: musicRenderGuard,
+        account: captureAccountOwner(sourceUrl), controller: new AbortController(), timer: 0 };
+      collectionSearchRequest = request;
+      if (immediate) void readCollectionSearch(request);
+      else request.timer = window.setTimeout(() => void readCollectionSearch(request), 240);
+    }
+    refreshCollectionSearchResults();
+  }
+
+  async function readCollectionSearch(request) {
+    request.timer = 0;
+    const isCurrent = () => collectionSearchRequest === request && moduleActive && !request.controller.signal.aborted
+      && request.generation === musicRenderGeneration && request.scope === collectionScope()
+      && request.sourceUrl === getActiveUrl() && request.query === state.collectionQuery
+      && request.guard === musicRenderGuard && !request.guard?.signal?.aborted && (!request.guard || request.guard())
+      && isAccountOwnerCurrent(request.account);
+    try {
+      if (!isCurrent()) return;
+      const data = await fetchJson(request.sourceUrl, musicListPath(), { timeoutMs: 18000, signal: request.controller.signal });
+      if (!isCurrent()) return;
+      validateCollectionSearch(data);
+      applyLoadedMusicData(data, { keepQueue: true });
+    } catch (error) {
+      if (isCurrent()) collectionSearchError = error?.message || "智能歌单搜索失败";
+    } finally {
+      const refresh = isCurrent();
+      if (collectionSearchRequest === request) collectionSearchRequest = null;
+      if (refresh) refreshCollectionSearchResults();
+    }
+  }
+
+  function collectionSearchDisabled() {
+    return (state.loading && !pendingTrackSelection)
+      || (!collectionDataCurrent() && !collectionSearchRequest && !collectionSearchError);
+  }
+
+  function renderCollectionSearch() {
+    const form = document.createElement("form");
+    form.className = "music-mobile-collection-search";
+    form.setAttribute("role", "search");
+    const input = document.createElement("input");
+    input.type = "search";
+    input.setAttribute("enterkeyhint", "search");
+    input.setAttribute("aria-label", state.mode === "history" ? "搜索最近播放" : "搜索当前歌单");
+    input.placeholder = state.mode === "history" ? "搜索最近播放" : "搜索歌单中的歌曲";
+    input.dataset.scope = collectionScope();
+    input.dataset.query = state.collectionQuery;
+    input.value = state.collectionQuery;
+    input.disabled = collectionSearchDisabled();
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.textContent = "清除";
+    clear.disabled = input.disabled || !input.value;
+    const account = captureAccountOwner(getActiveUrl());
+    const ownsInput = () => form.isConnected && ownsMusicShell(mountedMusicShell)
+      && mountedMusicShell.shell.contains(form) && input.dataset.scope === collectionScope()
+      && mountedMusicShell.sourceUrl === getActiveUrl() && isAccountOwnerCurrent(account);
+    let composing = false;
+    input.addEventListener("compositionstart", () => { composing = true; });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      if (ownsInput()) applyCollectionSearch(input.value);
+    });
+    input.addEventListener("input", event => {
+      if (ownsInput() && !composing && !event.isComposing) applyCollectionSearch(input.value);
+    });
+    clear.addEventListener("click", () => {
+      if (!ownsInput()) return;
+      input.value = "";
+      input.focus();
+      applyCollectionSearch("", true);
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      if (ownsInput() && !composing) applyCollectionSearch(input.value, true);
+    });
+    const status = document.createElement("small");
+    status.setAttribute("role", "status");
+    status.textContent = collectionSearchStatus();
+    form.append(input, clear, status);
+    return form;
+  }
+
+  function localCollectionPositions(tracks) {
+    const needle = normalizeSearchComparison(state.collectionQuery);
+    return tracks.flatMap((track, index) => [track.title, track.artist, track.album, track.fileName]
+      .some(value => normalizeSearchComparison(value).includes(needle)) ? [index] : []);
+  }
+
+  function collectionSearchStatus() {
+    if (collectionSearchRequest) return "正在搜索歌单";
+    if (!state.collectionQuery || !collectionDataCurrent()) return "";
+    const tracks = state.data?.tracks || [];
+    return state.mode === "smart" ? `匹配 ${formatNumber(state.data?.total ?? tracks.length)} 首`
+      : `匹配 ${formatNumber(localCollectionPositions(tracks).length)} / 共 ${formatNumber(tracks.length)} 首`;
+  }
+
+  function renderCollectionSearchResults() {
+    const playlist = state.mode === "playlist";
+    const tracks = Array.isArray(state.data?.tracks) ? state.data.tracks : [];
+    let content;
+    if (collectionSearchRequest || collectionSearchError || (state.collectionQuery && !collectionDataCurrent())) {
+      content = document.createElement("div");
+      content.className = "music-mobile-list";
+      const message = messageBox(collectionSearchError || (collectionSearchRequest ? "正在搜索歌单" : state.status || "正在读取音乐库"));
+      content.append(message);
+      if (collectionSearchError) {
+        message.className = "message-box error";
+        message.setAttribute("role", "alert");
+        const retry = document.createElement("button");
+        retry.className = "music-mobile-load-more";
+        retry.type = "button";
+        retry.textContent = "重试搜索";
+        retry.addEventListener("click", () => {
+          if (!retry.isConnected) return;
+          els.viewContent.querySelector(".music-mobile-collection-search input")?.focus({ preventScroll: true });
+          applyCollectionSearch(state.collectionQuery, true);
+        });
+        content.append(retry);
+      }
+    } else if (state.collectionQuery && state.mode !== "smart") {
+      const indices = localCollectionPositions(tracks);
+      content = renderTrackList({ tracks: indices.map(index => tracks[index]), indices, showLoadMore: false, empty: "没有匹配的歌曲" });
+    } else if (state.collectionQuery || state.loading || tracks.length) {
+      content = renderTrackList({ showLoadMore: !playlist, empty: state.collectionQuery ? "没有匹配的歌曲" : "" });
+    } else content = playlist ? renderPlaylistEmpty() : renderAutoCollectionEmpty();
+    content.classList.add("music-mobile-collection-results");
+    return content;
+  }
+
+  function refreshCollectionSearchResults() {
+    const owner = mountedMusicShell;
+    if (!ownsMusicShell(owner)) return;
+    const form = owner.shell.querySelector(".music-mobile-collection-search");
+    const previous = owner.shell.querySelector(".music-mobile-collection-results");
+    if (!form || !previous) return;
+    const input = form.querySelector("input");
+    input.dataset.query = state.collectionQuery;
+    input.disabled = collectionSearchDisabled();
+    form.querySelector("button").disabled = input.disabled || !state.collectionQuery;
+    form.querySelector("small").textContent = collectionSearchStatus();
+    previous.replaceWith(renderCollectionSearchResults());
+    els.viewMeta.textContent = state.status || musicMeta(state.data);
+    updatePlaybackUi();
+  }
+
   function renderTrackList(options = {}) {
     playbackRowsGeneration += 1;
     const wrap = document.createElement("div");
@@ -3026,17 +3284,18 @@ export function createMusicViews(deps) {
       return wrap;
     }
     if (!tracks.length) {
-      wrap.append(messageBox(state.status || focusedLibraryView.emptyMessage()));
+      wrap.append(messageBox(options.empty || state.status || focusedLibraryView.emptyMessage()));
       return wrap;
     }
+    if (options.batchQueue !== false && ownsBatchList(batchListOwner)) batchQueue.mount(wrap, batchListOwner);
     if (versionGroups) {
       versionGroups.forEach((group, index) => wrap.append(
-        group.tracks?.length > 1 ? renderSearchTrackVersionGroup(group, index) : renderTrackRow(group.primary, index)
+        group.tracks?.length > 1 ? renderSearchTrackVersionGroup(group, index) : renderTrackRow(group.primary, index, { versionGroup: group })
       ));
     } else {
       const rows = new Map();
       tracks.forEach((track, index) => {
-        const row = renderTrackRow(track, index);
+        const row = renderTrackRow(track, options.indices?.[index] ?? index);
         wrap.append(row);
         rows.set(track.id, row);
       });
@@ -3045,6 +3304,7 @@ export function createMusicViews(deps) {
     if (showLoadMore && state.hasMore) {
       wrap.append(renderMusicLoadMore(tracks.length));
     }
+    batchQueue.refresh(wrap);
     return wrap;
   }
 
@@ -3091,6 +3351,7 @@ export function createMusicViews(deps) {
     list.append(fragment);
     mounted.tracks = data.tracks;
     if (state.hasMore) list.append(renderMusicLoadMore(mounted.rows.size));
+    batchQueue.refresh(list);
     const total = els.viewContent.querySelector(".music-mobile-focused-library-search small");
     if (total) total.textContent = `${formatNumber(data.total ?? mounted.rows.size)} 首`;
     els.viewMeta.textContent = state.status || musicMeta(data);
@@ -3136,6 +3397,7 @@ export function createMusicViews(deps) {
     row.tabIndex = 0;
     row.setAttribute("role", "button");
     row.setAttribute("aria-label", `播放 ${preferredVersion?.title || track.title || "歌曲"}${versionCount > 1 ? `，包含 ${versionCount} 个版本` : Number(track.duplicateCount || 0) > 1 ? `，已合并 ${track.duplicateCount} 个相同文件` : ""}`);
+    batchQueue.registerRow(row, preferredVersion, versionGroup ? `group:${versionGroup.key}` : track.id);
     const number = document.createElement("span");
     number.className = "music-mobile-track-index";
     if (isPlaying) {
@@ -3234,12 +3496,17 @@ export function createMusicViews(deps) {
         playSearchTrackVersion(preferredVersion, versionGroup.tracks);
         return;
       }
+      if (state.collectionQuery && collectionDataCurrent()) {
+        batchQueueOwner = null;
+        state.queue = (state.data?.tracks || []).map(item => trackPreferences.clone(item));
+      }
       activateSearchResultQueue(track.id);
       openTrack(track.id, { autoplay: true }).catch(() => {});
     };
-    row.addEventListener("click", play);
+    row.addEventListener("click", (event) => { if (!batchQueue.handleRowClick(row, event)) play(); });
     row.addEventListener("keydown", (event) => {
       if (event.target !== row) return;
+      if (row.querySelector(".music-mobile-batch-checkbox")) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       play();
@@ -3775,6 +4042,13 @@ export function createMusicViews(deps) {
     mode.append(modeText);
     const actions = document.createElement("span");
     actions.className = "music-mobile-queue-head-actions";
+    const search = document.createElement("button");
+    search.type = "button";
+    search.className = "music-mobile-queue-tool music-mobile-queue-search-trigger";
+    search.textContent = "搜索";
+    search.setAttribute("aria-label", "搜索播放队列");
+    search.setAttribute("aria-haspopup", "dialog");
+    search.disabled = !state.queue.length;
     const save = symbolButton("playlist-add", () => saveQueueAsPlaylist().catch(() => {}), !state.queue.length, "music-mobile-queue-tool", "存为歌单");
     save.disabled = !state.queue.length;
     const manage = symbolButton(state.queueManageOpen ? "check" : "drag-handle", () => {
@@ -3784,16 +4058,39 @@ export function createMusicViews(deps) {
     manage.disabled = state.queue.length <= 1;
     const clear = symbolButton("delete", () => clearQueueExceptCurrent(), queueRemovableCount() <= 0, "music-mobile-queue-tool danger", "清空其他歌曲");
     clear.disabled = queueRemovableCount() <= 0;
-    actions.append(save, manage);
+    actions.append(search, save, manage);
     if (state.queueManageOpen) actions.append(clear);
     toolbar.append(mode, actions);
 
     const list = document.createElement("div");
     list.className = "music-mobile-queue-list";
     const sourceUrl = getActiveUrl(), accountOwner = captureAccountOwner(sourceUrl), generation = musicRenderGeneration;
-    mountedQueueList = { list, status, count: meta, save, manage, clear, close, queue: state.queue,
+    const mounted = mountedQueueList = { list, status, count: meta, search, save, manage, clear, close, queue: state.queue,
       isCurrent: () => isCurrent() && getActiveUrl() === sourceUrl
         && isAccountOwnerCurrent(accountOwner) && musicRenderGeneration === generation };
+    search.addEventListener("click", () => {
+      if (mounted !== mountedQueueList || !mounted.isCurrent() || search.disabled || accountOwner.owner === "pending") return;
+      const current = () => mountedQueueList?.isCurrent() && getActiveUrl() === sourceUrl
+        && isAccountOwnerCurrent(accountOwner) && musicRenderGeneration === generation;
+      queueSearch = openMusicQueueSearch({
+        trigger: () => current() ? (mountedQueueList.search.disabled ? mountedQueueList.close : mountedQueueList.search) : null,
+        isCurrent: current,
+        readQueue: () => mountedQueueList.queue,
+        isCurrentTrack: track => state.current?.id === track.id,
+        resolveRow: track => {
+          if (!current() || mountedQueueList.queue !== state.queue) return null;
+          const index = state.queue.findIndex(item => item.id === track.id);
+          const row = mountedQueueList.list.children[index];
+          return row?.dataset.trackId === String(track.id) ? row : null;
+        },
+        locate: row => {
+          const list = mountedQueueList.list;
+          const top = row.offsetTop - (list.clientHeight - row.clientHeight) / 2;
+          list.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+          row.focus({ preventScroll: true });
+        }
+      });
+    });
     if (!state.queue.length) {
       list.append(messageBox("队列里还没有歌曲"));
     } else {
@@ -3890,9 +4187,22 @@ export function createMusicViews(deps) {
     actions.className = "music-mobile-queue-actions";
     if (state.queueManageOpen) {
       row.classList.add("is-managing");
+      const position = queueActionButton("sort", "移动到位置", () => {
+        if (!isCurrent() || captureAccountOwner(getActiveUrl()).owner === "pending") return;
+        const queue = state.queue, currentId = state.current?.id;
+        queuePosition = openMusicQueuePosition({ trigger: position, track, queue, currentId,
+          isCurrent: () => isCurrent() && state.queue === queue && state.current?.id === currentId,
+          move: offset => {
+            if (moveQueueTrack(track.id, offset)) revealQueuePosition(track);
+          }
+        });
+      }, state.queue.length <= 1);
+      position.classList.add("music-mobile-queue-position-trigger");
+      position.setAttribute("aria-haspopup", "dialog");
       actions.append(
         queueActionButton("arrow-upward", "上移", () => { if (isCurrent()) moveQueueTrack(track.id, -1); }, index <= 0),
         queueActionButton("arrow-downward", "下移", () => { if (isCurrent()) moveQueueTrack(track.id, 1); }, index >= state.queue.length - 1),
+        position,
         queueActionButton("close", "移出队列", () => { if (isCurrent()) removeTrackFromQueue(track.id); }, active)
       );
     } else {
@@ -4422,6 +4732,8 @@ export function createMusicViews(deps) {
     const sheet = els.viewContent.querySelector(".music-mobile-full-player .music-mobile-queue-sheet");
     if (!moduleActive || !state.fullscreen || !state.queueOpen || !sheet?.isConnected
       || (expectedSheet && expectedSheet !== sheet)) return false;
+    closeQueuePosition(false);
+    closeQueueSearch(false);
     const session = miniFullscreenSession;
     const focused = document.activeElement;
     const source = origin || (sheet.contains(focused) ? focused : sheet);
@@ -4433,9 +4745,41 @@ export function createMusicViews(deps) {
     return true;
   }
 
+  function closeQueueSearch(restoreFocus = true) {
+    const search = queueSearch;
+    queueSearch = null;
+    return search?.close(restoreFocus) || false;
+  }
+
+  function closeQueuePosition(restoreFocus = true) {
+    const position = queuePosition;
+    queuePosition = null;
+    return position?.close(restoreFocus) || false;
+  }
+
+  function revealQueuePosition(track) {
+    const mounted = mountedQueueList;
+    if (!mounted?.isCurrent() || mounted.queue !== state.queue) return;
+    const index = mounted.queue.indexOf(track);
+    const row = mounted.list.children[index];
+    const trigger = row?.querySelector(".music-mobile-queue-position-trigger");
+    if (!trigger || row.dataset.trackId !== String(track.id)) return;
+    trigger.focus({ preventScroll: true });
+    const listRect = mounted.list.getBoundingClientRect(), rowRect = row.getBoundingClientRect();
+    if (rowRect.top < listRect.top) mounted.list.scrollTop += rowRect.top - listRect.top;
+    else if (rowRect.bottom > listRect.bottom) mounted.list.scrollTop += rowRect.bottom - listRect.bottom;
+  }
+
   function locateCurrentTrack() {
     if (!state.current) return;
     if (revealCurrentTrack()) return;
+    if (state.collectionQuery && state.mode !== "smart" && collectionDataCurrent()
+      && state.data?.tracks?.some(track => track.id === state.current.id)) {
+      const input = els.viewContent.querySelector(".music-mobile-collection-search input");
+      if (input) input.value = "";
+      applyCollectionSearch("");
+      if (revealCurrentTrack()) return;
+    }
     state.pendingCurrentReveal = true;
     updateListParams({
       mode: "library",
@@ -4472,6 +4816,7 @@ export function createMusicViews(deps) {
   }
 
   function closeFullscreen() {
+    if (closeQueuePosition() || closeQueueSearch()) return true;
     if (state.libraryFiltersOpen) {
       closeFacetFilters();
       return true;
@@ -4520,12 +4865,20 @@ export function createMusicViews(deps) {
 
   function handleBack() {
     if (closeFullscreen()) return true;
+    if (batchQueue.cancel(els.viewContent)) return true;
+    if (state.collectionQuery && collectionScope()) {
+      const input = els.viewContent.querySelector(".music-mobile-collection-search input");
+      if (input) input.value = "";
+      applyCollectionSearch("");
+      return true;
+    }
     if (!state.searchOpen && !state.query) return false;
     closeSearch();
     return true;
   }
 
   function closeOpenSheet() {
+    if (closeQueuePosition() || closeQueueSearch()) return true;
     if (state.playbackSheetOpen) return closePlaybackSettings();
     if (state.queueOpen) return closeQueueSheet();
     if (!state.queueOpen && !state.playlistSheetOpen && !state.sleepSheetOpen && !state.playbackSheetOpen) return false;
@@ -4927,6 +5280,7 @@ export function createMusicViews(deps) {
   }
 
   function playVisibleCollection(shuffle = false) {
+    if (collectionSearchRequest || collectionSearchError || (state.collectionQuery && !collectionDataCurrent())) return;
     const tracks = (Array.isArray(state.data?.tracks) ? state.data.tracks : []).filter((track) => track?.id);
     const queue = shuffle ? shuffleTrackQueue(tracks) : tracks.map((track) => trackPreferences.clone(track));
     if (!queue.length) return;
@@ -5066,7 +5420,7 @@ export function createMusicViews(deps) {
   }
 
   async function restorePlaybackQueue(renderGuard = null) {
-    if (!state.resumeQueue || state.current || state.loading) return false;
+    if (!state.resumeQueue || state.current || state.loading || ownsBatchPlaybackQueue()) return false;
     const saved = readPlaybackQueuePreference();
     if (!saved || saved.activeUrl !== getActiveUrl()) return false;
     if (saved.accountOwner && saved.accountOwner !== captureAccountOwner(saved.activeUrl).owner) return false;
@@ -5083,7 +5437,7 @@ export function createMusicViews(deps) {
   }
 
   function canRestoreLastTrack() {
-    if (state.current || state.loading) return false;
+    if (state.current || state.loading || ownsBatchPlaybackQueue()) return false;
     if (state.mode !== "library") return false;
     return !state.query && !state.favorite && !state.artistId && !state.albumId && !state.genre && state.sort === DEFAULT_SORT;
   }
@@ -5207,13 +5561,113 @@ export function createMusicViews(deps) {
     renderShell();
   }
 
+  function batchListKey() {
+    return JSON.stringify([state.mode, state.searchScope, musicListPath()]);
+  }
+
+  function ownsBatchList(owner) {
+    if (!owner || owner !== batchListOwner || !moduleActive || state.loading || (musicRenderGuard && !musicRenderGuard())
+      || musicRenderGuard?.signal?.aborted
+      || owner.key !== batchListKey() || owner.sourceUrl !== getActiveUrl()
+      || owner.account.owner === "pending" || !isAccountOwnerCurrent(owner.account)) return false;
+    const current = trackPreferences.ownerOf(state.current);
+    return !state.current || Boolean(current && current.sourceUrl === owner.sourceUrl && trackPreferences.current(current));
+  }
+
+  function retireBatchList() {
+    batchListOwner = null;
+    batchQueue.reset();
+  }
+
+  async function createPlaylistFromBatch(owner, name, trackIds) {
+    if (!ownsBatchList(owner)) return null;
+    const data = await postJson(owner.sourceUrl, "/api/music/playlists", { name, trackIds });
+    if (!ownsBatchList(owner)) return null;
+    if (!data?.playlist?.id) throw new Error("未收到新歌单的创建结果");
+    void loadPlaylists(() => ownsBatchList(owner));
+    return data.playlist;
+  }
+
+  async function listPlaylistsForBatch(owner) {
+    if (!ownsBatchList(owner)) return null;
+    const data = await fetchMusicApiJson(owner.sourceUrl, "/api/music/playlists", {
+      accountScope: owner.account, signal: musicRenderGuard?.signal, timeoutMs: 12000
+    });
+    if (!ownsBatchList(owner)) return null;
+    if (!Array.isArray(data?.playlists)) throw new Error("未收到歌单列表");
+    return data.playlists.filter(playlist => playlist?.id);
+  }
+
+  async function addTracksToPlaylistFromBatch(owner, playlistId, trackIds) {
+    if (!ownsBatchList(owner)) return null;
+    const receipt = await fetchMusicApiJson(owner.sourceUrl,
+      `/api/music/playlists/${encodeURIComponent(playlistId)}/tracks?return=receipt`, {
+        method: "POST", body: { trackIds }, accountScope: owner.account
+      });
+    if (!ownsBatchList(owner)) return null;
+    const counts = [receipt?.addedCount, receipt?.alreadyPresentCount, receipt?.unavailableCount];
+    if (receipt?.ok !== true || counts.some(count => !Number.isSafeInteger(count) || count < 0)
+      || counts.reduce((total, count) => total + count, 0) !== trackIds.length) {
+      throw new Error("未收到完整的添加结果，请重试");
+    }
+    void loadPlaylists(() => ownsBatchList(owner));
+    return receipt;
+  }
+
+  function ownsBatchPlaybackQueue() {
+    if (!batchQueueOwner) return false;
+    if (batchQueueOwner.sourceUrl === getActiveUrl() && isAccountOwnerCurrent(batchQueueOwner.account)) return true;
+    batchQueueOwner = null;
+    state.queue = [];
+    return false;
+  }
+
+  function replacePreviewQueue(tracks) {
+    if (!ownsBatchPlaybackQueue()) state.queue = previewQueue = tracks;
+  }
+
+  function appendBatchTracks(tracks) {
+    const owner = batchListOwner;
+    if (!ownsBatchList(owner)) return null;
+    const owned = ownsBatchPlaybackQueue();
+    // Before playback, the catalogue is only the default queue. An explicit
+    // batch starts a new queue in that case, then owns it across later lists.
+    const queue = !owned && !state.current && state.queue === previewQueue ? [] : state.queue.filter(track => {
+      const trackOwner = trackPreferences.ownerOf(track);
+      return trackOwner?.sourceUrl === owner.sourceUrl && trackPreferences.current(trackOwner);
+    });
+    const seen = new Set(queue.map(track => track.id));
+    if (state.current?.id) seen.add(state.current.id);
+    const additions = [];
+    let skipped = 0;
+    for (const track of tracks) {
+      if (seen.has(track.id)) { skipped++; continue; }
+      const item = normalizeQueueTrack(track);
+      if (!item) continue;
+      seen.add(item.id);
+      additions.push(item);
+    }
+    if (additions.length || skipped) batchQueueOwner = owner;
+    if (additions.length) {
+      state.queue = [...queue, ...additions];
+      scheduleGaplessPreload();
+      rememberPlaybackQueue();
+      for (const button of els.viewContent.querySelectorAll(".music-mobile-mini-player > button")) {
+        button.disabled = false;
+        button.classList.remove("disabled");
+      }
+      updatePlaybackUi();
+    }
+    return { added: additions.length, skipped };
+  }
+
   function moveQueueTrack(trackId, direction) {
     if (!moduleActive || captureAccountOwner(getActiveUrl()).owner === "pending") return;
     const previousQueue = state.queue || [];
     const queue = [...previousQueue];
     const index = queue.findIndex((item) => item.id === trackId);
     const nextIndex = index + direction;
-    if (index < 0 || nextIndex < 0 || nextIndex >= queue.length) return;
+    if (index < 0 || !Number.isInteger(nextIndex) || nextIndex === index || nextIndex < 0 || nextIndex >= queue.length) return false;
     const [item] = queue.splice(index, 1);
     queue.splice(nextIndex, 0, item);
     state.queue = queue;
@@ -5232,12 +5686,15 @@ export function createMusicViews(deps) {
       if (!replaceMountedQueueOrder(queue)) renderShell();
       refreshQueueOrderStatus();
     });
+    return true;
   }
 
   function replaceMountedQueueOrder(previousQueue, move = null) {
     const mounted = mountedQueueList, queue = state.queue;
     if (!mounted?.isCurrent() || mounted.queue !== previousQueue
       || previousQueue.length !== queue.length || mounted.list.children.length !== queue.length) return false;
+    if (!state.current && previousQueue[0] !== queue[0]) return false;
+    if (move && Math.abs(move.fromIndex - move.toIndex) > 1) return moveMountedQueueRow(mounted, previousQueue, move);
     const indices = move ? [move.fromIndex, move.toIndex]
       : queue.flatMap((track, index) => track !== previousQueue[index] ? [index] : []);
     if (move && (!Number.isInteger(move.fromIndex) || !Number.isInteger(move.toIndex)
@@ -5265,7 +5722,37 @@ export function createMusicViews(deps) {
       (requested && !requested.disabled ? requested : fallback && !fallback.disabled ? fallback : targetRow).focus({ preventScroll: true });
     }
     mounted.list.scrollTop = top;
+    queueSearch?.refresh();
     return true;
+  }
+
+  function moveMountedQueueRow(mounted, previousQueue, { fromIndex, toIndex }) {
+    const list = mounted.list, queue = state.queue;
+    const row = list.children[fromIndex], destination = list.children[toIndex];
+    if (!row || !destination || queue[toIndex] !== previousQueue[fromIndex]
+      || row.dataset.trackId !== String(previousQueue[fromIndex]?.id)
+      || destination.dataset.trackId !== String(previousQueue[toIndex]?.id)) return false;
+    const previousEdges = [list.firstElementChild, list.lastElementChild];
+    const top = list.scrollTop;
+    const focused = row.contains(document.activeElement) ? document.activeElement : null;
+    mounted.queue = queue;
+    list.insertBefore(row, fromIndex < toIndex ? destination.nextElementSibling : destination);
+    refreshQueueMovementButtons(list, queue.length, previousEdges);
+    focused?.focus({ preventScroll: true });
+    list.scrollTop = top;
+    queueSearch?.refresh();
+    return true;
+  }
+
+  function refreshQueueMovementButtons(list, count, previousEdges = []) {
+    if (!count) return;
+    const first = list.firstElementChild, last = list.lastElementChild;
+    for (const row of new Set([first, last, ...previousEdges])) {
+      for (const [label, disabled] of [["上移", row === first], ["下移", row === last], ["移动到位置", count <= 1]]) {
+        const button = row.querySelector(`[aria-label="${label}"]`);
+        if (button) { button.disabled = disabled; button.classList.toggle("disabled", disabled); }
+      }
+    }
   }
 
   function refreshQueueOrderStatus({ playlistChanged = false } = {}) {
@@ -5294,6 +5781,7 @@ export function createMusicViews(deps) {
     if (index < 0) return;
     const removed = queue[index];
     state.queue = queue.filter((item) => item.id !== trackId);
+    if (!state.queue.length) batchQueueOwner = null;
     scheduleGaplessPreload();
     rememberPlaybackQueue();
     state.status = removed ? `已移出队列「${removed.title || "歌曲"}」` : "已更新队列";
@@ -5315,15 +5803,9 @@ export function createMusicViews(deps) {
     removed.remove();
     mounted.queue = queue;
     if (!queue.length) mounted.list.append(messageBox("队列里还没有歌曲"));
-    const first = queue.length ? mounted.list.children[0] : null, last = queue.length ? mounted.list.children[queue.length - 1] : null;
-    for (const row of new Set([first, last])) {
-      if (!row) continue;
-      for (const [label, disabled] of [["上移", row === first], ["下移", row === last]]) {
-        const button = row.querySelector(`[aria-label="${label}"]`);
-        if (button) { button.disabled = disabled; button.classList.toggle("disabled", disabled); }
-      }
-    }
+    refreshQueueMovementButtons(mounted.list, queue.length);
     mounted.count.textContent = `${formatNumber(queue.length)} 首`;
+    mounted.search.disabled = !queue.length;
     mounted.save.disabled = !queue.length;
     mounted.manage.disabled = queue.length <= 1;
     mounted.clear.disabled = queueRemovableCount() <= 0;
@@ -5336,6 +5818,7 @@ export function createMusicViews(deps) {
       (requested && !requested.disabled ? requested : fallback || row || mounted.close).focus({ preventScroll: true });
     }
     mounted.list.scrollTop = top;
+    queueSearch?.refresh();
     return true;
   }
 
@@ -5347,6 +5830,7 @@ export function createMusicViews(deps) {
     const ok = window.confirm(`清空队列中的其他 ${formatNumber(removable)} 首歌曲？`);
     if (!ok) return;
     state.queue = keep ? [keep] : [];
+    batchQueueOwner = null;
     scheduleGaplessPreload();
     rememberPlaybackQueue();
     state.status = keep ? "已清空其他队列歌曲" : "已清空播放队列";
@@ -6159,6 +6643,7 @@ export function createMusicViews(deps) {
     const focusIntent = options.controlFocus || null;
     controlFocus.retain(focusIntent);
     cancelMusicPagination();
+    cancelCollectionSearch();
     mountedSearchController?.abort();
     const searchFocus = controlFocus.current() ? null : captureMusicSearchFocus();
     if (searchFocus) pendingSearchFocus = searchFocus;
@@ -6189,6 +6674,7 @@ export function createMusicViews(deps) {
     }
     if (state.mode !== "smart") state.smartId = "";
     if (state.mode !== "playlist") state.playlistId = "";
+    state.collectionQuery = "";
     if (state.mode === "artists") state.searchScope = "artists";
     else if (state.mode === "albums") state.searchScope = "albums";
     else if (state.mode !== "library") state.searchScope = "all";
@@ -6236,7 +6722,7 @@ export function createMusicViews(deps) {
     return {
       mode: state.mode,
       ...(!state.dashboard ? { dashboard: "0" } : {}),
-      ...(state.query ? { query: state.query } : {}),
+      ...(state.query || state.collectionQuery ? { query: state.query || state.collectionQuery } : {}),
       ...(state.query && state.searchScope !== "all" ? { searchScope: state.searchScope } : {}),
       ...(state.sort !== DEFAULT_SORT && state.mode !== "smart" ? { sort: state.sort } : {}),
       ...(state.favorite ? { favorite: "1" } : {}),
@@ -6344,11 +6830,23 @@ export function createMusicViews(deps) {
 
   function installLifecycle() {
     window.addEventListener("fanhaoActiveServerChanged", () => {
+      closeQueuePosition(false);
+      closeQueueSearch(false);
+      retireBatchList();
+      ownsBatchPlaybackQueue();
       retireTrackAudioPreparation();
+      cancelCollectionSearch();
       mountedSearchController?.abort();
     });
     window.addEventListener("fanhaoAccountOwnerChanged", (event) => {
-      if (event.detail?.current?.origin === captureAccountOwner(getActiveUrl()).origin) mountedSearchController?.abort();
+      if (event.detail?.current?.origin === captureAccountOwner(getActiveUrl()).origin) {
+        closeQueuePosition(false);
+        closeQueueSearch(false);
+        mountedSearchController?.abort();
+        cancelCollectionSearch();
+        retireBatchList();
+        ownsBatchPlaybackQueue();
+      }
       if (trackAudioPreparation && !isAccountOwnerCurrent(trackAudioPreparation.accountScope)) retireTrackAudioPreparation();
     });
     window.addEventListener("fanhaoViewWillRender", () => {
@@ -6399,6 +6897,9 @@ export function createMusicViews(deps) {
 
   function deactivate() {
     controlFocus.cancel();
+    closeQueuePosition(false);
+    closeQueueSearch(false);
+    retireBatchList();
     mountedQueueList = null;
     mountedMusicShell = mountedFullPlayer = null;
     musicRenderGuard = null;
@@ -6408,6 +6909,7 @@ export function createMusicViews(deps) {
     routeControlFocus = null;
     pendingSearchFocus = null;
     cancelMusicPagination();
+    cancelCollectionSearch();
     moduleActive = false;
     disposeMusicSearchPendingWork();
     mountedSearchController?.abort();

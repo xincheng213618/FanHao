@@ -35,12 +35,18 @@ const base = `http://127.0.0.1:${server.address().port}`;
 let browser;
 const videos = Array.from({ length: 31 }, (_, index) => ({ id: `video-${index}`, title: `影片 ${index}`, streamUrl: `/fixture-video/${index}.mp4` }));
 const authors = Array.from({ length: 43 }, (_, index) => ({ secUid: `author-${index}`, name: `fixture ${index}`, count: 43 - index }));
+const typedVideos = {
+  video: videos.slice(0, 17).map(video => ({ ...video, mediaType: "video" })),
+  gallery: Array.from({ length: 26 }, (_, index) => ({ id: `gallery-${index}`, title: `合成图文 ${index}`, mediaType: "gallery",
+    galleryCount: 1, galleryItems: [{ type: "image", url: `/fixture-gallery/${index}.svg` }] }))
+};
 const videoCards = ".short-video-mobile-card-wrap";
 const authorCards = ".short-video-mobile-author-card:not(.is-loading)";
 const moreButton = ".short-video-mobile-load-more";
 
-async function open({ tab = "all", height = 600, rootOnly = false, holdAppend = false, failAppend = false, searchPage } = {}) {
-  const context = await browser.newContext({ viewport: { width: 390, height }, isMobile: true });
+async function open({ tab = "all", width = 390, height = 600, rootOnly = false, holdAppend = false, failAppend = false,
+  searchPage, typed = false } = {}) {
+  const context = await browser.newContext({ viewport: { width, height }, isMobile: true });
   await context.addInitScript(() => {
     localStorage.setItem("fanhao.serverUrl", location.origin);
     window.__native = [];
@@ -62,21 +68,22 @@ async function open({ tab = "all", height = 600, rootOnly = false, holdAppend = 
     if (url.pathname === "/api/short-videos" || url.pathname === "/api/short-videos/authors") {
       const kind = url.pathname.endsWith("/authors") ? "authors" : "videos";
       const offset = Number(query.get("offset") || 0), limit = Number(query.get("limit") || 0);
-      requests.push({ kind, query: query.get("q"), offset, limit });
+      const media = query.get("media");
+      requests.push({ kind, query: query.get("q"), source: query.get("source"), media, offset, limit });
       if (holdAppend && kind === "videos" && offset) await release.promise;
       if (failAppend && kind === "videos" && offset) {
         failAppend = false;
         return route.fulfill({ status: 503, json: { error: "续页测试失败" } });
       }
-      const records = kind === "authors" ? authors : videos;
+      const records = kind === "authors" ? authors : typed ? typedVideos[media] || [...typedVideos.video, ...typedVideos.gallery] : videos;
       const envelope = searchPage?.(kind, offset, limit) || { [kind]: records.slice(offset, offset + limit), total: records.length, hasMore: offset + limit < records.length };
-      return route.fulfill({ json: { source: "all", offset, ...envelope } });
+      return route.fulfill({ json: { source: query.get("source") || "all", offset, ...envelope } });
     }
     if (url.pathname === "/api/modules") return route.fulfill({ json: { modules: [] } });
     if (url.pathname === "/api/library") return route.fulfill({ json: { people: [], works: [], totals: {}, user: {}, availableRoots: [], access: { mode: "loopback" } } });
     return route.fulfill({ json: {} });
   });
-  await page.goto(`${base}/#shortVideoSearch?source=${tab === "authors" ? "authors" : "all"}&query=fixture&tab=${tab}`);
+  await page.goto(`${base}/${typed ? "#shortVideos?source=liked" : `#shortVideoSearch?source=${tab === "authors" ? "authors" : "all"}&query=fixture&tab=${tab}`}`);
   await rows(page, tab === "authors" ? authorCards : videoCards, tab === "authors" ? 24 : 12);
   await page.waitForLoadState("networkidle");
   return { page, requests, release, async close() { release.resolve(); await context.close(); } };
@@ -272,6 +279,82 @@ try {
       assert.equal(await more.count(), 0);
       console.log("Duplicate/empty author pages: raw offsets 0/24/42/retry 42/60, 43 distinct users.");
     } finally { await duplicateAuthors.close(); }
+
+    const typed = await open({ typed: true, width: 320 });
+    try {
+      const { page } = typed;
+      const filter = page.getByRole("combobox", { name: "作品类型" });
+      const cards = type => page.locator(`${videoCards}[data-video-id^="${type}-"]`);
+      const read = (media, offset = 0, q = null) => page.waitForRequest(request => {
+        const url = new URL(request.url());
+        return url.pathname === "/api/short-videos" && url.searchParams.get("media") === media
+          && Number(url.searchParams.get("offset") || 0) === offset && url.searchParams.get("q") === q;
+      });
+      const request = read("gallery");
+      await filter.selectOption("gallery");
+      assert.equal(new URL((await request).url()).searchParams.get("source"), "liked");
+      await cards("gallery").first().waitFor();
+      assert.equal(await cards("video").count(), 0);
+      assert.match(page.url(), /media=gallery/u);
+      assert.equal(await filter.evaluate(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.height >= 44 && rect.left >= 0 && rect.right <= innerWidth;
+      }), true);
+      await cards("gallery").first().getByRole("button").first().click();
+      await page.waitForFunction(() => __native.length === 1);
+      const launch = await page.evaluate(() => __native[0]);
+      assert.equal(new URL(launch.feedUrl).searchParams.get("media"), "gallery");
+      assert.equal(launch.nextOffset, 12);
+      assert.equal(launch.hasMore, true);
+      assert(JSON.parse(launch.videos).videos.every(item => item.mediaType === "gallery"));
+      await Promise.all([read("gallery", 12), scrollEnd(page)]);
+      await rows(page, `${videoCards}[data-video-id^="gallery-"]`, 24);
+
+      await page.getByRole("button", { name: "搜索短视频", exact: true }).click();
+      const input = page.getByRole("searchbox", { name: "搜索短视频" });
+      await input.fill("fixture");
+      await Promise.all([read("gallery", 0, "fixture"), input.press("Enter")]);
+      await cards("gallery").first().waitFor();
+      assert.equal(await filter.inputValue(), "gallery");
+      await Promise.all([read("video", 0, "fixture"), filter.selectOption("video")]);
+      await cards("video").first().waitFor();
+      assert.equal(await cards("gallery").count(), 0);
+      assert.equal(await input.inputValue(), "fixture");
+      await page.getByRole("tab", { name: "用户", exact: true }).click();
+      await rows(page, authorCards, 24);
+      assert.equal(await filter.count(), 0);
+      assert(typed.requests.filter(entry => entry.kind === "authors").every(entry => entry.media === null));
+      await page.getByRole("button", { name: "返回短视频", exact: true }).click();
+      await cards("gallery").first().waitFor();
+      assert.equal(await filter.inputValue(), "gallery");
+      await Promise.all([read(null), filter.selectOption("all")]);
+      await cards("video").first().waitFor();
+      assert.doesNotMatch(page.url(), /media=/u);
+      console.log("Media type: 320px filter survives navigation, query, paging and the native feed handoff.");
+    } finally { await typed.close(); }
+
+    const staleType = await open({ typed: true, holdAppend: true });
+    try {
+      const { page } = staleType;
+      const filter = page.getByRole("combobox", { name: "作品类型" });
+      await filter.selectOption("gallery");
+      await page.locator(`${videoCards}[data-video-id="gallery-0"]`).waitFor();
+      const isHeldPage = request => {
+        const url = new URL(request.url());
+        return url.pathname === "/api/short-videos" && url.searchParams.get("media") === "gallery"
+          && url.searchParams.get("offset") === "12";
+      };
+      await Promise.all([page.waitForRequest(isHeldPage), scrollEnd(page)]);
+      await filter.selectOption("video");
+      await page.locator(`${videoCards}[data-video-id="video-0"]`).waitFor();
+      const reply = page.waitForResponse(response => isHeldPage(response.request()));
+      staleType.release.resolve();
+      await (await reply).finished();
+      await page.waitForLoadState("networkidle");
+      assert.equal(await page.locator(`${videoCards}[data-video-id^="gallery-"]`).count(), 0);
+      assert.equal(await filter.inputValue(), "video");
+      console.log("Media type: an earlier gallery page cannot append after switching to videos.");
+    } finally { await staleType.close(); }
   }
   assert.deepEqual(errors, []);
 } finally {

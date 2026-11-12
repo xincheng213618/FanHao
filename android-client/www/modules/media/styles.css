@@ -19,6 +19,165 @@
   visibility: hidden;
 }
 
+.media-continue-shelf {
+  min-width: 0;
+  margin-bottom: 12px;
+}
+
+.media-continue-shelf header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.media-continue-shelf h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.media-continue-shelf ul {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(min(178px, 77%), 1fr);
+  gap: 7px;
+  margin: 0;
+  padding: 3px 3px 6px;
+  overflow-x: auto;
+  list-style: none;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+}
+
+.media-continue-shelf li { min-width: 0; scroll-snap-align: start; }
+
+.media-continue-shelf .media-continue-play {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 63px;
+  height: 100%;
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: inherit;
+  text-align: start;
+}
+
+.media-continue-shelf button:focus-visible { outline-offset: 1px; }
+
+.media-continue-cover {
+  display: grid;
+  place-items: center;
+  flex: 0 0 33px;
+  height: 46px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: var(--surface-soft);
+}
+
+.media-continue-cover img { width: 100%; height: 100%; object-fit: cover; }
+.media-continue-copy { display: grid; min-width: 0; gap: 2px; }
+.media-continue-copy > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.media-continue-copy strong { font-size: 13px; }
+.media-continue-copy span, .media-continue-copy small { font-size: 12px; color: var(--muted); }
+.media-continue-shelf ul[hidden] { display: none; }
+.media-continue-empty { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+
+.media-continue-manage,
+.media-continue-panel :is(.media-continue-change, .media-continue-views button) {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.mobile-action-sheet-panel.media-continue-panel {
+  grid-template-columns: minmax(0, 1fr);
+  justify-self: center;
+  width: min(100%, 560px);
+}
+
+.media-continue-views { display: flex; flex-wrap: wrap; gap: 8px; }
+.media-continue-views button[aria-pressed="true"] { color: var(--accent); border-color: currentColor; }
+.media-continue-status { margin: 0; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+
+.media-continue-panel ul {
+  min-height: 0;
+  max-height: 50dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.media-continue-panel li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+}
+
+.media-continue-open {
+  min-height: 44px;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  font: inherit;
+}
+
+.media-continue-panel .media-continue-copy > * { white-space: normal; overflow-wrap: anywhere; }
+
+.media-watch-card { position: relative; min-width: 0; }
+.media-watch-card > .media-poster-card { width: 100%; }
+.media-watch-toggle,
+.media-watch-trigger,
+.media-watch-panel button:not(.mobile-action-sheet-close) {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  color: inherit;
+  font: inherit;
+}
+.media-watch-card > .media-watch-toggle {
+  position: absolute;
+  top: 0;
+  inset-inline-end: 0;
+  width: 44px;
+  font-size: 20px;
+  font-weight: 750;
+}
+.media-watch-toggle[aria-pressed="true"] { color: var(--accent); }
+.media-watch-entry { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 4px 0 10px; }
+.media-watch-entry button { flex: 0 0 auto; padding: 0 10px; }
+.media-watch-message { min-width: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.mobile-action-sheet-panel.media-watch-panel { grid-template-columns: minmax(0, 1fr); }
+.media-watch-panel :is(p, ul) { margin: 0; }
+.media-watch-panel p, .media-watch-panel small { color: var(--muted); font-size: 12px; }
+.media-watch-filters { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.media-watch-filters :is(input, select) { min-width: 0; min-height: 44px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; font: inherit; }
+.media-watch-panel ul { display: grid; min-height: 0; max-height: 47dvh; overflow-y: auto; overscroll-behavior: contain; padding: 0; list-style: none; }
+.media-watch-panel li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 5px; padding: 4px 0; border-top: 1px solid var(--line); }
+.media-watch-panel .media-watch-open { border: 0; text-align: start; overflow-wrap: anywhere; }
+.media-watch-panel .media-watch-remove { padding: 0 6px; }
+.media-watch-panel footer { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+.media-watch-panel footer[hidden] { display: none; }
+.media-watch-panel button:disabled { opacity: .5; }
+
 .content-panel[data-view="channel"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .channel-filter-wrap {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -361,6 +520,20 @@
   gap: 6px 12px;
 }
 
+.media-native-restart {
+  justify-self: end;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+
+.media-native-restart:disabled { opacity: .6; }
+
 .content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-player-facts:empty {
   display: none;
 }
@@ -374,7 +547,7 @@
 }
 
 .content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-episode-nav {
-  grid-template-columns: minmax(72px, auto) minmax(0, 1fr) minmax(72px, auto);
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   min-width: 0;
   gap: 8px;
   border-radius: 10px;
@@ -399,6 +572,71 @@
 
 .media-episode-nav-status .media-episode-nav-label {
   max-width: 100%;
+}
+
+.media-episode-picker {
+  box-sizing: border-box;
+  width: min(520px, calc(100% - 24px));
+  max-height: min(680px, calc(100dvh - 32px));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  padding: 14px;
+  overscroll-behavior: contain;
+}
+
+.media-episode-picker[open] {
+  display: grid;
+  grid-template-rows: auto auto auto auto minmax(44px, 1fr) auto;
+  gap: 8px;
+}
+
+.media-episode-picker::backdrop { background: rgb(0 0 0 / 48%); }
+
+.media-episode-picker :is(header, footer, form) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.media-episode-picker :is(header, footer) { justify-content: space-between; }
+.media-episode-picker footer { justify-content: end; }
+.media-episode-picker footer:not(:has(button:not([hidden]))) { display: none; }
+
+.media-episode-picker :is(input, button) {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--surface);
+  color: inherit;
+}
+
+.media-episode-picker input { flex: 1; min-width: 0; font-size: 16px; }
+.media-episode-picker [role="status"] { margin: 2px 0; color: var(--muted); font-size: 13px; }
+
+.media-episode-picker ul {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  margin: 0;
+  padding: 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+.media-episode-picker-choice {
+  width: 100%;
+  overflow-wrap: anywhere;
+  text-align: start;
+}
+
+.media-episode-picker-choice[aria-current="true"] {
+  border-color: var(--blue);
+  background: var(--button-soft);
+  color: var(--blue);
 }
 
 .content-panel[data-view="mediaDetail"]:is([data-channel-mode="movie"], [data-channel-mode="tv"], [data-channel-mode="anime"], [data-channel-mode="media"]) .media-detail-summary {

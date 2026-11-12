@@ -33,17 +33,23 @@ export function compactWorkCode(work) {
   return extractLeadingWorkCode(withoutTags);
 }
 
-export function workGridMeta(work) {
+export function workGridMeta(work, { ratingOnCover = true } = {}) {
   const date = displayCardDate(work?.infoSummary?.releaseDate) || displayCardDate(work?.modifiedAt);
-  const rating = numericRating(work?.infoSummary?.rating);
-  const ratingCount = Number(work?.infoSummary?.ratingCount || 0);
+  const rating = workCardRating(work);
   const duration = Number(work?.infoSummary?.durationMinutes || 0);
   const parts = [];
   if (date) parts.push(date);
-  if (rating !== null && (rating > 0 || ratingCount > 0)) parts.push(`★${formatCompactRating(rating)}`);
+  if (ratingOnCover && rating !== null) return parts.join(" · ");
+  if (rating !== null) parts.push(`★${formatCompactRating(rating)}`);
   else if (Number.isFinite(duration) && duration > 0) parts.push(`${formatNumber(Math.round(duration))}分`);
   else if (Number(work?.videoCount || 0) > 0) parts.push(`${formatNumber(work.videoCount)} 个视频`);
   return parts.join(" · ");
+}
+
+export function workCardRating(work) {
+  const rating = numericRating(work?.infoSummary?.rating);
+  const count = work?.infoSummary?.ratingCount;
+  return rating === 0 && (count === 0 || count === "0") ? null : rating;
 }
 
 export function workGridPerson(work) {

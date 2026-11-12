@@ -121,6 +121,57 @@ try {
       console.log(JSON.stringify({ variant: previous ? "baseline" : "current", firstMax, rangeMs,
         extraRequests: hydration.length, extraBytes: hydration.reduce((sum, request) => sum + request.bytes, 0) }));
       if (!previous) {
+        await page.locator(".media-viewer-close").tap();
+        const detailJump = page.locator(".photo-detail-page-jump");
+        const detailInput = detailJump.getByRole("textbox", { name: "图片页码" });
+        const readsBeforeJump = requests.length;
+        await detailInput.fill(String(total + 1));
+        await detailInput.press("Enter");
+        assert.equal(await detailInput.getAttribute("aria-invalid"), "true");
+        assert.equal(await page.locator(".media-viewer").count(), 0);
+        await detailInput.fill("４６７");
+        await detailInput.evaluate(input => {
+          input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+          input.form.requestSubmit();
+          input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+        });
+        assert.equal(await page.locator(".media-viewer").count(), 0, "confirming an IME candidate must not open the viewer");
+        await detailInput.press("Enter");
+        await waitForImage(467);
+        assert.equal(requests.length, readsBeforeJump, "direct exact-page navigation uses the verified range without a list read");
+        assert(media.includes(photoPath + 467));
+        const toggle = page.getByRole("button", { name: "跳到页码" });
+        await page.setViewportSize({ width: 320, height: 568 });
+        await toggle.tap();
+        const viewerInput = page.locator(".media-viewer").getByRole("textbox", { name: "图片页码" });
+        assert.equal(await viewerInput.getAttribute("inputmode"), "numeric");
+        assert.equal(await viewerInput.evaluate(input => document.activeElement === input), true);
+        assert.equal(await viewerInput.evaluate(input => {
+          const bounds = input.form.getBoundingClientRect();
+          return bounds.left >= 0 && bounds.right <= innerWidth && bounds.top >= 0 && bounds.bottom <= innerHeight
+            && input.form.querySelector("button").getBoundingClientRect().height >= 44;
+        }), true, "the exact page form and its touch target must fit a 320px viewport");
+        await viewerInput.press("Escape");
+        assert.equal(await viewerInput.isVisible(), false);
+        assert.equal(await toggle.evaluate(button => document.activeElement === button), true);
+        await toggle.tap();
+        await viewerInput.fill("193");
+        await viewerInput.press("ArrowLeft");
+        assert.equal(await page.locator(".media-viewer-count").textContent(), `467 / ${total}`, "editing the page number must not navigate the viewer");
+        await viewerInput.press("Enter");
+        await waitForImage(193);
+        assert.equal(await viewerInput.isVisible(), false);
+        assert.equal(requests.length, readsBeforeJump, "jumping between exact pages does not fetch album metadata");
+        await page.locator(".media-viewer-close").tap();
+        assert.equal(await detailJump.getByRole("button", { name: "跳转" }).evaluate(button => document.activeElement === button), true);
+        await page.setViewportSize({ width: 390, height: 844 });
+
+        async function waitForImage(target) {
+          await page.waitForFunction(({ target, total, photoPath }) => document.querySelector(".media-viewer-count")?.textContent === `${target} / ${total}`
+            && document.querySelector(".media-viewer-stage")?.dataset.imageState === "ready"
+            && new URL(document.querySelector(".media-viewer-stage img").src).pathname === photoPath + target, { target, total, photoPath });
+        }
+
         const descriptorPath = `android:photo-viewer-range/${id}`;
         const cacheModule = await page.evaluate(() => performance.getEntriesByType("resource")
           .find(entry => new URL(entry.name).pathname.endsWith("/js/cache.js"))?.name);
@@ -135,6 +186,7 @@ try {
         await tile.waitFor();
         await page.waitForFunction(() => document.querySelector(".photo-preview-tile img")?.naturalWidth > 0);
         assert.match(await page.locator("#viewMeta").textContent(), /缓存/u);
+        assert.equal(await detailJump.isVisible(), false, "the direct jump is gated by the current archive identity");
         const cachedTile = await tile.elementHandle();
         const range = page.locator(".media-viewer-range");
         await tile.tap();
@@ -153,6 +205,7 @@ try {
         await page.locator(".media-viewer-close").tap();
         refreshedDetail.resolve();
         await page.waitForFunction(() => !document.getElementById("viewMeta").textContent.includes("缓存"));
+        assert.equal(await detailJump.isVisible(), true);
         assert.equal(await cachedTile.evaluate(element => element.isConnected), true, "identical refresh must retain existing tiles");
         await tile.tap();
         assert.equal(Number(await range.getAttribute("max")), total, "the same cached tile adopts the verified full range");

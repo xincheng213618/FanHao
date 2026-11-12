@@ -45,6 +45,7 @@ function actualFunctions(source) {
     ["  async function renderMusicList(", "  function applyRouteParams("],
     ["  async function loadMusic(", "  function applyLoadedMusicData("],
     ["  function applyLoadedMusicData(", "  async function loadSearchOverview("],
+    ["  function collectionScope(", "  function cancelCollectionSearch("],
     ["  async function openTrack(", "  function ensureAudio("],
     ["  function installAudioEvents(", "  function renderShell("],
     ["  function crossfadeAudioPair(", "  function cancelAudioFade("],
@@ -78,7 +79,7 @@ function fixture(source, { restore = false } = {}) {
   }
   const outgoing = new AudioDouble("P"), incoming = new AudioDouble("A");
   const state = {
-    mode: "library", query: "", sort: "updated", current: restore ? null : { id: "P", positionMs: 52000 },
+    mode: "library", query: "", collectionQuery: "", sort: "updated", current: restore ? null : { id: "P", positionMs: 52000 },
     queue: restore ? [] : [{ id: "P" }, { id: "A", streamUrl: "/A" }],
     summary: {}, playing: true, playbackSpeed: 1, volume: 0.86, crossfadeSeconds: 0,
     resumeQueue: restore, repeat: "off", lyrics: { lines: [], raw: "" }
@@ -97,6 +98,10 @@ function fixture(source, { restore = false } = {}) {
     getActiveUrl: () => url,
     ensureAudio() { context.installAudioEvents(context.inspect().audio); },
     cancelMusicPagination() {}, applyRouteParams() {}, setActiveBottom() {},
+    // These fixtures exercise unfiltered startup and playback transitions. The
+    // full factory fixture drives scoped searches and batch selections.
+    cancelCollectionSearch() {}, retireBatchList() {}, ownsBatchPlaybackQueue: () => false,
+    batchListKey: () => "library", replacePreviewQueue(tracks) { state.queue = tracks; },
     renderShell() { rendered.push({ kind: "shell", loading: state.loading, status: state.status, current: state.current?.id }); },
     renderMusicUiPreservingSearch() { rendered.push({ kind: "refresh", loading: state.loading, status: state.status, current: state.current?.id }); },
     emptySearchOverview: () => ({}), emptyLyricSearch: () => ({}), musicListPath: () => "/api/music/tracks",
@@ -132,7 +137,8 @@ function fixture(source, { restore = false } = {}) {
   context = vm.createContext(bindings);
   vm.runInContext(`
     let moduleActive=false, musicRenderGeneration=0, openTrackGeneration=0, pendingTrackSelection=0, routeControlFocus=null;
-    let trackAudioPreparation=null, mountedSearchController=null;
+    let trackAudioPreparation=null, mountedSearchController=null, musicRenderGuard=null;
+    let batchListOwner=null, collectionDataOwner=null, collectionSearchError="";
     let playReportSession=0, currentPlaybackUrl="http://synthetic.invalid";
     let gaplessPreloadAudio=incoming, gaplessPreloadTrackId="A", gaplessPreloadActiveUrl=currentPlaybackUrl;
     let audio=outgoing, gaplessHandoffPending=false, progressSession=null, progressClaimRequired=false, playedReport=null;

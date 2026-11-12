@@ -1571,9 +1571,11 @@ try {
     assert.throws(() => assertSearchBack(mutant), /Back consumes the blank music search/);
   });
   await runCase("negative control: search-first Back violates nested priority", async () => {
-    const source = viewSource.replace("    if (closeFullscreen()) return true;\n    if (!state.searchOpen && !state.query) return false;",
-      "    if (!state.searchOpen && !state.query) return closeFullscreen();");
-    assert.notEqual(source, viewSource);
+    const backStart = "  function handleBack() {\n    if (closeFullscreen()) return true;";
+    const search = "    if (!state.searchOpen && !state.query) return false;";
+    assert(viewSource.includes(backStart) && viewSource.includes(search));
+    const source = viewSource.replace(backStart, "  function handleBack() {")
+      .replace(search, "    if (!state.searchOpen && !state.query) return closeFullscreen();");
     const mutant = await importFactory(source);
     assert.throws(() => assertLayeredBack(mutant), /first Back closes the top track actions/);
   });

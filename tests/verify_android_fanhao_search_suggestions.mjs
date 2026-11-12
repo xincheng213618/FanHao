@@ -153,7 +153,7 @@ for (const boundary of ["input", "navigation", "account", "blur"]) await run(`su
   if (boundary === "blur") { f.blur(); await f.tick(80); }
   assert.equal(f.warms[0].options.signal.aborted, true);
 });
-for (const cancelled of [true, false]) await run(`page-data service ${cancelled ? "retires canceled" : "reuses matching"} in-flight warming`, async f => {
+function pageReads() {
   const reads = [], writes = [];
   const service = createWorkPageDataService({
     fetchJson(_base, _path, options) {
@@ -163,6 +163,10 @@ for (const cancelled of [true, false]) await run(`page-data service ${cancelled 
     },
     writeCachedJson: async (_base, _path, data) => { writes.push(data); }
   });
+  return { service, reads, writes };
+}
+for (const cancelled of [true, false]) await run(`page-data service ${cancelled ? "retires canceled" : "reuses matching"} in-flight warming`, async f => {
+  const { service, reads, writes } = pageReads();
   const path = "/api/fanhao/search?q=synthetic&limit=48", controller = new AbortController();
   const warm = service.warm(f.A, [path], { signal: controller.signal });
   if (cancelled) controller.abort();
@@ -181,6 +185,96 @@ await run("completed warm data cannot cross a same-account revision", async f =>
   await service.warm(f.A, [path], { signal: new AbortController().signal });
   f.switchAccount();
   assert.deepEqual((await service.load(f.A, path, { reuseWarmed: true })).data, result(2));
+});
+await run("leaving and reopening a work list immediately starts an independent read", async f => {
+  const { service, reads, writes } = pageReads();
+  const path = "/api/works?limit=48&offset=0&sort=updated&filter=all";
+  const previous = new AbortController();
+  const left = service.load(f.A, path, { signal: previous.signal });
+  previous.abort();
+  const reopened = service.load(f.A, path, { signal: new AbortController().signal });
+  assert.equal(reads.length, 2, "the reopened list must not wait for the canceled transport");
+  assert.equal(reads[0].options.signal.aborted, true);
+  assert.equal(await left, null, "the retired list settles before its old transport replies");
+  reads[0].resolve(result("retired"));
+  await flush();
+  const shared = service.fetch(f.A, path);
+  assert.equal(reads.length, 2, "the retired transport cannot evict the replacement request");
+  reads[1].resolve(result("reopened"));
+  assert.deepEqual((await reopened).data, result("reopened"));
+  assert.deepEqual(await shared, result("reopened"));
+  assert.deepEqual(writes, [result("reopened")]);
+});
+await run("an in-flight list cannot cross a same-account revision", async f => {
+  const { service, reads, writes } = pageReads();
+  const path = "/api/favorites?limit=48&offset=0";
+  const old = service.load(f.A, path);
+  f.switchAccount();
+  const current = service.load(f.A, path);
+  assert.equal(reads.length, 2, "a replacement session must start its own transport");
+  reads[1].resolve(result("current account"));
+  assert.deepEqual((await current).data, result("current account"));
+  reads[0].resolve(result("old account"));
+  assert.equal(await old, null);
+  assert.deepEqual(writes, [result("current account")]);
+});
+await run("a foreground search can finish a shared request after prefetch cancellation", async f => {
+  const { service, reads, writes } = pageReads();
+  const path = "/api/fanhao/search?q=synthetic&limit=48";
+  const preload = new AbortController();
+  const warm = service.warm(f.A, [path], { signal: preload.signal });
+  const submitted = service.load(f.A, path, { reuseWarmed: true });
+  assert.equal(reads.length, 1);
+  preload.abort();
+  assert.equal(reads[0].options.signal.aborted, false, "one caller must not cancel the foreground caller's transport");
+  await warm;
+  reads[0].resolve(result("submitted"));
+  assert.deepEqual((await submitted).data, result("submitted"));
+  assert.deepEqual(writes, [result("submitted")]);
+});
+for (const cacheHit of [true, false]) await run(`studio index uses the ${cacheHit ? "current" : "old"} cached page on a single failed network read`, async f => {
+  const legacyCachePath = "/api/studios?limit=500";
+  const path = `${legacyCachePath}&sort=localCount`;
+  const read = deferred();
+  const cacheReads = [], networkReads = [], displayed = [];
+  const cache = { payload: { makers: [{ id: "fixture" }] } };
+  const service = createWorkPageDataService({
+    fetchJson(_base, target) { networkReads.push(target); return read.promise; },
+    async readCachedJson(_base, target) {
+      cacheReads.push(target);
+      return target === (cacheHit ? path : legacyCachePath) ? cache : null;
+    },
+    writeCachedJson: async () => {}
+  });
+  const offline = assert.rejects(service.load(f.A, path, {
+    legacyCachePath, onCached: (payload) => displayed.push(payload)
+  }), /offline/);
+  await flush();
+  assert.deepEqual(displayed, [cache.payload], "cached results render before the network response");
+  read.reject(new Error("offline"));
+  await offline;
+  assert.deepEqual(cacheReads, cacheHit ? [path] : [path, legacyCachePath]);
+  assert.deepEqual(networkReads, [path], "the legacy endpoint is only a cache key");
+});
+await run("late old studio cache cannot display across an account revision", async f => {
+  const legacyCachePath = "/api/studios?limit=500";
+  const path = `${legacyCachePath}&sort=localCount`;
+  const cacheRead = deferred(), networkRead = deferred(), cacheReads = [];
+  const service = createWorkPageDataService({
+    fetchJson: () => networkRead.promise,
+    async readCachedJson(_base, target) {
+      cacheReads.push(target);
+      return target === legacyCachePath ? cacheRead.promise : null;
+    },
+    writeCachedJson: async () => {}
+  });
+  const page = service.load(f.A, path, { legacyCachePath, onCached: () => assert.fail("obsolete account rendered a cached studio") });
+  await flush();
+  assert.deepEqual(cacheReads, [path, legacyCachePath]);
+  f.switchAccount();
+  cacheRead.resolve({ payload: { makers: [{ id: "old" }] } });
+  networkRead.reject(new Error("old request failed"));
+  assert.equal(await page, null);
 });
 console.log(`Android FanHao search suggestions: ${cases} cases PASS`);
 if (originalStorage) Object.defineProperty(globalThis, "localStorage", originalStorage); else delete globalThis.localStorage;

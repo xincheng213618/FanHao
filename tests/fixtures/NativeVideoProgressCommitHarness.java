@@ -61,6 +61,58 @@ public final class NativeVideoProgressCommitHarness {
         require(call.values.get(key).equals(intent.extras.get(key)),"play parameter lost: "+key);
       require(receiver(plugin)!=null,"Intent receipt endpoint missing");
     });
+    for (int step : new int[]{-1, 1}) check("episode direction " + step + " keeps the original progress receiver", () -> {
+      FanHaoPlayerPlugin plugin = new FanHaoPlayerPlugin();
+      PluginCall call = call("episode");
+      call.values.put("previousEpisode", step == -1);
+      call.values.put("nextEpisode", step == 1);
+      plugin.play(call);
+      require(call.resolves == 0 && plugin.activity.starts == 1, "episode launch must wait for the Activity result");
+      require(Boolean.valueOf(step == -1).equals(plugin.activity.started.extras.get(NativePlayerActivity.EXTRA_PREVIOUS_EPISODE)), "previous direction was lost");
+      require(Boolean.valueOf(step == 1).equals(plugin.activity.started.extras.get(NativePlayerActivity.EXTRA_NEXT_EPISODE)), "next direction was lost");
+      receiver(plugin).send(Activity.RESULT_OK, null);
+      drainReceivers(); plugin.drainTasks(); assertReceipt(plugin, "episode");
+      plugin.deliverActivityResult(Activity.RESULT_OK, new Intent().putExtra(NativePlayerActivity.EXTRA_EPISODE_STEP, step));
+      require(call.resolves == 1 && Integer.valueOf(step).equals(call.result.get("episodeStep")), "allowed selection did not resolve");
+    });
+    for (int status : new int[]{Activity.RESULT_CANCELED, Activity.RESULT_OK}) check("episode result ignores cancel or an unavailable direction " + status, () -> {
+      FanHaoPlayerPlugin plugin = new FanHaoPlayerPlugin();
+      PluginCall call = call("episode");
+      call.values.put("nextEpisode", true);
+      plugin.play(call);
+      plugin.deliverActivityResult(status, new Intent().putExtra(NativePlayerActivity.EXTRA_EPISODE_STEP, status == Activity.RESULT_OK ? -1 : 1));
+      require(call.resolves == 1 && !call.result.containsKey("episodeStep"), "unavailable episode selection reached the client");
+    });
+    check("picker-only launch returns to the client and keeps its playback receipt", () -> {
+      FanHaoPlayerPlugin plugin = new FanHaoPlayerPlugin();
+      PluginCall call = call("picker");
+      call.values.put("episodePicker", true);
+      plugin.play(call);
+      require(call.resolves == 0 && plugin.activity.starts == 1, "picker must wait for the Activity result");
+      require(Boolean.TRUE.equals(plugin.activity.started.extras.get(NativePlayerActivity.EXTRA_EPISODE_PICKER)), "picker launch flag missing");
+      receiver(plugin).send(Activity.RESULT_OK, null);
+      drainReceivers(); plugin.drainTasks(); assertReceipt(plugin, "picker");
+      plugin.deliverActivityResult(Activity.RESULT_OK, new Intent().putExtra(NativePlayerActivity.EXTRA_EPISODE_PICKER, true));
+      require(call.resolves == 1 && Boolean.TRUE.equals(call.result.get("episodePicker")), "picker result did not reach the client");
+    });
+    check("unrequested picker result cannot open a picker", () -> {
+      FanHaoPlayerPlugin plugin = new FanHaoPlayerPlugin();
+      PluginCall call = call("episode");
+      call.values.put("nextEpisode", true);
+      plugin.play(call);
+      plugin.deliverActivityResult(Activity.RESULT_OK, new Intent().putExtra(NativePlayerActivity.EXTRA_EPISODE_PICKER, true));
+      require(call.resolves == 1 && !call.result.containsKey("episodePicker"), "unexpected picker result reached the client");
+    });
+    check("work player ignores episode controls and resolves immediately", () -> {
+      FanHaoPlayerPlugin plugin = new FanHaoPlayerPlugin();
+      PluginCall call = call("work");
+      call.values.put("mode", "work-video");
+      call.values.put("nextEpisode", true);
+      call.values.put("episodePicker", true);
+      plugin.play(call);
+      require(call.resolves == 1 && !plugin.activity.started.extras.containsKey(NativePlayerActivity.EXTRA_NEXT_EPISODE), "work launch unexpectedly entered series mode");
+      require(!plugin.activity.started.extras.containsKey(NativePlayerActivity.EXTRA_EPISODE_PICKER), "work launch unexpectedly enabled the picker");
+    });
     check("commit crosses ResultReceiver then Capacitor task handler with immutable identity",()->{
       FanHaoPlayerPlugin plugin=opened("session-a");ResultReceiver receiver=receiver(plugin);
       Bundle forged=new Bundle();forged.putString("videoId","wrong");forged.putString("progressUrl","http://wrong.invalid");

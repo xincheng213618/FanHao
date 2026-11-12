@@ -1316,7 +1316,7 @@ body.novel-reader-view .app-shell {
 .novel-reader-topbar {
   top: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   min-height: calc(58px + var(--fanhao-safe-area-inset-top, env(safe-area-inset-top)));
@@ -1349,6 +1349,7 @@ body.novel-reader-view .app-shell {
 }
 
 .novel-reader-topbar .novel-reader-back,
+.novel-reader-topbar .novel-reader-bookmark-trigger,
 .novel-reader-toolbar .novel-reader-page-button,
 .novel-reader-toolbar .novel-reader-tool-button,
 .novel-reader-settings-panel button {

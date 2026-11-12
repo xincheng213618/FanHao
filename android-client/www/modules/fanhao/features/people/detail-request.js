@@ -9,5 +9,6 @@ export function personDetailPath(personId, options = {}) {
     includeMissingLocal: options.includeMissingLocal === false ? "0" : "1",
     includeCompilation: options.includeCompilation === false ? "0" : "1"
   });
+  if (options.query) params.set("q", options.query);
   return `/api/people/${encodeURIComponent(personId)}?${params}`;
 }

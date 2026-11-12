@@ -184,7 +184,7 @@ async function snapshot(page) {
       book: __novelAudit.records?.get(card)?.book || __novelAudit.cardBooks.get(card), text: card.textContent, className: card.className,
       buttons: [...card.querySelectorAll("button")].map(button => [button.textContent, button.getAttribute("aria-label")])
     })), more: document.querySelector("#viewContent .novel-mobile-load-more")?.textContent || "",
-    sources: [...document.querySelectorAll("#viewContent .novel-mobile-shelf-toolbar button")].map(button => [button.textContent, button.getAttribute("aria-pressed")]),
+    sources: [...document.querySelectorAll("#viewContent .novel-mobile-shelf-toolbar nav button, #viewContent .novel-mobile-shelf-import")].map(button => [button.textContent, button.getAttribute("aria-pressed")]),
     search: document.querySelector(".novel-mobile-search-result-meta")?.textContent || ""
   }));
 }
@@ -276,10 +276,103 @@ async function localReadRecovery(surface) {
     assert.equal(listRequests(f).length, requests, "local-summary retry neither increments the remote target nor sends another GET");
   } finally { await f.context.close(); }
 }
+async function localReadingState(surface) {
+  const f = await surface.open(2);
+  const { page } = f;
+  const source = name => page.getByRole("button", { name, exact: true });
+  const filter = page.getByRole("combobox", { name: "阅读进度" });
+  const cards = page.locator(".novel-mobile-list .novel-mobile-card-body strong");
+  async function titles(expected) {
+    await ready(page, expected.length);
+    assert.deepEqual((await cards.allTextContents()).sort(), [...expected].sort());
+  }
+  try {
+    await page.setViewportSize({ width: 320, height: 780 });
+    assert.equal(await filter.count(), 0);
+    await page.evaluate(async () => {
+      const { saveLocalNovelEntry, saveLocalNovelProgress } = await import("/js/local-novels.js");
+      window.__shelfFixture = new Map();
+      for (const [key, title, category, index, ratio] of [
+        ["unread", "本机未读", "历史", 0, 0],
+        ["early", "读完首章", "历史", 1, 1],
+        ["late", "在读末章", "历史", 2, .999],
+        ["finished", "整本读完", "科幻", 2, 1],
+        ["review", "等待确认", "科幻", 2, .9]
+      ]) {
+        const id = `local:reading-state-${key}`;
+        const entry = { book: { id, title, category, sourceType: "local-file" }, chapters: [
+          { index: 1, title: "合成首章", content: "唯一的首章正文。" },
+          { index: 2, title: "合成末章", content: "唯一的末章正文。" }
+        ] };
+        const saved = await saveLocalNovelEntry(entry);
+        __shelfFixture.set(key, { id, generation: saved.generation, saveLocalNovelProgress });
+        if (index) {
+          const progress = await saveLocalNovelProgress(id, { chapterIndex: index, scrollRatio: ratio }, { expectedGeneration: saved.generation });
+          if (!progress?.book.progress) throw new Error("Synthetic reading progress was not saved");
+        }
+        if (key === "review") {
+          entry.chapters[1].content = "重新导入后，正文有变化。";
+          const replacement = await saveLocalNovelEntry(entry, { expectedGeneration: saved.generation });
+          if (replacement?.book.progressRecovery?.status !== "needs_review") throw new Error("Synthetic reading recovery was not created");
+        }
+      }
+    });
+    await source("手机离线").click();
+    await titles(["本机未读", "读完首章", "在读末章", "整本读完", "等待确认"]);
+    assert.deepEqual(await filter.locator("option").allTextContents(), ["全部状态 · 5 本", "未读 · 1 本", "在读 · 2 本", "已读完 · 1 本", "续读待确认 · 1 本"]);
+    assert.equal(await filter.evaluate(node => {
+      const rect = node.getBoundingClientRect();
+      return rect.height >= 44 && rect.left >= 0 && rect.right <= innerWidth;
+    }), true, "the native filter is reachable on a 320px viewport");
+    await page.evaluate(() => {
+      __novelAudit.metadataReads = 0;
+      const getAll = IDBObjectStore.prototype.getAll;
+      IDBObjectStore.prototype.getAll = function (...args) {
+        if (this.transaction.db.name === "fanhao-local-novels" && this.name === "bookMetadata") __novelAudit.metadataReads++;
+        return getAll.apply(this, args);
+      };
+    });
+    const requests = listRequests(f).length;
+    await filter.selectOption("unread"); await titles(["本机未读"]);
+    await filter.selectOption("reading"); await titles(["读完首章", "在读末章"]);
+    await filter.selectOption("finished"); await titles(["整本读完"]);
+    await filter.selectOption("review"); await titles(["等待确认"]);
+    await page.getByRole("button", { name: "选择位置《等待确认》" }).waitFor();
+    assert.match(await page.locator("#viewMeta").textContent(), /^1 本/);
+    assert.equal(await page.locator(".novel-mobile-load-more").count(), 0);
+    assert.equal(await filter.evaluate(node => document.activeElement === node), true);
+    assert.equal(await page.evaluate(() => __novelAudit.metadataReads), 0, "changing filters does not re-read local metadata");
+    assert.equal(listRequests(f).length, requests, "offline filters never request the bookstore");
+
+    const categories = page.getByRole("navigation", { name: "小说分类" });
+    await categories.getByRole("button", { name: "历史", exact: true }).click();
+    await page.getByText("没有符合「续读待确认」的离线小说。").waitFor();
+    assert.equal(await filter.inputValue(), "review");
+    await page.getByRole("button", { name: "查看全部状态" }).click();
+    await titles(["本机未读", "读完首章", "在读末章"]);
+    assert.equal(await categories.getByRole("button", { name: "历史", exact: true }).getAttribute("aria-pressed"), "true");
+    await categories.getByRole("button", { name: "全部", exact: true }).click();
+    await titles(["本机未读", "读完首章", "在读末章", "整本读完", "等待确认"]);
+
+    await filter.selectOption("finished"); await titles(["整本读完"]);
+    await source("电脑书库").click(); await ready(page, 2);
+    assert.equal(await filter.count(), 0);
+    await page.evaluate(async () => {
+      const { id, generation, saveLocalNovelProgress } = __shelfFixture.get("late");
+      await saveLocalNovelProgress(id, { chapterIndex: 2, scrollRatio: 1 }, { expectedGeneration: generation });
+    });
+    await source("手机离线").click(); await titles(["整本读完", "在读末章"]);
+    assert.equal(await filter.inputValue(), "finished");
+    assert.deepEqual(await filter.locator("option").allTextContents(), ["全部状态 · 5 本", "未读 · 1 本", "在读 · 1 本", "已读完 · 2 本", "续读待确认 · 1 本"]);
+  } finally { await f.context.close(); }
+}
 async function nativeSurface(surface) {
   const f = await surface.open(160, ([first]) => {
     first.progress = { chapterIndex: 7, chapterId: `${first.id}-c7`, scrollRatio: 0.4, catalogRevision: first.catalogRevision };
   });
+  // This assertion covers list navigation. Keep the chapter response pending
+  // so closing the browser cannot trigger an unrelated reader progress write.
+  const reading = hold(f, url => url.pathname === "/api/novels/book-00000/chapters/7");
   try {
     await f.page.locator(".novel-mobile-load-more").scrollIntoViewIfNeeded(); await frames(f.page);
     await f.page.locator(".novel-mobile-load-more").focus();
@@ -307,7 +400,10 @@ async function nativeSurface(surface) {
     const params = await f.page.evaluate(() => __novelAudit.host.navigation.currentParams());
     assert.equal(params.id, "book-00000");
     assert.equal(params.chapterIndex, "7", "the separate reading control must open the saved chapter");
-  } finally { await f.context.close(); }
+  } finally {
+    try { await f.context.close(); }
+    finally { reading.release(); }
+  }
 }
 async function seedCache(f, limit, books, total = f.books.length) {
   await f.page.evaluate(async ({ limit, books, total, realm }) => {
@@ -476,6 +572,7 @@ try {
     for (const [name, run] of [
       ["scale", async () => { createdCards = await scale(oldSurface, nextSurface); }],
       ["fallbacks", () => fallbacks(oldSurface, nextSurface)], ["failure", () => failureRecovery(nextSurface)], ["local-read", () => localReadRecovery(nextSurface)],
+      ["local-reading-state", () => localReadingState(nextSurface)],
       ["native", () => nativeSurface(nextSurface)], ["cache", () => cachedRefresh(nextSurface)],
       ["intent", () => fallbackIntent(nextSurface)], ["retirement", () => retirement(nextSurface)], ["account", () => accountChange(nextSurface)]
     ]) if (!casePattern || name.includes(casePattern)) { await run(); groups++; console.log(`PASS ${name}`); }

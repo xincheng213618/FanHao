@@ -1,26 +1,27 @@
-import { fetchJson } from "../../js/api.js?v=assets-76f4b0fadf4d";
+import { fetchJson } from "../../js/api.js?v=assets-06c1d7f13464";
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-76f4b0fadf4d";
-import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-76f4b0fadf4d";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-06c1d7f13464";
+import { cacheAgeText, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-06c1d7f13464";
 import { formatNumber } from "../../js/format.js";
-import { createWorkListState } from "../../js/work-filtering.js?v=assets-76f4b0fadf4d";
-import { createWorkCards } from "./features/works/cards.js?v=assets-76f4b0fadf4d";
-import { workCollectionPath } from "./features/works/collection-request.js?v=assets-76f4b0fadf4d";
-import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=assets-76f4b0fadf4d";
-import { workDataSignature } from "./features/works/work-data-signature.js?v=assets-76f4b0fadf4d";
-import { createRankingViews } from "./features/rankings/ranking-views.js?v=assets-76f4b0fadf4d";
-import { createWorkPageDataService } from "./features/works/page-data-service.js?v=assets-76f4b0fadf4d";
-import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=assets-76f4b0fadf4d";
-import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=assets-76f4b0fadf4d";
-import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=assets-76f4b0fadf4d";
-import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=assets-76f4b0fadf4d";
-import { createFanhaoSearchPage } from "./search-page.js?v=assets-76f4b0fadf4d";
-import { normalizeStudioSort, selectStudios, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=assets-76f4b0fadf4d";
-import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=assets-76f4b0fadf4d";
-import { createCategoryViews } from "./features/categories/category-views.js?v=assets-76f4b0fadf4d";
+import { createWorkListState } from "../../js/work-filtering.js?v=assets-06c1d7f13464";
+import { createWorkCards } from "./features/works/cards.js?v=assets-06c1d7f13464";
+import { workCollectionPath } from "./features/works/collection-request.js?v=assets-06c1d7f13464";
+import { createFavoriteWorkViews } from "./features/works/favorite-page.js?v=assets-06c1d7f13464";
+import { workDataSignature } from "./features/works/work-data-signature.js?v=assets-06c1d7f13464";
+import { createRankingViews } from "./features/rankings/ranking-views.js?v=assets-06c1d7f13464";
+import { createWorkPageDataService } from "./features/works/page-data-service.js?v=assets-06c1d7f13464";
+import { createWorkSearchDataService } from "./features/works/search-data-service.js?v=assets-06c1d7f13464";
+import { createWorkDetailDataService } from "./features/works/detail-data-service.js?v=assets-06c1d7f13464";
+import { createProgressiveWorkListRenderer } from "./features/works/progressive-list-renderer.js?v=assets-06c1d7f13464";
+import { mountSearchResultToolbar } from "./features/works/search-result-toolbar.js?v=assets-06c1d7f13464";
+import { createFanhaoSearchPage } from "./search-page.js?v=assets-06c1d7f13464";
+import { normalizeStudioSort, selectStudios, studioWorkCount, STUDIO_SORT_OPTIONS } from "./features/studios/index-model.js?v=assets-06c1d7f13464";
+import { createBrandModeSwitch } from "./features/brands/brand-switch.js?v=assets-06c1d7f13464";
+import { createCategoryViews } from "./features/categories/category-views.js?v=assets-06c1d7f13464";
 const CONTINUE_PREVIEW_DAYS = 30;
 const CONTINUE_PREVIEW_LIMIT = 8;
 const STUDIO_SORT_STORAGE_KEY = "fanhao.android.studioSort";
+const STUDIO_SEARCH_DELAY_MS = 220;
 export function createWorkViews(context) {
   const {
     els,
@@ -48,7 +49,13 @@ export function createWorkViews(context) {
     renderMessage, renderWorks, serverContinuationOptions, workDataSignature,
     initialSortMode: workListState.getSortMode() });
   const workDetailDataService = createWorkDetailDataService({ getActiveUrl, pageDataService });
-  const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService });
+  const workCards = createWorkCards({ getActiveUrl, roots: [els.viewContent, els.continuePreview], showView, workDetailDataService,
+    favoriteFolders: favoriteViews.folders,
+    onFavoriteSaved(work, card) {
+      const params = getCurrentParams();
+      if (card.isConnected && getCurrentView() === "works" && params?.favorite === "1") void renderCurrentViewPreservingScroll();
+    }
+  });
   const progressiveWorkListRenderer = createProgressiveWorkListRenderer();
   let mountedAllWorks = null;
   const searchDataService = createWorkSearchDataService({ getActiveUrl, getWorksLimit, pageDataService, workListState: searchListState });
@@ -494,26 +501,21 @@ export function createWorkViews(context) {
     els.viewMeta.textContent = "正在加载";
     els.viewContent.innerHTML = `<div class="loading-row">正在加载片商</div>`;
 
-    const path = "/api/studios?limit=500";
+    const legacyCachePath = "/api/studios?limit=500";
+    const path = `${legacyCachePath}&sort=localCount`;
     const activeUrl = getActiveUrl();
     let renderedCache = false;
+    let updateIndex = null;
 
-    const renderData = (data, cacheEntry = null, headerOnly = false) => {
-      const studios = data.makers || [];
-      const total = Number(data.total || studios.length);
+    const renderData = (data, cacheEntry = null) => {
       const suffix = cacheEntry ? ` · 缓存 ${cacheAgeText(cacheEntry.updatedAt)}` : "";
-      if (headerOnly) return;
-      if (!studios.length) {
-        els.viewMeta.textContent = `0 个片商${suffix}`;
-        els.viewContent.innerHTML = "";
-        renderMessage("还没有片商数据。", "quiet", false);
-        return;
-      }
-      renderStudioIndex(studios, total, suffix);
+      updateIndex ||= mountStudioIndex(path, activeUrl, isActive);
+      updateIndex(data, suffix);
     };
 
     try {
       const result = await pageDataService.load(activeUrl, path, {
+        legacyCachePath,
         signal: isActive.signal,
         isActive,
         onCached(data, cacheEntry) {
@@ -522,7 +524,7 @@ export function createWorkViews(context) {
         }
       });
       if (!result || !isActive()) return;
-      renderData(result.data, null, result.unchanged);
+      if (!result.unchanged || !updateIndex) renderData(result.data);
     } catch (error) {
       if (!isActive()) return;
       if (renderedCache) {
@@ -624,6 +626,7 @@ export function createWorkViews(context) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "studio-card";
+    button.dataset.studioId = studio.id;
     const warmDetail = () => warmStudioDetail(studio.id);
     button.addEventListener("pointerdown", warmDetail, { passive: true });
     button.addEventListener("focus", warmDetail);
@@ -634,7 +637,7 @@ export function createWorkViews(context) {
     name.title = name.textContent;
 
     const meta = document.createElement("span");
-    const localCount = Number(studio.localWorkCount || studio.workCount || 0);
+    const localCount = studioWorkCount(studio);
     const activeYears = studioActiveYears(studio);
     meta.textContent = `${formatNumber(localCount)} 部${activeYears ? ` · ${activeYears}` : ""}`;
     button.setAttribute("aria-label", `${name.textContent}，${formatNumber(localCount)} 部作品${activeYears ? `，${activeYears}` : ""}`);
@@ -643,7 +646,15 @@ export function createWorkViews(context) {
     return button;
   }
 
-  function renderStudioIndex(studios, total, suffix = "") {
+  function mountStudioIndex(path, activeUrl, isActive) {
+    const account = captureAccountOwner(activeUrl);
+    let studios = [];
+    let total = 0;
+    let suffix = "";
+    let searchTimer = null;
+    let searchOwner = null;
+    let searched = null;
+    let searchFailed = false;
     const toolbar = document.createElement("div");
     toolbar.className = "studio-index-tools";
     const search = document.createElement("div");
@@ -653,13 +664,14 @@ export function createWorkViews(context) {
     const input = document.createElement("input");
     input.type = "search";
     input.autocomplete = "off";
-    input.placeholder = "筛选片商名称";
-    input.setAttribute("aria-label", "筛选片商名称");
+    input.maxLength = 120;
+    input.placeholder = "搜索全部片商";
+    input.setAttribute("aria-label", "搜索片商");
     input.value = studioQuery;
     const clear = document.createElement("button");
     clear.type = "button";
     clear.className = "studio-index-clear";
-    clear.setAttribute("aria-label", "清除片商筛选");
+    clear.setAttribute("aria-label", "清除片商搜索");
     clear.textContent = "×";
     search.append(input, clear);
 
@@ -673,44 +685,108 @@ export function createWorkViews(context) {
     const results = document.createElement("div");
     results.className = "studio-index-results";
     els.viewContent.replaceChildren(createBrandModeSwitch("studios", showView), toolbar, results);
+    const current = () => isActive() && getActiveUrl() === activeUrl && isAccountOwnerCurrent(account)
+      && toolbar.parentElement === els.viewContent;
 
     const paint = () => {
+      const focusId = results.contains(document.activeElement) ? document.activeElement?.dataset.studioId : null;
       const sortMode = getStudioSortMode();
-      const visible = selectStudios(studios, { query: studioQuery, sort: sortMode });
+      const visible = searched ? selectStudios(searched.makers, { sort: sortMode })
+        : selectStudios(studios, { query: studioQuery, sort: sortMode });
       const sortLabel = studioSortDescription(sortMode);
-      const countLabel = studioQuery
-        ? `${formatNumber(visible.length)} / ${formatNumber(total)}`
-        : studios.length === total
-          ? formatNumber(total)
-          : `${formatNumber(studios.length)} / ${formatNumber(total)}`;
+      const countTotal = searched ? searched.total ?? visible.length : studioQuery ? studios.length : total;
+      const countLabel = visible.length === countTotal ? formatNumber(countTotal)
+        : `${formatNumber(visible.length)} / ${formatNumber(countTotal)}`;
       count.textContent = `${countLabel} 个`;
-      order.textContent = sortLabel;
+      order.textContent = studioQuery && !searched && !searchFailed ? "搜索中…" : sortLabel;
       clear.hidden = !studioQuery;
       els.viewMeta.textContent = `${countLabel} 个片商 · ${sortLabel}${suffix}`;
       results.replaceChildren();
-      if (!visible.length) {
-        renderMessageInto(results, `没有匹配「${studioQuery}」的片商。`, "quiet", false);
-        return;
+      if (searchFailed) {
+        renderMessageInto(results, "全库搜索失败，显示已加载片商中的匹配。", "quiet", false);
+        const retry = document.createElement("button");
+        retry.type = "button";
+        retry.className = "studio-index-retry";
+        retry.textContent = "重试全库搜索";
+        retry.addEventListener("click", () => {
+          if (!current()) return;
+          input.focus({ preventScroll: true });
+          submit(0);
+        });
+        results.append(retry);
       }
-      const grid = document.createElement("div");
-      grid.className = "studio-list";
-      const fragment = document.createDocumentFragment();
-      for (const studio of visible) fragment.append(createStudioCard(studio));
-      grid.append(fragment);
-      results.append(grid);
+      if (!visible.length) {
+        if (!studioQuery || searched) renderMessageInto(results, studioQuery
+          ? `没有匹配「${studioQuery}」的片商。` : "还没有片商数据。", "quiet", false);
+      } else {
+        const grid = document.createElement("div");
+        grid.className = "studio-list";
+        const fragment = document.createDocumentFragment();
+        for (const studio of visible) fragment.append(createStudioCard(studio));
+        grid.append(fragment);
+        results.append(grid);
+      }
+      if (focusId) {
+        const card = results.querySelector(`.studio-card[data-studio-id="${CSS.escape(focusId)}"]`);
+        (card || input).focus({ preventScroll: true });
+      }
     };
 
-    input.addEventListener("input", () => {
+    function cancelSearch() {
+      clearTimeout(searchTimer);
+      searchTimer = null;
+      searchOwner?.abort();
+      searchOwner = null;
+    }
+
+    function submit(delay = STUDIO_SEARCH_DELAY_MS) {
+      if (!current()) return;
+      cancelSearch();
       studioQuery = input.value.trim();
+      searched = null;
+      searchFailed = false;
       paint();
+      if (!studioQuery) return;
+      const query = studioQuery;
+      const owner = searchOwner = new AbortController();
+      searchTimer = setTimeout(async () => {
+        searchTimer = null;
+        const ownsSearch = () => current() && searchOwner === owner;
+        if (!ownsSearch()) return;
+        try {
+          const data = await fetchJson(activeUrl, `${path}&${new URLSearchParams({ q: query })}`, { signal: owner.signal, accountScope: account, timeoutMs: 12000 });
+          if (ownsSearch()) searched = data;
+        } catch {
+          if (ownsSearch()) searchFailed = true;
+        } finally {
+          if (ownsSearch()) paint();
+        }
+      }, delay);
+    }
+
+    isActive.signal?.addEventListener("abort", cancelSearch, { once: true });
+    let composing = false;
+    input.addEventListener("compositionstart", () => { composing = true; cancelSearch(); });
+    input.addEventListener("compositionend", () => { composing = false; submit(); });
+    input.addEventListener("input", (event) => { if (!composing && !event.isComposing) submit(); });
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || composing || event.isComposing) return;
+      event.preventDefault();
+      submit(0);
     });
     clear.addEventListener("click", () => {
-      studioQuery = "";
       input.value = "";
-      paint();
+      submit(0);
       input.focus({ preventScroll: true });
     });
-    paint();
+    if (studioQuery) submit(0);
+    return (data, cacheSuffix) => {
+      if (!current()) return;
+      studios = data.makers || [];
+      total = Number(data.total ?? studios.length);
+      suffix = cacheSuffix;
+      paint();
+    };
   }
 
   function getStudioSortMode() {
@@ -957,6 +1033,7 @@ export function createWorkViews(context) {
     warmSearch: (query, category = "censored") => searchDataService.warm(query, normalizeSearchCategory(category)),
     pageDataService,
     favoriteFolders: favoriteViews.folders,
+    closeFavoriteBatch: favoriteViews.closeBatch,
     workDetailDataService,
     getSortMode: (view) => view === "rankings" ? rankingViews.getSortMode() : activeWorkListState().getSortMode(),
     getSortOptions: (view) => activeWorkListState().getSortOptions({ allowRankingSort: view === "rankings" }),

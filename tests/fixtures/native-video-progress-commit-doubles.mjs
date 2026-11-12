@@ -24,15 +24,28 @@ export const commitDoubles = {
   'android/content/Intent.java': `package android.content;
     public class Intent {
       public final java.util.Map<String,Object> extras=new java.util.HashMap<>();
+      public Intent(){}
       public Intent(android.app.Activity activity,Class<?> target){if(activity==null)throw new NullPointerException("detached");}
       public Intent putExtra(String key,Object value){extras.put(key,value);return this;}
+      public boolean getBooleanExtra(String key,boolean fallback){Object value=extras.get(key);return value instanceof Boolean?(Boolean)value:fallback;}
       public String getStringExtra(String key){return (String)extras.get(key);}
+      public int getIntExtra(String key,int fallback){return extras.get(key) instanceof Number?((Number)extras.get(key)).intValue():fallback;}
       @SuppressWarnings("unchecked") public <T> T getParcelableExtra(String key){return (T)extras.get(key);}
     }`,
   'android/util/Log.java': `package android.util; public class Log { public static int i(String t,String m){return 0;} public static int w(String t,String m,Throwable e){return 0;} }`,
   'androidx/annotation/OptIn.java': 'package androidx.annotation; public @interface OptIn { Class<?>[] markerClass(); }',
   'androidx/media3/common/util/UnstableApi.java': 'package androidx.media3.common.util; public @interface UnstableApi {}',
-  'androidx/activity/result/ActivityResult.java': `package androidx.activity.result; public class ActivityResult { public int getResultCode(){return 0;} public android.content.Intent getData(){return null;} }`,
+  'androidx/activity/result/ActivityResult.java': `package androidx.activity.result; public class ActivityResult {
+    private final int code; private final android.content.Intent data;
+    public ActivityResult(int code,android.content.Intent data){this.code=code;this.data=data;}
+    public int getResultCode(){return code;} public android.content.Intent getData(){return data;}
+  }`,
+  'com/getcapacitor/JSArray.java': `package com.getcapacitor; public class JSArray {
+    private final String json; private final int size;
+    public JSArray(String json,int size){this.json=json;this.size=size;}
+    public int length(){return size;}
+    @Override public String toString(){return json;}
+  }`,
   'com/getcapacitor/JSObject.java': `package com.getcapacitor; public class JSObject extends java.util.HashMap<String,Object> {}`,
   'com/getcapacitor/PluginMethod.java': 'package com.getcapacitor; public @interface PluginMethod {}',
   'com/getcapacitor/annotation/ActivityCallback.java': 'package com.getcapacitor.annotation; public @interface ActivityCallback {}',
@@ -43,6 +56,7 @@ export const commitDoubles = {
       public final java.util.Map<String,Object> values=new java.util.HashMap<>();
       public JSObject result; public String error; public int resolves,rejects;
       public String getString(String key){return (String)values.get(key);}
+      public JSArray getArray(String key){return (JSArray)values.get(key);}
       public Double getDouble(String key,double fallback){return values.containsKey(key)?((Number)values.get(key)).doubleValue():fallback;}
       public Integer getInt(String key,int fallback){return values.containsKey(key)?((Number)values.get(key)).intValue():fallback;}
       public Boolean getBoolean(String key,boolean fallback){return values.containsKey(key)?(Boolean)values.get(key):fallback;}
@@ -56,6 +70,7 @@ export const commitDoubles = {
       public final java.util.ArrayDeque<Runnable> tasks=new java.util.ArrayDeque<>();
       public final java.util.List<JSObject> events=new java.util.ArrayList<>();
       public boolean executing,failExecute,failNotify; public int destroyCalls;
+      private PluginCall pendingResultCall; private String pendingResultMethod;
       public android.app.Activity getActivity(){return activity;}
       public void load(){}protected void handleOnStart(){}protected void handleOnResume(){}protected void handleOnPause(){}protected void handleOnNewIntent(android.content.Intent intent){}
       public void execute(Runnable task){if(failExecute)throw new IllegalStateException("closed bridge");tasks.add(task);}
@@ -67,11 +82,19 @@ export const commitDoubles = {
         if(failNotify)throw new IllegalStateException("listener unavailable");events.add(data);
       }
       protected void handleOnDestroy(){destroyCalls++;}
-      public void startActivityForResult(PluginCall call,android.content.Intent intent,String method){activity.startActivity(intent);}
+      public void startActivityForResult(PluginCall call,android.content.Intent intent,String method){activity.startActivity(intent);pendingResultCall=call;pendingResultMethod=method;}
+      public void deliverActivityResult(int code,android.content.Intent data)throws ReflectiveOperationException {
+        Class<androidx.activity.result.ActivityResult> resultType=androidx.activity.result.ActivityResult.class;
+        java.lang.reflect.Method method=getClass().getDeclaredMethod(pendingResultMethod,PluginCall.class,resultType);
+        method.setAccessible(true);method.invoke(this,pendingResultCall,new androidx.activity.result.ActivityResult(code,data));
+        pendingResultCall=null;pendingResultMethod=null;
+      }
     }`,
   'org/json/JSONArray.java': 'package org.json; public class JSONArray {}',
   'local/fanhao/library/NativePlayerActivity.java': `package local.fanhao.library; public class NativePlayerActivity {
     public static final String EXTRA_URL="url",EXTRA_FALLBACK_URL="fallbackUrl",EXTRA_TITLE="title",EXTRA_SUBTITLE="subtitle",EXTRA_PROGRESS_URL="progressUrl",EXTRA_WORK_ID="workId",EXTRA_VIDEO_ID="videoId",EXTRA_MODE="mode",EXTRA_POSITION="position",EXTRA_DURATION="duration",EXTRA_PROGRESS_RECEIVER="progressReceiver",EXTRA_PROGRESS_AUTH_TOKEN="progressAuthToken";
+    public static final String EXTRA_SUBTITLE_TRACKS="subtitleTracks",EXTRA_SUBTITLE_ACCOUNT_OWNER="subtitleAccountOwner",EXTRA_SUBTITLE_SEEK_FALLBACK_URL="subtitleSeekFallbackUrl";
+    public static final String EXTRA_PREVIOUS_EPISODE="previousEpisode",EXTRA_NEXT_EPISODE="nextEpisode",EXTRA_EPISODE_STEP="episodeStep",EXTRA_EPISODE_PICKER="episodePicker";
   }`,
   'local/fanhao/library/NativeShortVideoActivity.java': `package local.fanhao.library; public class NativeShortVideoActivity {
     public static final String EXTRA_VIDEOS_JSON="videos",EXTRA_START_INDEX="startIndex",EXTRA_START_ID="startId",EXTRA_BASE_URL="baseUrl",EXTRA_FEED_URL="feedUrl",EXTRA_NEXT_OFFSET="nextOffset",EXTRA_NEXT_CURSOR="nextCursor",EXTRA_HAS_MORE="hasMore",EXTRA_OPEN_AUTHOR_PANEL="openAuthorPanel";

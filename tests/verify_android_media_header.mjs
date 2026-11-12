@@ -56,6 +56,7 @@ function harness(input = sources, { mode = "movie", cached = null, limit = 40, s
     isChannelFavorite: () => false, toggleChannelFavorite: () => ({ favorite: true, items: [] }),
     photoCatalogCollections: items => items, loadPreviewImage() {}, enhanceAutoLoadMore: button => button,
     fetchJson: async (...args) => {
+      if (args[1].startsWith("/api/gallery-media/continue-watching?")) return { items: [] };
       calls.network.push(args);
       if (queued.length) { const value = queued.shift(); if (value instanceof Error) throw value; return await value; }
       throw new Error("合成电脑端暂时不可读");

@@ -5,11 +5,12 @@ import {
   normalizeAuthorAccountStatus,
   normalizeFollowingAuthorFilter,
   normalizeFollowingAuthorSort,
+  normalizeShortVideoMedia,
   normalizeShortVideoSearchTab,
   normalizeShortVideoSort,
   normalizeShortVideoSortForSource,
   normalizeShortVideoSource
-} from "../../js/short-video-route-contract.js?v=assets-76f4b0fadf4d";
+} from "../../js/short-video-route-contract.js?v=assets-06c1d7f13464";
 
 export const DEFAULT_LIMIT = 12;
 export const AUTHOR_INITIAL_COUNT = 24;
@@ -60,7 +61,8 @@ export {
   canonicalShortVideoViewParams,
   normalizeAuthorAccountStatus,
   normalizeFollowingAuthorFilter,
-  normalizeFollowingAuthorSort
+  normalizeFollowingAuthorSort,
+  normalizeShortVideoMedia
 };
 
 export function selectOption(value, label) {

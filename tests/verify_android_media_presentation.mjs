@@ -20,6 +20,7 @@ function nested(text, name) {
 function harness(input = source) {
   const document = createNavigationFixtureDocument(), calls = { covers: [], destinations: [] };
   const c = vm.createContext({ document, channelConfig, tvSeriesCardNavigation, formatBytes, formatDate, formatNumber,
+    mediaWatchlist: null,
     absoluteUrl: (base, path) => new URL(path, base).href, getActiveUrl: () => "https://synthetic.invalid/",
     loadChannelPreviewImage: (...args) => calls.covers.push(args),
     updateChannelParams: (...args) => calls.destinations.push(["channel", ...args]),

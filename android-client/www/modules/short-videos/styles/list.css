@@ -645,6 +645,27 @@ body.short-video-search-page-view .bottom-nav {
   transform: translateX(-50%) scaleX(1);
 }
 
+.short-video-mobile-media-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-inline: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.short-video-mobile-media-filter {
+  min-height: 44px;
+  min-width: 84px;
+  padding-inline: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+}
+
 .short-video-mobile-toolbar {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

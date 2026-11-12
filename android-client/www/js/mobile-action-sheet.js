@@ -64,8 +64,11 @@ export function openMobileActionSheet(config = {}) {
     closed = true;
     activeSheet = null;
     overlay.remove();
-    if (restoreFocus && sheetDocument === document && trigger && sheetDocument.body.contains(trigger) && !trigger.disabled) {
-      trigger.focus?.({ preventScroll: true });
+    if (restoreFocus && sheetDocument === document) {
+      const focusTarget = typeof trigger === "function" ? trigger() : trigger;
+      if (focusTarget && sheetDocument.body.contains(focusTarget) && !focusTarget.disabled) {
+        focusTarget.focus?.({ preventScroll: true });
+      }
     }
     return true;
   };

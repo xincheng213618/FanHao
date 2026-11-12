@@ -1,6 +1,6 @@
 import { formatNumber } from "../../js/format.js";
-import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-76f4b0fadf4d";
-import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-76f4b0fadf4d";
+import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-06c1d7f13464";
+import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-06c1d7f13464";
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
 
 const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";
@@ -418,7 +418,7 @@ export function buildFanhaoSearchSuggestions(data = {}, limit = MAX_LIVE_SUGGEST
     const id = cleanQuery(work?.id);
     if (!id || seenWorks.has(id)) continue;
     seenWorks.add(id);
-    const detail = [workGridPerson(work), workGridMeta(work)].filter(Boolean).join(" · ") || "作品";
+    const detail = [workGridPerson(work), workGridMeta(work, { ratingOnCover: false })].filter(Boolean).join(" · ") || "作品";
     items.push({
       kind: "work",
       id,

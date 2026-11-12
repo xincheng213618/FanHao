@@ -1,5 +1,5 @@
-import { fetchJson } from "../../../../js/api.js?v=assets-76f4b0fadf4d";
-import { clearCachedJsonByPrefixes } from "../../../../js/cache.js?v=assets-76f4b0fadf4d";
+import { fetchJson } from "../../../../js/api.js?v=assets-06c1d7f13464";
+import { clearCachedJsonByPrefixes } from "../../../../js/cache.js?v=assets-06c1d7f13464";
 import { accountChangedError, captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
 
 export const FAVORITE_FOLDER_RETRY_DELAYS_MS = Object.freeze([180]);
@@ -296,6 +296,55 @@ export function createFavoriteFolderFeature(context = {}) {
     });
   }
 
+  async function saveFavoriteToFolder(work, folderId, onSaved = () => {}) {
+    const mutation = beginMutation(work.id);
+    rememberWorks([work]);
+    return enqueueWorkMutation(mutation, async () => {
+      const data = await request(`/api/favorites/${encodeURIComponent(work.id)}`, {
+        method: "PUT", body: { folderId }, accountScope: mutation.accountScope
+      });
+      assertMutationCurrent(mutation);
+      if (data?.ok !== true || String(data.workId) !== mutation.workId || data.favorite !== true || data.favoriteFolder?.folderId !== folderId) {
+        throw new Error("未收到完整的收藏结果，请重试");
+      }
+      await invalidateFolderViews(mutation);
+      for (const item of trackedWorks) {
+        if (String(item.id) === mutation.workId) applyFavoritePayload(item, data);
+      }
+      applyFavoritePayload(work, data);
+      syncLibraryWork(mutation, work);
+      rememberFolders(data.folders, { merge: true });
+      notifyWorkChange(mutation, work, onSaved);
+      return data;
+    });
+  }
+
+  async function moveFavoritesToFolder(workIds, folderId) {
+    const ids = new Set(workIds.map(String));
+    if (!ids.size || ids.has("")) throw new Error("请选择要移动的作品");
+    const mutation = beginMutation();
+    return enqueueFolderMutation(mutation, async () => {
+      const data = await request("/api/favorites/batch-move", {
+        method: "PUT", accountScope: mutation.accountScope, body: { workIds: [...ids], folderId }
+      });
+      assertMutationCurrent(mutation);
+      const target = Array.isArray(data?.folders) && data.folders.find(folder => folder.id === folderId);
+      const receiptIds = Array.isArray(data?.workIds) ? new Set(data.workIds) : null;
+      if (data?.ok !== true || data.folderId !== folderId || !target
+        || receiptIds?.size !== ids.size || [...ids].some(id => !receiptIds.has(id))) {
+        throw new Error("未收到完整的移动结果，请重试");
+      }
+      rememberFolders(data.folders);
+      for (const work of new Set([...trackedWorks, ...(context.getLibrary?.()?.works || [])])) {
+        if (work.favorite && ids.has(String(work.id))) {
+          applyFavoriteFolder(work, { folderId: target.id, folderName: target.name });
+        }
+      }
+      await invalidateFolderViews(mutation);
+      return data;
+    }, { invalidateBefore: false });
+  }
+
   function beginMutation(workId = "") {
     ensureScope();
     mutationRevision += 1;
@@ -321,11 +370,11 @@ export function createFavoriteFolderFeature(context = {}) {
     return result;
   }
 
-  function enqueueFolderMutation(mutation, operation) {
+  function enqueueFolderMutation(mutation, operation, { invalidateBefore = true } = {}) {
     // A structural edit follows existing work moves; subsequent work edits wait
     // for it, so their full folder snapshots cannot resurrect a deleted folder.
     const barriers = [folderMutationTail, ...workMutationTails.values()];
-    context.pageDataService?.invalidate(mutation.scope, "/api/favorites");
+    if (invalidateBefore) context.pageDataService?.invalidate(mutation.scope, "/api/favorites");
     const result = Promise.all(barriers).then(() => {
       assertMutationCurrent(mutation);
       return operation();
@@ -423,6 +472,23 @@ export function createFavoriteFolderFeature(context = {}) {
     });
   }
 
+  function openSavePicker(work, options = {}) {
+    if (!work?.id || work.missingLocal) return null;
+    return openFolderSheet({
+      title: "收藏到…",
+      trigger: options.trigger || document.activeElement,
+      work,
+      saveToFolder: true,
+      onMoved: options.onSaved
+    });
+  }
+
+  function closePicker(options) {
+    if (!activeSheetClose) return false;
+    activeSheetClose(options);
+    return true;
+  }
+
   function openFolderSheet(options = {}) {
     ensureScope();
     activeSheetClose?.();
@@ -461,7 +527,7 @@ export function createFavoriteFolderFeature(context = {}) {
     input.setAttribute("aria-label", options.manage ? "收藏夹新名称" : "收藏夹名称");
     const submit = document.createElement("button");
     submit.type = "submit";
-    submit.textContent = options.manage ? "保存名称" : options.work ? "新建并移动" : "新建";
+    submit.textContent = options.manage ? "保存名称" : options.saveToFolder ? "新建并收藏" : options.work ? "新建并移动" : "新建";
     form.append(input, submit);
     panel.append(header, status, list, form);
     const deleteButton = document.createElement("button");
@@ -488,13 +554,13 @@ export function createFavoriteFolderFeature(context = {}) {
     let selectedId = String(options.selectedFolderId || "");
     const selectedFolder = () => folders.find(folder => folder.id === selectedId && folder.id !== "default");
     const isSheetCurrent = () => !closed && isAccountOwnerCurrent(sheetScope) && String(context.getActiveUrl() || "").replace(/\/+$/u, "") === sheetBase;
-    const close = () => {
+    const close = ({ restoreFocus = true } = {}) => {
       if (closed) return;
       closed = true;
       document.removeEventListener("keydown", handleDocumentKeydown, true);
       overlay.remove();
       if (activeSheetClose === close) activeSheetClose = null;
-      if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+      if (restoreFocus && trigger?.isConnected) trigger.focus({ preventScroll: true });
     };
     const setPending = (value) => {
       pending = value;
@@ -540,16 +606,22 @@ export function createFavoriteFolderFeature(context = {}) {
     };
     const performMove = async (folderId, focusTarget = null) => {
       if (!isSheetCurrent()) { close(); return; }
+      if (options.saveToFolder && workMutationTails.has(`${sheetBase}\n${options.work.id}`)) {
+        status.textContent = "此作品的收藏操作正在处理，请稍后再试";
+        setPending(false);
+        return;
+      }
       setPending(true);
-      status.textContent = "正在移动";
+      status.textContent = options.saveToFolder ? "正在保存收藏" : "正在移动";
       try {
-        await moveFavorite(options.work, folderId, options.onMoved);
+        const action = options.saveToFolder ? saveFavoriteToFolder : moveFavorite;
+        await action(options.work, folderId, options.onMoved);
         if (!isSheetCurrent()) { close(); return; }
-        status.textContent = "已移动";
+        status.textContent = options.saveToFolder ? "已保存收藏" : "已移动";
         close();
       } catch (error) {
         if (!isSheetCurrent()) { close(); return; }
-        status.textContent = error?.message || "移动收藏失败";
+        status.textContent = error?.message || (options.saveToFolder ? "收藏保存失败" : "移动收藏失败");
         setPending(false);
         focusTarget?.focus();
       }
@@ -638,18 +710,18 @@ export function createFavoriteFolderFeature(context = {}) {
     document.body.append(overlay);
     activeSheetClose = close;
     if (options.manage) { form.hidden = true; deleteButton.hidden = true; closeButton.focus(); }
-    else input.focus({ preventScroll: true });
+    else (options.saveToFolder ? closeButton : input).focus({ preventScroll: true });
     status.textContent = "正在读取收藏夹";
     loadFolders(options.manage === true).then(() => {
       if (!isSheetCurrent()) { close(); return; }
       status.textContent = options.manage ? "选择自建收藏夹进行改名或删除，默认收藏夹会一直保留。" : "";
       renderOptions();
       if (options.manage) { const folder = selectedFolder(); if (folder) editFolder(folder); }
-      else input.focus();
+      else if (!options.saveToFolder) input.focus();
     }).catch((error) => {
       if (!isSheetCurrent()) { close(); return; }
       status.textContent = error?.message || "收藏夹读取失败";
-      input.focus();
+      if (!options.saveToFolder) input.focus();
     });
     return { close, overlay, panel };
   }
@@ -712,7 +784,11 @@ export function createFavoriteFolderFeature(context = {}) {
     folders: () => folders.map((folder) => ({ ...folder })),
     loadFolders,
     moveFavorite,
+    moveFavoritesToFolder,
+    closePicker,
     openMovePicker,
+    openSavePicker,
+    saveFavoriteToFolder,
     rememberFolders,
     rememberWorks,
     toggleFavorite
