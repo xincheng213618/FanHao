@@ -45,6 +45,8 @@ export function createShortVideoAuthorPages(deps) {
   let authorIndexReturnContext = captureAuthorIndexReturnContext(state.shortVideo);
   let authorPageEnteredWithinApp = false;
   let authorIndexView = null;
+  let collectorFeedback = null;
+  let collectorControls = null;
   const {
     cancel: cancelAuthorCollectorPolling,
     isCurrent: isCurrentAuthorPage,
@@ -194,8 +196,7 @@ export function createShortVideoAuthorPages(deps) {
     quickRefresh.textContent = "快速刷新";
     quickRefresh.title = "通过 8765 增量采集最新作品，连续遇到旧作品后快速停止";
     quickRefresh.hidden = author.accountStatus === "banned";
-    quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick", quickRefresh)
-      .catch((error) => showBrowserToast(error?.message || "快速刷新启动失败")));
+    quickRefresh.addEventListener("click", () => runAuthorCollector(author, "quick"));
     const fullRefresh = document.createElement("button");
     fullRefresh.type = "button";
     fullRefresh.className = "short-video-author-page-secondary short-video-author-collector-action short-video-author-confirm-action";
@@ -205,25 +206,56 @@ export function createShortVideoAuthorPages(deps) {
       fullRefresh.textContent = "手动确认";
       fullRefresh.title = "手动重新检查该主页；账号恢复且能读取到作品时会解除封禁状态";
     }
-    fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full", fullRefresh)
-      .catch((error) => showBrowserToast(error?.message || "数量确认启动失败")));
-    actions.append(follow, douyin, authorFolder, quickRefresh, fullRefresh, authorDelete.button(author, state.shortVideo.authorPage));
+    fullRefresh.addEventListener("click", () => runAuthorCollector(author, "full"));
+    const status = document.createElement("p");
+    status.className = "short-video-author-collector-status";
+    status.setAttribute("role", "status");
+    const authorId = state.shortVideo.authorPage;
+    if (collectorFeedback?.authorId !== authorId) collectorFeedback = null;
+    collectorControls = { authorId, status, quickRefresh, fullRefresh, fullLabel: fullRefresh.textContent };
+    renderCollectorFeedback();
+    actions.append(follow, douyin, authorFolder, quickRefresh, fullRefresh, authorDelete.button(author, authorId), status);
     head.append(avatar, copy, actions);
     return head;
   }
 
-  async function runAuthorCollector(author = {}, mode = "quick", button) {
+  function renderCollectorFeedback() {
+    if (!collectorControls) return;
+    const { authorId, status, quickRefresh, fullRefresh, fullLabel } = collectorControls;
+    const feedback = collectorFeedback?.authorId === authorId ? collectorFeedback : null;
+    const busy = Boolean(feedback?.busy);
+    for (const [mode, button, label] of [["quick", quickRefresh, "快速刷新"], ["full", fullRefresh, fullLabel]]) {
+      button.disabled = busy;
+      if (busy && feedback.mode === mode) {
+        button.setAttribute("aria-busy", "true");
+        button.textContent = feedback.buttonLabel;
+      } else {
+        button.removeAttribute("aria-busy");
+        button.textContent = label;
+      }
+    }
+    const message = feedback?.message || "";
+    status.hidden = !message;
+    status.classList.toggle("is-error", Boolean(feedback?.error));
+    if (status.textContent !== message) status.textContent = message;
+  }
+
+  async function runAuthorCollector(author = {}, mode = "quick") {
+    const authorId = state.shortVideo.authorPage;
+    if (collectorFeedback?.busy && collectorFeedback.authorId === authorId) return;
     const secUid = String(author?.secUid || state.shortVideo.author || "").trim();
+    const label = mode === "full" ? "数量确认" : "快速刷新";
+    const feedback = collectorFeedback = { authorId, mode, busy: false, error: false, message: "", buttonLabel: "" };
     if (!secUid || secUid.startsWith("name:")) {
-      showBrowserToast("当前作者没有可关联的抖音 sec_uid");
+      feedback.error = true;
+      feedback.message = "当前作者没有可关联的抖音 sec_uid";
+      renderCollectorFeedback();
       return;
     }
-    const actions = button?.closest(".short-video-author-page-actions");
-    const buttons = [...(actions?.querySelectorAll(".short-video-author-collector-action") || [])];
-    const originalText = button?.textContent || (mode === "full" ? "确认数量" : "快速刷新");
-    buttons.forEach((item) => { item.disabled = true; });
-    button?.setAttribute("aria-busy", "true");
-    if (button) button.textContent = mode === "full" ? "开始确认" : "启动刷新";
+    feedback.busy = true;
+    feedback.buttonLabel = mode === "full" ? "开始确认" : "启动刷新";
+    feedback.message = `正在提交${label}…`;
+    renderCollectorFeedback();
     try {
       const result = await api(`/api/short-videos/authors/${encodeURIComponent(secUid)}/collector`, {
         method: "POST",
@@ -231,24 +263,36 @@ export function createShortVideoAuthorPages(deps) {
       });
       const jobId = Number(result?.jobId || 0);
       if (!jobId) throw new Error("8765 没有返回采集任务编号");
-      showBrowserToast(mode === "full" ? `数量确认已启动 #${jobId}` : `快速刷新已启动 #${jobId}`);
-      if (!isCurrentAuthorPage(secUid)) return;
+      const submittedMessage = `${label}已提交 #${jobId}`;
+      feedback.message = submittedMessage;
+      renderCollectorFeedback();
+      if (!isCurrentAuthorPage(authorId) || feedback !== collectorFeedback) return;
       const finalState = await waitForAuthorCollector({
         authorId: secUid,
         jobId,
-        onProgress: ({ processed, total }) => {
-          if (button?.isConnected) button.textContent = total ? `采集中 ${processed}/${total}` : "采集中";
+        onProgress: ({ processed, total, status }) => {
+          if (feedback !== collectorFeedback) return;
+          feedback.buttonLabel = status === "queued" ? "排队中" : total ? `采集中 ${processed}/${total}` : "采集中";
+          feedback.message = `${label} #${jobId} · ${feedback.buttonLabel}`;
+          renderCollectorFeedback();
         }
       });
-      if (!finalState || !isCurrentAuthorPage(secUid)) return;
-      if (finalState?.job?.status === "failed") throw new Error(finalState.job.message || "作者主页采集失败");
-      if (finalState?.job?.status === "stopped") throw new Error(finalState.job.message || "作者主页采集已停止");
-      showBrowserToast(finalState?.job?.message || (mode === "full" ? "数量确认完成" : "快速刷新完成"));
-      if (isCurrentAuthorPage(secUid)) await loadVideos({ skipRoute: true });
+      if (!finalState || !isCurrentAuthorPage(authorId) || feedback !== collectorFeedback) {
+        feedback.message = submittedMessage;
+        return;
+      }
+      const job = finalState.job;
+      if (job.status === "failed" || job.failed > 0) throw new Error(job.message || "作者主页采集失败");
+      if (job.status === "stopped") throw new Error(job.message || "作者主页采集已停止");
+      feedback.message = job.message || `${label}完成`;
+      renderCollectorFeedback();
+      await loadVideos({ skipRoute: true });
+    } catch (error) {
+      feedback.error = true;
+      feedback.message = error?.message || `${label}失败`;
     } finally {
-      buttons.forEach((item) => { item.disabled = false; });
-      button?.removeAttribute("aria-busy");
-      if (button?.isConnected) button.textContent = originalText;
+      feedback.busy = false;
+      renderCollectorFeedback();
     }
   }
 

@@ -1,10 +1,10 @@
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../../../js/account-owner.js";
-import { cacheAgeText } from "../../../../js/cache.js?v=assets-06c1d7f13464";
+import { cacheAgeText } from "../../../../js/cache.js?v=assets-78764ed05056";
 import { formatNumber } from "../../../../js/format.js";
-import { openMobileActionSheet } from "../../../../js/mobile-action-sheet.js?v=assets-06c1d7f13464";
-import { createWorkListState } from "../../../../js/work-filtering.js?v=assets-06c1d7f13464";
-import { workCollectionPath } from "./collection-request.js?v=assets-06c1d7f13464";
-import { createFavoriteFolderFeature } from "./favorite-folders.js?v=assets-06c1d7f13464";
+import { openMobileActionSheet } from "../../../../js/mobile-action-sheet.js?v=assets-78764ed05056";
+import { createWorkListState } from "../../../../js/work-filtering.js?v=assets-78764ed05056";
+import { workCollectionPath } from "./collection-request.js?v=assets-78764ed05056";
+import { createFavoriteFolderFeature } from "./favorite-folders.js?v=assets-78764ed05056";
 
 const FAVORITE_BATCH_LIMIT = 500;
 const QUERY_LIMIT = 120;

@@ -1,9 +1,9 @@
-import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-06c1d7f13464";
+import { absoluteUrl, loadPreviewImage } from "../../../js/image.js?v=assets-78764ed05056";
 import { formatCompact } from "../../../js/format.js";
-import { DEFAULT_SORT, initials, normalizeShortVideoMedia, selectOption } from "../shared.js?v=assets-06c1d7f13464";
-import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-06c1d7f13464";
-import { renderFollowingAuthorTools } from "./following-view.js?v=assets-06c1d7f13464";
-import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-06c1d7f13464";
+import { DEFAULT_SORT, initials, normalizeShortVideoMedia, selectOption } from "../shared.js?v=assets-78764ed05056";
+import { appendAuthorAccountStatus, renderAuthorAccountStatusTools } from "./account-status-view.js?v=assets-78764ed05056";
+import { renderFollowingAuthorTools } from "./following-view.js?v=assets-78764ed05056";
+import { refreshRenderedVideoCards, syncRenderedVideoCardMetric } from "./card-action-metric.js?v=assets-78764ed05056";
 export function createShortVideoListView(context = {}) {
   const { els, getActiveUrl, goBack, listState, openSettings, showView } = context;
   const appendVisibleAuthors = (...args) => context.appendVisibleAuthors(...args);

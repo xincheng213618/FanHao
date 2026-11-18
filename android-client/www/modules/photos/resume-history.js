@@ -1,5 +1,5 @@
 import { formatNumber } from "../../js/format.js";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-78764ed05056";
 
 export function openPhotoResumeHistory({ trigger, isCurrent, read, discard, open, onChange }) {
   const sheet = openMobileActionSheet({ title: "套图浏览记录", trigger });

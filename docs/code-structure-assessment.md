@@ -2,20 +2,19 @@
 
 ## 结论
 
-本轮重构已经把“按文件类型堆放”的结构改成“按产品形态归档”：番号、套图、影视、小说、短视频、音乐、小工具七个可见业务模块都有独立目录，并由注册表自动发现和装配。Web 与 Android 导航统一读取 `/api/modules`，新增或调整模块不再需要在两端各维护一份固定导航。
+番号、套图、影视、小说、短视频、音乐六个可见业务模块各有独立目录，由注册器发现和装配。Web 与 Android 导航读取 `/api/modules`，Android 另有本地后备清单。
 
-结构基础已经可用于后续迭代，但还不是完全插件化。服务端配置已进入 `src/bootstrap/server-config.js`，HTTP 生命周期已进入 `src/platform/server/server-host.js`；Web 端也把 FanHao 与图库/影视、小说、音乐、小工具的独立宿主分开。最大遗留仍是 `server.js` 的 FanHao 领域服务构造，以及短视频前后端的巨型文件，后续应继续按边界渐进收缩。
+服务端配置位于 `src/bootstrap/server-config.js`，HTTP 生命周期位于 `src/platform/server/server-host.js`。Web 端将 FanHao 与图库/影视、小说、音乐的宿主分开。`server.js` 仍装配 FanHao 领域服务，短视频前后端仍有较大的文件。
 
 ## 已完成的清理
 
 - 删除旧移动端审计截图、Capacitor 模板测试和 Android 重复游戏源码。
-- 离线游戏只保留 `public/games/` 一份源码，Android 构建前通过脚本生成镜像。
 - 删除迁移后无调用的兼容函数，清空旧 `src/server/` 源码树。
 - 保留并扩展有业务价值的 `tests/verify_*.mjs`；它们不是模板测试，而是当前解析、存储和模块边界的回归护栏。
 - 新增 `verify:modules`，使模块目录、客户端声明和反射发现从“约定”变成可执行约束。
 - Web 样式已按基础、壳层和模块入口维护，并由结构验证固定加载顺序。
 - 新增 `verify:repo-hygiene`，阻止生成物、服务抓取副本和含 NUL 字节的源码进入版本库。
-- `public/app.js` 已收窄为 FanHao 专属入口；`public/standalone-app.js` 与 `public/js/standalone-host.js` 负责图库/影视、小说、音乐和小工具的独立宿主。
+- `public/app.js` 是 FanHao 专属入口。`public/standalone-app.js` 与 `public/js/standalone-host.js` 负责图库/影视、小说和音乐的独立宿主。
 
 ## 当前热点
 

@@ -37,11 +37,10 @@ sources:
 | --- | --- | --- |
 | `PORT` | 按产品入口 | 聚合应用 `29998`、独立番号 `29997`、独立短视频 `29996`。 |
 | `HOST` | `0.0.0.0` | 所有网卡监听；本机测试设为 `127.0.0.1`。 |
-| `FANHAO_WEB_PASSWORD` | 未配置 | 远程访问密码；不要写入仓库、命令输出或文档示例。 |
 
 服务端按 TCP 来源地址区分本地、局域网与远程；请求头不能任意声明自己是可信客户端。
-本地来源及符合主机名条件的局域网来源通常免密，远程访问需要密码。
-管理和文件变更还受 Host/Origin 校验，不能仅凭免登录推断具备写权限。
+本机与可信局域网默认可访客浏览，远程访问需要普通用户账号。
+管理和文件变更要求本机或局域网的管理员会话，并校验 Host 和 Origin。
 
 ::: danger 不要直接添加公网反向代理
 当前没有可信代理 allowlist 与经过验证的代理链解析。
@@ -76,7 +75,6 @@ sources:
 | `FANHAO_CORE_DB` | 默认产品数据目录下的 `fanhao-core-v2.sqlite`；独立番号需要已初始化的核心库。 |
 | `FANHAO_CORE_IMAGE_DB` | 默认产品数据目录下的 `fanhao-core-images.sqlite`。 |
 | `FANHAO_SHORT_VIDEO_DB` | 默认产品数据目录下的 `short-videos.sqlite`。 |
-| `FANHAO_WORKFLOW_ROOTS` | 整理迁移允许的目录列表；未设置时沿用番号资料根目录。 |
 | `FANHAO_MANGA_DATABASE` | 默认位于漫画根目录下的 `manga.sqlite`。 |
 | `FANHAO_ACCESS_ANALYTICS_DB` | 默认产品数据目录下的 `access-analytics.sqlite`。 |
 | `FANHAO_IP2REGION_XDB` | 默认产品数据目录下的 `ip2region_v4.xdb`，IP 地域查询数据。 |

@@ -11,7 +11,8 @@ import {
   workMoveCleanupRetryRequired
 } from "../modules/fanhao/work-move-polling.js?v=20260811-work-move-ops-02";
 import { createCompletedWorkMoveReloader } from "../modules/fanhao/work-move-completion.js?v=20260811-work-move-ops-01";
-import { createSubtitleControls } from "../modules/fanhao/subtitle-controls.js?v=20261023-subtitles-04";
+import { createSubtitleControls } from "../modules/fanhao/subtitle-controls.js?v=20261114-player-subtitles-01";
+import { matchWorkCodePrefix } from "../modules/fanhao/work-code-prefix.js";
 import {
   isVrWorkForMove,
   personMoveDisplayName,
@@ -48,7 +49,8 @@ const els = {
   statusText: document.querySelector("#playerStatusText"),
   sidebar: document.querySelector("#playerSidebar"),
   toggleSidebar: document.querySelector("#toggleSidebarButton"),
-  toggleSidebarLabel: document.querySelector("#toggleSidebarButton .player-sidebar-toggle-label"),
+  bottomControls: document.querySelector("#playerBottomControls"),
+  bottomHost: document.querySelector(".player-chrome-bottom"),
   streamStart: document.querySelector("#playerStreamStart"),
   playbackRate: document.querySelector("#playerPlaybackRate"),
   skipBack: document.querySelector("#skipBackButton"),
@@ -69,7 +71,8 @@ const els = {
   filePosition: document.querySelector("#playerFilePosition"),
   meta: document.querySelector("#playerMeta"),
   back: document.querySelector("#backButton"),
-  markerA: document.querySelector("#markerAButton"),
+  correctTags: document.querySelector("#correctTagsButton"),
+  tagsDialog: document.querySelector("#playerTagsDialog"),
   correctActor: document.querySelector("#correctActorButton"),
   moveToPerson: document.querySelector("#moveToPersonButton"),
   openFile: document.querySelector("#openFileButton"),
@@ -81,7 +84,7 @@ const els = {
   javdb: document.querySelector("#javdbLink")
 };
 const subtitleHost = document.querySelector("#playerSubtitles");
-const subtitleControls = createSubtitleControls({ api, container: subtitleHost });
+const subtitleControls = createSubtitleControls({ api, container: subtitleHost, autoLoadMatched: true });
 const subtitleMenu = subtitleHost?.querySelector("details");
 const episodeNavigation = createPlayerEpisodeNavigation({
   api, container: document.querySelector("#playerEpisodeNavigation"),
@@ -99,6 +102,7 @@ let fileSearchTerms = [];
 let composingFileSearch = false;
 let waitingForComparisonPlayback = false;
 let currentVideo = null;
+let tagCorrection = null;
 let currentPlayInfo = null;
 let progressTimer = null;
 let lastProgressReport = 0;
@@ -156,9 +160,8 @@ const completedMoveReloader = createCompletedWorkMoveReloader({
   showReloadFailure: () => showNotice("迁移已完成，但刷新作品资料失败。请手动刷新页面后重试。")
 });
 
-const PLYR_DIRECT_CONTROLS = ["play-large", "play", "progress", "current-time", "duration", "mute", "volume", "settings", "fullscreen"];
+const PLYR_DIRECT_CONTROLS = ["play-large", "play", "mute", "volume", "current-time", "duration", "progress", "fullscreen"];
 const PLYR_STREAM_CONTROLS = ["play-large", "play", "mute", "volume", "fullscreen"];
-const mobileStreamControlsQuery = window.matchMedia("(max-width: 640px)");
 const mobileSidebarQuery = window.matchMedia("(max-width: 900px)");
 const PLAYER_SIDEBAR_STORAGE_KEY = "fanhao.player.sidebar-collapsed";
 const PLAYER_FILE_AUTO_NEXT_KEY = "fanhao.player.file-auto-next";
@@ -182,8 +185,25 @@ els.openFile?.addEventListener("click", () => {
   openCurrentLocalFolder();
 });
 
-els.markerA?.addEventListener("click", () => {
-  toggleLocalMarker("A");
+const tagsForm = els.tagsDialog.querySelector("form");
+const tagsInputs = [...tagsForm.querySelectorAll('input[type="checkbox"]')];
+const tagsSave = tagsForm.querySelector('[type="submit"]');
+const tagsClose = tagsForm.querySelector("[data-tags-close]");
+const tagsFile = tagsForm.querySelector("[data-tags-file]");
+const tagsStatus = tagsForm.querySelector("[data-tags-status]");
+const videoTags = tagsForm.querySelector("[data-video-tags]");
+els.correctTags.addEventListener("click", openTagCorrection);
+tagsForm.addEventListener("change", syncTagCorrection);
+tagsForm.addEventListener("submit", saveTagCorrection);
+tagsClose.addEventListener("click", () => els.tagsDialog.close());
+els.tagsDialog.addEventListener("cancel", event => {
+  if (tagCorrection?.saving && tagCorrection.busy) event.preventDefault();
+});
+els.tagsDialog.addEventListener("close", () => {
+  if (els.tagsDialog.open) return;
+  if (tagCorrection?.jobId && !tagCorrection.read.signal.aborted) return;
+  tagCorrection?.read.abort();
+  tagCorrection = null;
 });
 
 els.deleteLocal?.addEventListener("click", () => {
@@ -204,6 +224,7 @@ els.toggleSidebar?.addEventListener("click", () => {
 });
 subtitleMenu?.addEventListener("toggle", () => {
   if (subtitleMenu.open && !sidebarCollapsed) setSidebarCollapsed(true);
+  revealPlayerUi();
 });
 els.filePrevious?.addEventListener("click", () => playAdjacentFile(-1));
 els.fileNext?.addEventListener("click", () => playAdjacentFile(1));
@@ -268,7 +289,12 @@ window.addEventListener("pagehide", () => {
   timeLinkControl.invalidate();
   timeJumpControl.invalidate();
   bookmarks.setAvailable(false);
-  pagePlaybackSnapshot = capturePlaybackSnapshot();
+  pagePlaybackSnapshot = tagCorrection?.released ? tagCorrection.playback : capturePlaybackSnapshot();
+  if (tagCorrection) {
+    tagCorrection.read.abort();
+    tagCorrection = null;
+    if (els.tagsDialog.open) els.tagsDialog.close();
+  }
   playInfoRequests.cancel();
   resetPlaybackSource();
   stopProgressTimer();
@@ -286,19 +312,18 @@ window.addEventListener("pageshow", (event) => {
   }
 });
 
-mobileStreamControlsQuery.addEventListener?.("change", () => {
-  placeStreamSeekControl();
-});
-
-window.addEventListener("resize", updateVideoAspect);
-els.stage?.addEventListener("enterfullscreen", updateVideoAspect);
-els.stage?.addEventListener("exitfullscreen", updateVideoAspect);
+els.stage?.addEventListener("enterfullscreen", revealPlayerUi);
+els.stage?.addEventListener("exitfullscreen", revealPlayerUi);
+els.stage?.addEventListener("focusin", revealPlayerUi);
 document.addEventListener("keydown", handlePlayerKeyboard);
 els.shortcuts?.addEventListener("click", () => els.shortcutsDialog?.showModal());
 els.shortcutsDialog?.querySelector("button")?.addEventListener("click", () => els.shortcutsDialog.close());
 document.addEventListener("keydown", restoreAutoplayAudioFromInteraction, { capture: true });
 document.addEventListener("click", restoreAutoplayAudioFromInteraction, { capture: true });
-document.addEventListener("pointerdown", revealPlayerUi, { passive: true });
+document.addEventListener("pointerdown", (event) => {
+  if (subtitleMenu?.open && !subtitleMenu.contains(event.target)) subtitleMenu.open = false;
+  revealPlayerUi();
+}, { passive: true });
 document.addEventListener("pointermove", handlePlayerPointerMove, { passive: true });
 
 function initializePlayerExperience() {
@@ -319,7 +344,7 @@ function installPlayerVideoEvents() {
   if (!els.video) return;
   playerVideoEventsController = new AbortController();
   const listen = (type, handler) => els.video.addEventListener(type, handler, { signal: playerVideoEventsController.signal });
-  listen("loadedmetadata", () => { updateVideoAspect(); updateSeekControl(); });
+  listen("loadedmetadata", () => updateSeekControl());
   listen("durationchange", () => updateSeekControl());
   listen("ratechange", syncPlaybackRate);
   listen("timeupdate", () => updateSeekControl());
@@ -332,6 +357,7 @@ function installPlayerVideoEvents() {
     scheduleUiIdle();
   });
   listen("pause", revealPlayerUi);
+  listen("ended", revealPlayerUi);
   listen("seeking", () => {
     if (playbackSourceController && pendingSourcePosition == null) autoNextBlockedBySeek = sourceReachedEnd(0.05);
   });
@@ -346,9 +372,6 @@ function setSidebarCollapsed(collapsed, options = {}) {
   if (els.toggleSidebar) {
     els.toggleSidebar.setAttribute("aria-expanded", sidebarCollapsed ? "false" : "true");
     els.toggleSidebar.title = sidebarCollapsed ? "显示资料与操作（I）" : "隐藏资料与操作（I）";
-  }
-  if (els.toggleSidebarLabel) {
-    els.toggleSidebarLabel.textContent = sidebarCollapsed ? "显示资料" : "隐藏资料";
   }
   if (els.sidebar) {
     if (sidebarCollapsed && els.sidebar.contains(document.activeElement)) {
@@ -567,7 +590,7 @@ async function loadGalleryMedia() {
   els.title.textContent = currentWork.title;
   renderFiles(currentWork);
   renderMeta(currentWork);
-  updateMarkerButton();
+  updateTagsButton();
   updateDeleteLocalButton();
   updateCorrectActorButton();
   updateMoveToPersonButton();
@@ -648,7 +671,7 @@ function applyCurrentWorkDetails(work) {
   els.title.textContent = currentWork.title;
   renderFiles(currentWork);
   renderMeta(currentWork);
-  updateMarkerButton();
+  updateTagsButton();
   updateDeleteLocalButton();
   updateCorrectActorButton();
   updateMoveToPersonButton();
@@ -922,7 +945,6 @@ function setVideoSourceAt(position, options = {}) {
   els.video.preload = mode === "direct" ? "auto" : "none";
   els.video.setAttribute("preload", els.video.preload);
   els.video.autoplay = false;
-  updateVideoAspect();
   configurePlyrForCurrentMode();
   if (preferredPlaybackRate !== null) setPlaybackRate(preferredPlaybackRate);
   els.video.preload = mode === "direct" ? "auto" : "none";
@@ -1059,7 +1081,7 @@ function pauseVideoPlayback() {
 function restoreAutoplayAudioFromInteraction(event) {
   // Utility dialogs and their openers preserve the current playback intent.
   if (document.querySelector("dialog[open]") ||
-      event?.target?.closest?.("#playerShortcutsButton, #playerTimeJumpButton, #playerBookmarksButton, #copyTimeLinkButton, #playerPlaybackRate, #playerFileNavigation [aria-disabled='true'], #playerFilesTools") ||
+      event?.target?.closest?.("#playerShortcutsButton, #playerTimeJumpButton, #playerBookmarksButton, #copyTimeLinkButton, #playerPlaybackRate, #playerFileNavigation [aria-disabled='true'], #playerFilesTools, #playerSubtitles, #toggleSidebarButton, #correctTagsButton") ||
       (useCurrentTimeForFileSwitch() && event?.target?.closest?.("#playerFileNavigation button, #playerFiles .player-file-button")) ||
       (event?.type === "keydown" && (["?", "g", "b", "[", "]"].includes(String(event.key).toLowerCase()) || event.isComposing || event.keyCode === 229))) return;
   if (!els.video || els.video.dataset.autoplayMuted !== "1") return;
@@ -1084,14 +1106,11 @@ function configurePlyrForCurrentMode() {
   const directMode = (currentPlayInfo.mode || "direct") === "direct";
   const nextMode = directMode ? "direct" : "stream";
   setPlyrLayoutMode(directMode);
-  if (player && playerControlMode === nextMode) {
-    placeStreamSeekControl();
-    return;
-  }
+  if (player && playerControlMode === nextMode) return;
 
   const mediaState = player ? { muted: els.video.muted, volume: els.video.volume, rate: els.video.playbackRate, autoplayMuted: els.video.dataset.autoplayMuted } : null;
   if (player) {
-    restoreStreamSeekControl();
+    restorePlaybackBar();
     hideFrameHold();
     try {
       player.destroy();
@@ -1110,6 +1129,7 @@ function configurePlyrForCurrentMode() {
   playerControlMode = nextMode;
   player = new window.Plyr(els.video, {
     autoplay: false,
+    hideControls: false,
     controls: directMode ? PLYR_DIRECT_CONTROLS : PLYR_STREAM_CONTROLS,
     fullscreen: { container: ".player-stage" },
     iconUrl: "/vendor/plyr/plyr.svg",
@@ -1137,30 +1157,28 @@ function configurePlyrForCurrentMode() {
       pauseVideoPlayback();
     }
   };
-  placeStreamSeekControl();
+  placePlaybackBar();
 }
 
-function placeStreamSeekControl() {
+function placePlaybackBar() {
   const controls = player?.elements?.controls;
-  if (!usesCustomControls() || !controls || !els.seekControl) return;
-  if (mobileStreamControlsQuery.matches) {
-    if (els.seekControl.parentElement !== els.stage) {
-      els.stage?.append(els.seekControl);
-    }
-    return;
-  }
-  if (els.seekControl.parentElement !== controls) {
-    const playButton = controls.querySelector('[data-plyr="play"]');
-    if (playButton?.nextSibling) {
-      controls.insertBefore(els.seekControl, playButton.nextSibling);
-    } else {
-      controls.append(els.seekControl);
-    }
+  if (!controls) return;
+  els.bottomHost.hidden = true;
+  const fullscreen = controls.querySelector('[data-plyr="fullscreen"]');
+  controls.insertBefore(els.bottomControls, fullscreen);
+  if (usesCustomControls()) {
+    controls.prepend(els.seekControl);
+    const volume = controls.querySelector(".plyr__volume");
+    if (volume) volume.after(els.durationTime, els.tools);
   }
 }
 
-function restoreStreamSeekControl() {
-  if (!els.seekControl || !els.stage || els.seekControl.parentElement === els.stage) return;
+function restorePlaybackBar() {
+  els.bottomHost.append(els.bottomControls);
+  els.bottomHost.hidden = false;
+  if (els.seekControl.parentElement === els.stage) return;
+  els.seekRange.after(els.durationTime);
+  els.seekControl.append(els.tools);
   els.stage.append(els.seekControl);
 }
 
@@ -1188,7 +1206,6 @@ function showFrameHold() {
   const hold = ensureFrameHoldCanvas();
   if (!hold || !els.video || !els.video.videoWidth || !els.video.videoHeight) return;
   try {
-    updateVideoAspect();
     const canvas = document.createElement("canvas");
     canvas.width = els.video.videoWidth;
     canvas.height = els.video.videoHeight;
@@ -1200,24 +1217,6 @@ function showFrameHold() {
     frameHoldTimer = window.setTimeout(hideFrameHold, 6000);
   } catch {
     hold.hidden = true;
-  }
-}
-
-function updateVideoAspect() {
-  if (!els.stage) return;
-  const sourceWidth = Number(els.video?.videoWidth || currentPlayInfo?.width || 16);
-  const sourceHeight = Number(els.video?.videoHeight || currentPlayInfo?.height || 9);
-  const safeWidth = Number.isFinite(sourceWidth) && sourceWidth > 0 ? sourceWidth : 16;
-  const safeHeight = Number.isFinite(sourceHeight) && sourceHeight > 0 ? sourceHeight : 9;
-  const ratio = safeWidth / safeHeight;
-  const availableWidth = Math.max(0, els.stage.clientWidth || 0);
-  const availableHeight = Math.max(0, els.stage.clientHeight || 0);
-  const fittedWidth = availableWidth && availableHeight
-    ? Math.min(availableWidth, availableHeight * ratio)
-    : availableWidth;
-  els.stage.style.setProperty("--player-video-aspect", `${safeWidth} / ${safeHeight}`);
-  if (fittedWidth > 0) {
-    els.stage.style.setProperty("--player-video-max-width", `${Math.floor(fittedWidth)}px`);
   }
 }
 
@@ -1465,7 +1464,7 @@ function renderMeta(work) {
     appendMeta("路径", work.relativePath || "");
     return;
   }
-  appendMeta("番号", info.code || "");
+  appendMeta("番号", workCodeValue(info.code || work.code));
   appendMeta("标题", info.title || work.title || "");
   appendMeta("日期", info.releaseDate || "");
   appendMeta("时长", info.durationMinutes ? `${info.durationMinutes} 分钟` : "");
@@ -1509,15 +1508,29 @@ function renderGalleryMediaMeta(work) {
   appendMeta("路径", work.relativePath || "");
 }
 
+function workCodeValue(value) {
+  const code = String(value || "").trim();
+  const match = matchWorkCodePrefix(code);
+  if (!match) return code;
+  const link = document.createElement("a");
+  link.href = `/fanhao/codes?${new URLSearchParams({ prefix: match.prefix })}`;
+  link.className = "player-code-prefix-link";
+  link.textContent = code.slice(match.start, match.end);
+  link.setAttribute("aria-label", `浏览 ${match.prefix} 前缀作品`);
+  const content = document.createDocumentFragment();
+  content.append(code.slice(0, match.start), link, code.slice(match.end));
+  return content;
+}
+
 function appendMeta(label, value) {
-  const text = String(value || "").trim();
-  if (!text) return;
+  const content = value instanceof Node ? value : String(value || "").trim();
+  if (!content) return;
   const row = document.createElement("div");
   row.className = "player-meta-row";
   const key = document.createElement("span");
   key.textContent = label;
   const val = document.createElement("span");
-  val.textContent = text;
+  val.append(content);
   row.append(key, val);
   els.meta.append(row);
 }
@@ -1647,46 +1660,151 @@ function navigateLibrary(url) {
   window.location.href = url;
 }
 
-async function toggleLocalMarker(marker) {
-  if (!els.markerA || !currentWork?.id) return;
-  const key = String(marker || "").toUpperCase();
-  const nextEnabled = !(currentWork.localMarkers || []).includes(key);
-  const workBeforeMutation = currentWork;
-  const playbackSnapshot = capturePlaybackSnapshot();
-  const originalText = els.markerA.textContent;
-  els.markerA.disabled = true;
-  els.markerA.textContent = playbackSnapshot?.videoId ? "释放播放" : (nextEnabled ? "标记中" : "移除中");
+function tagChanges(owner) {
+  return tagsInputs.filter(input => {
+    if (input.value === "A") return input.checked !== owner.markedA;
+    return owner.file && input.checked !== Boolean(owner.file.tags[input.value.toLowerCase()]);
+  });
+}
+
+function syncTagCorrection() {
+  const owner = tagCorrection;
+  if (!owner) return;
+  for (const input of tagsInputs) input.disabled = owner.busy || Boolean(owner.jobId) || (input.value !== "A" && !owner.file);
+  tagsClose.disabled = owner.busy && owner.saving === true;
+  tagsClose.textContent = owner.jobId ? "关闭" : "取消";
+  tagsSave.disabled = owner.busy || (!owner.jobId && !tagChanges(owner).length);
+  tagsSave.textContent = owner.jobId ? "继续查看" : "保存";
+}
+
+async function openTagCorrection() {
+  if (els.correctTags.hidden || !currentWork || els.tagsDialog.open) return;
+  if (tagCorrection?.jobId) {
+    els.tagsDialog.showModal();
+    return;
+  }
+  const owner = {
+    workPath: `/api/works/${encodeURIComponent(currentWork.id)}`,
+    workId: currentWork.id,
+    videoId: currentVideo?.id,
+    markedA: (currentWork.localMarkers || []).includes("A"),
+    file: null,
+    read: new AbortController(),
+    busy: Boolean(currentVideo)
+  };
+  tagCorrection = owner;
+  tagsForm.reset();
+  tagsInputs[0].checked = owner.markedA;
+  tagsFile.textContent = currentVideo?.name || "";
+  videoTags.hidden = !owner.videoId;
+  tagsStatus.textContent = owner.videoId ? "正在读取视频标签…" : "";
+  syncTagCorrection();
+  els.tagsDialog.showModal();
+  if (!owner.videoId) return;
   try {
-    if (playbackSnapshot?.videoId) {
-      reportProgress(playbackSnapshot.position, { force: true });
-      stopCurrentPlayback();
-      await delay(LOCAL_MARKER_RELEASE_DELAY_MS);
-      els.markerA.textContent = nextEnabled ? "标记中" : "移除中";
-    }
-    const data = await api(`/api/works/${encodeURIComponent(workBeforeMutation.id)}/local-marker`, {
-      method: "POST",
-      body: { marker: key, enabled: nextEnabled }
-    });
-    if (data.work) {
-      currentWork = data.work;
-      document.title = `${currentWork.title} - FanHao`;
-      els.title.textContent = currentWork.title;
-      renderFiles(currentWork);
-      renderMeta(currentWork);
-    }
-    updateMarkerButton();
-    updateDeleteLocalButton();
-    updateCorrectActorButton();
-    await restorePlaybackSnapshot(playbackSnapshot);
+    const file = await api(`${owner.workPath}/video-markers?${new URLSearchParams({ videoId: owner.videoId })}`, { signal: owner.read.signal });
+    if (tagCorrection !== owner || !els.tagsDialog.open) return;
+    if (String(file.videoId) !== String(owner.videoId) || !file.tags) throw new Error("未读取到当前视频的标签。");
+    owner.file = file;
+    tagsFile.textContent = file.name;
+    for (const input of tagsInputs.slice(1)) input.checked = Boolean(file.tags[input.value.toLowerCase()]);
+    tagsStatus.textContent = "";
   } catch (error) {
-    currentWork = workBeforeMutation;
-    await restorePlaybackSnapshot(playbackSnapshot);
-    els.markerA.textContent = "标记失败";
-    els.markerA.title = error.message || "标记失败";
-    window.setTimeout(updateMarkerButton, 2000);
+    if (tagCorrection === owner && els.tagsDialog.open) tagsStatus.textContent = error.message || "读取视频标签失败。";
   } finally {
-    els.markerA.disabled = false;
-    if (els.markerA.textContent === originalText) updateMarkerButton();
+    owner.busy = false;
+    if (tagCorrection === owner) syncTagCorrection();
+  }
+}
+
+async function waitForVideoTags(owner, job) {
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    if (job.state === "completed") return;
+    if (!job.active && ["blocked", "interrupted", "cancelled", "committed"].includes(job.state)) {
+      if (job.state !== "committed") owner.jobId = null;
+      throw new Error(job.error || "视频标签更新未完成。请重试。");
+    }
+    await delay(500);
+    if (owner.read.signal.aborted) throw owner.read.signal.reason;
+    ({ job } = await api(`${owner.workPath}/video-markers?${new URLSearchParams({ jobId: owner.jobId })}`, { signal: owner.read.signal }));
+  }
+  throw new Error("视频标签正在后台更新，请继续查看进度。");
+}
+
+async function saveTagCorrection(event) {
+  event.preventDefault();
+  const owner = tagCorrection;
+  if (owner?.busy || !owner || tagsSave.disabled || currentWork?.id !== owner.workId) return;
+  if ((!owner.released || currentVideo) && currentVideo?.id !== owner.videoId) {
+    tagsStatus.textContent = "当前视频已切换，请重新打开订正标签。";
+    return;
+  }
+  const changes = tagChanges(owner);
+  const changeA = changes.some(input => input.value === "A");
+  owner.busy = true;
+  owner.saving = true;
+  syncTagCorrection();
+  try {
+    if (!owner.released) {
+      const snapshot = capturePlaybackSnapshot();
+      owner.playback = snapshot;
+      if (snapshot) {
+        tagsStatus.textContent = "正在释放播放文件…";
+        reportProgress(snapshot.position, { force: true });
+        stopCurrentPlayback();
+        owner.released = true;
+        await delay(LOCAL_MARKER_RELEASE_DELAY_MS);
+        owner.read.signal.throwIfAborted();
+      }
+    }
+    tagsStatus.textContent = "正在保存标签…";
+    if (owner.jobId || changes.some(input => input.value !== "A")) {
+      const desired = Object.fromEntries(tagsInputs.slice(1).map(input => [input.value.toLowerCase(), input.checked]));
+      const endpoint = `${owner.workPath}/video-markers`;
+      if (!owner.jobId) owner.request = { videoId: owner.videoId, name: owner.file.name, tags: desired };
+      let receipt = owner.jobId
+        ? await api(`${endpoint}?${new URLSearchParams({ jobId: owner.jobId })}`, { signal: owner.read.signal })
+        : null;
+      if (!receipt || (receipt.job?.state === "committed" && !receipt.job.active)) {
+        receipt = await api(endpoint, { method: "POST", signal: owner.read.signal, body: owner.request });
+      }
+      owner.read.signal.throwIfAborted();
+      if (receipt.job) {
+        owner.jobId = receipt.job.id;
+        await waitForVideoTags(owner, receipt.job);
+      }
+      const { work } = await api(owner.workPath, { signal: owner.read.signal });
+      const file = await api(`${endpoint}?${new URLSearchParams({ videoId: owner.videoId })}`, { signal: owner.read.signal });
+      owner.read.signal.throwIfAborted();
+      if (!work || String(work.id) !== String(owner.workId) || String(file.videoId) !== String(owner.videoId) || !file.tags) {
+        throw new Error("视频已更新，暂时无法刷新作品资料。请重试。");
+      }
+      owner.file = file;
+      owner.jobId = null;
+      tagsFile.textContent = file.name;
+      applyCurrentWorkDetails(work);
+    }
+    if (changeA) {
+      const enabled = tagsInputs[0].checked;
+      const { work } = await api(`${owner.workPath}/local-marker`, { method: "POST", signal: owner.read.signal, body: { marker: "A", enabled } });
+      owner.read.signal.throwIfAborted();
+      if (!work || String(work.id) !== String(owner.workId) || !Array.isArray(work.localMarkers)) throw new Error("未收到 A 标记的保存结果。请重试。");
+      applyCurrentWorkDetails(work);
+      owner.markedA = (work.localMarkers || []).includes("A");
+    }
+    if (owner.released) await restorePlaybackSnapshot(owner.playback);
+    owner.released = false;
+    if (tagCorrection === owner) els.tagsDialog.close();
+  } catch (error) {
+    if (tagCorrection !== owner || owner.read.signal.aborted) return;
+    if (owner.released && !owner.jobId) {
+      await restorePlaybackSnapshot(owner.playback);
+      owner.released = false;
+    }
+    tagsStatus.textContent = error.message || "订正标签失败。";
+  } finally {
+    owner.busy = false;
+    if (tagCorrection === owner && els.tagsDialog.open) syncTagCorrection();
   }
 }
 
@@ -1716,13 +1834,9 @@ async function restorePlaybackSnapshot(snapshot) {
   });
 }
 
-function updateMarkerButton() {
-  if (!els.markerA) return;
-  const active = (currentWork?.localMarkers || []).includes("A");
-  els.markerA.hidden = !currentWork || Boolean(currentWork.missingLocal) || Boolean(currentWork.galleryMedia) || Boolean(currentWork.diskUsage);
-  els.markerA.classList.toggle("active", active);
-  els.markerA.textContent = active ? "A 已标记" : "标记 A";
-  els.markerA.title = active ? "移除 A 标记" : "添加 A 标记";
+function updateTagsButton() {
+  els.correctTags.hidden = !isTrustedNetworkFeatureAvailable() || !currentWork
+    || Boolean(currentWork.missingLocal || currentWork.galleryMedia || currentWork.diskUsage);
 }
 
 async function openCurrentLocalFolder() {
@@ -2483,7 +2597,7 @@ async function correctCurrentActorFromFolder() {
       els.title.textContent = currentWork.title;
       renderFiles(currentWork);
       renderMeta(currentWork);
-      updateMarkerButton();
+      updateTagsButton();
       updateDeleteLocalButton();
       updateCorrectActorButton();
       updateMoveToPersonButton();
@@ -2533,7 +2647,7 @@ async function deleteCurrentLocalFiles() {
     els.title.textContent = currentWork.title || title;
     renderFiles(currentWork);
     renderMeta(currentWork);
-    updateMarkerButton();
+    updateTagsButton();
     updateOpenFileButton();
     updateDeleteLocalButton();
     const removedEmpty = Array.isArray(data.emptyRemovedPaths) && data.emptyRemovedPaths.length

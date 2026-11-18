@@ -1,6 +1,6 @@
 import { formatNumber } from "../../../../js/format.js";
-import { imageUrlForWork } from "../../../../js/image.js?v=assets-06c1d7f13464";
-import { getWorkSource } from "../../../../js/work-source.js?v=assets-06c1d7f13464";
+import { imageUrlForWork } from "../../../../js/image.js?v=assets-78764ed05056";
+import { getWorkSource } from "../../../../js/work-source.js?v=assets-78764ed05056";
 import {
   compactWorkCardTitle,
   compactWorkCode,
@@ -14,8 +14,8 @@ import {
   workGridMeta,
   workGridPerson,
   workGridRankBadge
-} from "./card-presentation.js?v=assets-06c1d7f13464";
-import { createWorkCoverLoader } from "./cover-loader.js?v=assets-06c1d7f13464";
+} from "./card-presentation.js?v=assets-78764ed05056";
+import { createWorkCoverLoader } from "./cover-loader.js?v=assets-78764ed05056";
 
 const compactRatingCount = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
 

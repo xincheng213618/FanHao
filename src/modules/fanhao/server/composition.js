@@ -4,7 +4,6 @@ export function createFanhaoDependencies(deps) {
   }
   return {
     workflows: deps.workflows,
-    taste: deps.taste,
     subtitles: deps.subtitles,
     duplicates: deps.duplicates,
     diskUsage: deps.diskUsage,

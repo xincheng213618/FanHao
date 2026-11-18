@@ -45,7 +45,7 @@ function fixture({ code = implementation, authorIndex = false, authorPage = "" }
     document: { documentElement: { dataset: {}, classList: { remove() {} } }, activeElement: null },
     window: { scrollY: 0, scrollTo() {}, history: { length: 1 }, requestAnimationFrame: callback => { frames.push(callback); return frames.length; } },
     // This VM has no mounted home DOM; the actual retention helper takes its null-view fallback.
-    shortVideoHomePresentation: null, acceptedAuthorScope: null, failedAuthorScope: null,
+    shortVideoHomePresentation: null, acceptedAuthorScope: null, failedAuthorScope: null, failedVideoSearchScope: null,
     els: { workGrid: root }, shortVideoListRequestId: 0, searchUsersRequest: null, shortVideoOpenRequestId: 0,
     shortVideoOpeningId: "", shortVideoOpenError: "", shortVideoOpenReadController: null, shortVideoListCards: {}, initialVideoLimit: 36, appendVideoLimit: 48, AUTHOR_PAGE_SIZE: 36,
     ensureState() {}, syncAuthorCollectorRouteLifecycle() {}, cancelAuthorCollectorPolling() {}, cancelShortVideoNavigation() {},

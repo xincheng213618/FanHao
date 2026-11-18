@@ -375,8 +375,8 @@ add("cache:ordinary-asset-revalidation-is-authorized-and-representation-specific
 add("mapping:app-standalone-cache-and-outside-root-contracts-remain", async f => {
   f.add("index.html", "app"); f.add("admin.html", "admin");
   f.add("modules/fanhao/disk-usage/index.html", "disk"); f.add("modules/system/computer-control/index.html", "control");
-  f.add("modules/fanhao/file-workflows/index.html", "workflow");
-  for (const [route, content] of [["/music/album", "app"], ["/", "app"], ["/admin", "admin"], ["/disk-usage", "disk"], ["/system-control", "control"], ["/fanhao/file-workflows", "workflow"]]) {
+  f.add("modules/fanhao/file-workflows/intake.html", "intake");
+  for (const [route, content] of [["/music/album", "app"], ["/", "app"], ["/admin", "admin"], ["/disk-usage", "disk"], ["/system-control", "control"], ["/fanhao/file-workflows", "app"], ["/fanhao/file-workflows/intake", "intake"]]) {
     const res = await direct(f, request(route)); assert.equal(res.statusCode, 200); assert.equal(res.body.toString(), content);
     assert.equal(res.headers["Cache-Control"], "no-store");
   }

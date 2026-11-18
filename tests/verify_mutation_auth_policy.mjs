@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { routeNovelApi } from "../src/modules/novels/server/routes.js";
-import { routeToolsApi } from "../src/modules/tools/server/routes.js";
 
 const novelMutations = [
   {
@@ -38,16 +37,6 @@ for (const mutation of novelMutations) {
   assert.equal(allowed.storeCalls, 1, `${mutation.name} must preserve its store call`);
 }
 
-const deniedTxt = await invokeTxt(false);
-assert.deepEqual(deniedTxt.response, { status: 403, payload: { error: "forbidden" } }, "txt format must reject a denied request");
-assert.equal(deniedTxt.bodyReads, 0, "txt format must reject before reading its body");
-assert.equal(deniedTxt.createDownloadCalls, 0, "txt format must reject before creating a download");
-
-const allowedTxt = await invokeTxt(true);
-assert.deepEqual(allowedTxt.response, { status: 200, payload: { id: "download-1" } }, "txt format must preserve its successful response");
-assert.equal(allowedTxt.bodyReads, 1, "txt format must retain its body read");
-assert.equal(allowedTxt.createDownloadCalls, 1, "txt format must preserve download creation");
-
 console.log("Mutation auth policy verification passed.");
 
 async function invokeNovel(mutation, allowed) {
@@ -70,23 +59,6 @@ async function invokeNovel(mutation, allowed) {
   });
   assert.equal(handled, true, `${mutation.name} route must be handled`);
   return { bodyReads, response, storeCalls };
-}
-
-async function invokeTxt(allowed) {
-  let bodyReads = 0;
-  let createDownloadCalls = 0;
-  let response = null;
-  const handled = await routeToolsApi({ method: "POST" }, {}, new URL("http://fixture/api/tools/txt-format"), {
-    readJsonBody: async () => { bodyReads += 1; return { text: "fixture" }; },
-    requireLocalAdmin: gate(allowed, (status, payload) => { response = { status, payload }; }),
-    sendJson(_res, status, payload) { response = { status, payload }; },
-    txtFormatToolService: {
-      maxBodyBytes: 1024,
-      async createDownload() { createDownloadCalls += 1; return { id: "download-1" }; }
-    }
-  });
-  assert.equal(handled, true, "txt format route must be handled");
-  return { bodyReads, createDownloadCalls, response };
 }
 
 function gate(allowed, send) {

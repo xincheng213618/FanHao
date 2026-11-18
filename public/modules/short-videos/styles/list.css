@@ -3067,6 +3067,20 @@ body.short-video-author-page-active .main {
   align-self: center;
 }
 
+.short-video-author-collector-status {
+  grid-column: 1 / -1;
+  max-width: 250px;
+  margin: 0;
+  color: #f1f1f2;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.short-video-author-collector-status.is-error {
+  color: #fecaca;
+}
+
 .short-video-author-page-library-meta > .short-video-author-page-pending-difference {
   border: 1px solid rgba(251, 191, 36, .38);
   background: rgba(245, 158, 11, .18);

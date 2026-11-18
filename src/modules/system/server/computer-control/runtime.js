@@ -3,12 +3,14 @@ import { createComputerControlService } from "./service.js";
 import { createComputerControlSettings } from "./settings.js";
 
 export function createComputerControlRuntime({
+  canUseLanGuestSleep = () => false,
   readJsonBody,
   requireLocalAdmin,
   sendJson,
   service = createComputerControlService()
 }) {
   const deps = {
+    canUseLanGuestSleep,
     computerControlService: service,
     readJsonBody,
     requireLocalAdmin,

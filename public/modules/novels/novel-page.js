@@ -9,7 +9,7 @@ import { createNovelChapterSearch } from "./chapter-search.js?v=20261113-book-te
 import { createNovelBookTextSearch } from "./book-text-search.js";
 import { createNovelReadLater, readingLaterBookKey } from "./read-later.js";
 import { createNovelAutoScroll, NOVEL_AUTO_SCROLL_SPEEDS } from "./reader-auto-scroll.js";
-import { captureWebAccount } from "../../platform/accounts/session-context.js";
+import { canManageWebLibrary, captureWebAccount } from "../../platform/accounts/session-context.js";
 
 const NOVEL_BOOK_PAGE_SIZE = 48;
 const NOVEL_RANKING_PAGE_SIZE = 48;
@@ -1365,7 +1365,12 @@ export function createNovelPage(deps) {
 
     if (state.novel.mode === "manage") {
       shell.classList.add("novel-home-manage");
-      shell.append(renderManagementPage(summary));
+      if (canManageWebLibrary(true)) shell.append(renderManagementPage(summary));
+      else {
+        const notice = document.createElement("p");
+        notice.textContent = "小说管理需要在本机或局域网登录管理员账号。";
+        shell.append(notice);
+      }
       target.append(shell);
       return;
     }
@@ -1655,6 +1660,7 @@ export function createNovelPage(deps) {
     brand.textContent = "小说";
     nav.append(brand);
     for (const [mode, label] of [["books", "书库"], ["mine", "我的"], ["rankings", "排行榜"], ["manage", "管理"]]) {
+      if (mode === "manage" && !canManageWebLibrary(true)) continue;
       const button = document.createElement("button");
       button.type = "button";
       const active = mode === "books" ? ["books", "author"].includes(state.novel.mode) : state.novel.mode === mode;
@@ -1688,6 +1694,7 @@ export function createNovelPage(deps) {
 
   function openNovelSection(mode) {
     if (!["books", "mine", "rankings", "manage"].includes(mode)) return;
+    if (mode === "manage" && !canManageWebLibrary(true)) return;
     clearLibraryReturn();
     novelMenuRevision += 1;
     if (mode !== "manage") collectionAdmin.stopPolling();

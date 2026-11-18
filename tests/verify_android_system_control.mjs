@@ -2,17 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { createVisionHarness, deferred, settle } from "./fixtures/android-vision-recovery-harness.mjs";
+import { createComputerControlService } from "../src/modules/system/server/computer-control/service.js";
 
 const source = fs.readFileSync(new URL("../android-client/www/modules/tools/tool-views.js", import.meta.url), "utf8");
 const moduleSource = fs.readFileSync(new URL("../android-client/www/modules/tools/android-module.js", import.meta.url), "utf8");
 
 const confirmations = [];
 const requests = [];
+const approved = createComputerControlService({ platform: "win32" }).status();
 let confirmed = true;
 let nextResult = { ok: true, action: "sleep", message: "休眠指令已排队" };
 const harness = createVisionHarness(source, {
   getActiveUrl: () => "http://192.168.1.20:29998",
-  getComputerControlStatus: async () => ({ ok: true, actions: [{ id: "sleep" }] }),
+  getComputerControlStatus: async () => approved,
   async confirmAction(options) {
     confirmations.push(structuredClone(options));
     return confirmed;
@@ -32,6 +34,7 @@ assert.equal(section.hidden, false, "a server-approved LAN connection may show c
 assert.equal(section.querySelectorAll("button").length, 1, "mobile computer control must default to one action");
 assert(harness.button(/^休眠电脑/, section), "mobile computer control must expose sleep");
 assert.doesNotMatch(section.textContent, /关机|重启|锁屏|静音/, "mobile computer control must not expose extra system actions");
+assert.doesNotMatch(harness.els.viewContent.textContent, /小游戏|2048 AI|华容道/, "mobile tools must not show game launchers");
 
 const sleepButton = harness.button(/^休眠电脑/, section);
 harness.click(sleepButton);
@@ -73,8 +76,10 @@ assert(moduleSource.includes('fetchJson(sourceUrl, "/api/system/control"'), "And
 assert(moduleSource.includes('method: "POST"') && moduleSource.includes('body: { action: "sleep" }'), "Android tools module must send only the sleep POST action");
 
 const lan = "http://192.168.1.20:29998", remote = "https://public.example";
-const approved = { ok: true, actions: [{ id: "sleep" }] };
-for (const result of [new Error("403 forbidden"), new Error("offline"), {}, { ok: true, actions: [] }, { ok: false, actions: [{ id: "sleep" }] }]) {
+for (const result of [
+  new Error("403 forbidden"), new Error("offline"), {}, { ok: true, actions: [{ id: "shutdown" }] },
+  { ok: false, actions: [{ id: "sleep" }] }
+]) {
   let dispatches = 0, prompts = 0;
   const h = createVisionHarness(source, {
     getActiveUrl: () => remote,
@@ -84,8 +89,7 @@ for (const result of [new Error("403 forbidden"), new Error("offline"), {}, { ok
   await h.render();
   const group = h.els.viewContent.querySelector(".computer-control-section");
   assert.equal(group.hidden, true, "public, unsupported and unknown access stays hidden");
-  assert.equal(h.button(/^休眠电脑/, group).disabled, true);
-  h.click(h.button(/^休眠电脑/, group)); await settle();
+  assert.equal(group.querySelectorAll("button").length, 0);
   assert.equal(prompts + dispatches, 0, "a hidden control cannot prompt or send sleep");
 }
 {
@@ -133,6 +137,7 @@ for (const roundTrip of [false, true]) {
   await options.getComputerControlStatus(lan); await options.sleepComputer(lan);
   assert(calls.every(call => call[0] === lan && call[1] === "/api/system/control"));
   assert.equal(calls[1][2].method, "POST");
+  assert.deepEqual(structuredClone(calls[1][2].body), { action: "sleep" });
   assert.equal(calls[0][2].cache, "no-store", "permissions cannot come from HTTP cache");
   assert(calls.every(call => call[2].redirect === "error"), "control requests cannot follow redirects to another origin");
 }

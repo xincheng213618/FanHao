@@ -141,16 +141,6 @@
   color: #be532f;
 }
 
-.tool-native-icon.is-game {
-  background: rgba(180, 35, 24, .09);
-  color: #b42318;
-}
-
-.tool-native-icon.is-puzzle {
-  background: rgba(186, 132, 0, .12);
-  color: #9a6d00;
-}
-
 .tool-native-icon svg {
   width: 23px;
   height: 23px;

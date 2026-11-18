@@ -1,4 +1,4 @@
-import { DEFAULT_SORT, normalizeSearchTab, normalizeSource } from "./shared.js?v=assets-06c1d7f13464";
+import { DEFAULT_SORT, normalizeSearchTab, normalizeSource } from "./shared.js?v=assets-78764ed05056";
 
 const SEARCH_HISTORY_KEY = "fanhao.shortVideo.searchHistory";
 const SEARCH_HISTORY_LIMIT = 8;

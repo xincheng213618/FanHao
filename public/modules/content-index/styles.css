@@ -1424,54 +1424,6 @@ body.gallery-view .gallery-controls {
   margin-top: 14px;
 }
 
-.gallery-photo-continue {
-  margin: 0 0 16px;
-}
-
-.gallery-photo-continue h2 {
-  margin: 0 0 8px;
-  font-size: 16px;
-}
-
-.gallery-photo-continue ul {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.gallery-photo-continue button {
-  display: grid;
-  width: 100%;
-  min-width: 0;
-  gap: 4px;
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--panel);
-  color: inherit;
-  font: inherit;
-  text-align: start;
-  cursor: pointer;
-}
-
-.gallery-photo-continue button:hover {
-  border-color: var(--accent);
-}
-
-.gallery-photo-continue strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.gallery-photo-continue span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
 .gallery-reader-toolbar {
   position: sticky;
   top: 0;

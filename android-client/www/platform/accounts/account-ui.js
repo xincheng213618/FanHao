@@ -10,7 +10,7 @@ const field = (name, label, options = {}) => {
 };
 
 export function mountAccountPanel(root, { request, authenticate = (mode, body) => request(`/api/accounts/${mode}`, { method: "POST", body }),
-  clearSession = async () => {}, onSignedIn = async () => {}, onSignedOut = async () => {}, initialMode = "login", legacyLogin = null } = {}) {
+  clearSession = async () => {}, onSignedIn = async () => {}, onSignedOut = async () => {}, initialMode = "login" } = {}) {
   let state = null, tab = "profile", mode = initialMode, busy = false, disposed = false, generation = 0;
   let userOffset = 0, inviteOffset = 0, auditOffset = 0, search = "", auditSearch = "", generated = [], resetTarget = null, resetCode = null;
   let inviteSearch = "", inviteStatus = "all", selectedInvite = null, inviteReturn = "invites", redemptionOffset = 0, redemptionSearch = "";
@@ -51,13 +51,12 @@ export function mountAccountPanel(root, { request, authenticate = (mode, body) =
       <form data-form="${mode}">
       ${field("username", "用户名", { autocomplete: "username", attrs: 'minlength="3" maxlength="32" pattern="[A-Za-z0-9][A-Za-z0-9_.-]{2,31}" autocapitalize="none" spellcheck="false" placeholder="3–32 位字母或数字等"' })}
       ${signup ? field("displayName", "昵称（选填）", { required: false, attrs: 'maxlength="40" placeholder="如何称呼你"' }) : ""}
-      ${field("password", "密码", { type: "password", autocomplete: signup ? "new-password" : "current-password", attrs: 'placeholder="10–128 位"' })}
+      ${field("password", "密码", { type: "password", minLength: signup ? 10 : 1, autocomplete: signup ? "new-password" : "current-password", attrs: signup ? 'placeholder="10–128 位"' : "" })}
       ${signup ? field("confirmPassword", "确认密码", { type: "password", autocomplete: "new-password" }) : ""}
       ${mode === "register" ? field("inviteCode", state.invitationRequired ? "邀请码" : "邀请码（选填）", { required: state.invitationRequired, attrs: 'maxlength="100" placeholder="FH-…" autocapitalize="characters" spellcheck="false"' }) : ""}
       <button class="account-primary" type="submit">${mode === "setup" ? "创建管理员" : signup ? "注册并登录" : "登录"}</button></form>
       ${mode === "login" ? '<button class="account-link" type="button" data-mode="reset">忘记密码？</button>' : ""}
-      ${state.setupAvailable && mode !== "setup" ? '<button class="account-link" type="button" data-mode="setup">本机初始化管理员 →</button>' : ""}
-      ${legacyLogin && !state.accountLoginRequired ? `<details class="account-details"><summary>使用原访问密码</summary><form data-form="legacy">${field("password", "原访问密码", { type: "password", minLength: 1, autocomplete: "current-password" })}<button type="submit">验证访问密码</button></form></details>` : ""}`);
+      ${state.setupAvailable && mode !== "setup" ? '<button class="account-link" type="button" data-mode="setup">本机初始化管理员 →</button>' : ""}`);
   }
   function navigation() {
     const items = [["profile", "个人资料"], ["sessions", "登录设备"], ...(state.user.role === "admin" ? [["users", "用户管理"], ["invites", "邀请码"], ["settings", "注册与访问"], ["audit", "操作记录"]] : [])];
@@ -66,13 +65,14 @@ export function mountAccountPanel(root, { request, authenticate = (mode, body) =
       <nav class="account-tabs" aria-label="用户中心">${items.map(([id, label]) => `<button type="button" data-tab="${id}" aria-pressed="${tab === id}">${label}</button>`).join("")}</nav>`;
   }
   function profile() {
+    const minLength = state.user.role === "admin" ? 8 : 10;
     return `<h3>个人资料</h3><form data-form="profile">${field("displayName", "昵称", { value: state.user.displayName, attrs: 'maxlength="40"' })}<button type="submit">保存资料</button></form>
       <p class="account-hint">用户名 ${escape(state.user.username)} · 注册于 ${date(state.user.createdAt)}</p>
       <p class="account-hint">登录后，番号收藏与观看记录按账号保存。未登录时使用访客记录。</p>
       <details class="account-details"><summary>修改密码</summary><p class="account-hint">修改后所有设备需重新登录。</p><form data-form="password">
-      ${field("currentPassword", "当前密码", { type: "password", autocomplete: "current-password" })}
-      ${field("newPassword", "新密码", { type: "password", autocomplete: "new-password" })}
-      ${field("confirmPassword", "确认新密码", { type: "password", autocomplete: "new-password" })}
+      ${field("currentPassword", "当前密码", { type: "password", minLength: 1, autocomplete: "current-password" })}
+      ${field("newPassword", "新密码", { type: "password", minLength, autocomplete: "new-password" })}
+      ${field("confirmPassword", "确认新密码", { type: "password", minLength, autocomplete: "new-password" })}
       <button type="submit">更新密码</button></form></details>
       <button class="account-danger account-logout" type="button" data-action="logout">退出登录</button>`;
   }
@@ -82,7 +82,7 @@ export function mountAccountPanel(root, { request, authenticate = (mode, body) =
       <label class="account-switch"><input name="invitationRequired" type="checkbox" ${state.invitationRequired ? "checked" : ""}><span>注册时必须填写邀请码</span></label>
       <p class="account-hint">关闭邀请码要求时可以直接注册；填写的邀请码仍会验证并消耗次数。</p>
       <label class="account-switch"><input name="accountLoginRequired" type="checkbox" ${state.accountLoginRequired ? "checked" : ""}><span>访问资料库必须登录账号</span></label>
-      <p class="account-hint">开启后，本机、局域网和远程设备都需登录用户账号，原访问密码也不能单独进入资料库。已有账号可继续登录，注册入口仍按上方设置开放。</p>
+      <p class="account-hint">开启后，本机和局域网也需登录用户账号。管理员账号仅可从本机或局域网使用。</p>
       <button class="account-primary" type="submit">保存设置</button></form>`;
   }
   function sessions(payload) {
@@ -236,8 +236,7 @@ export function mountAccountPanel(root, { request, authenticate = (mode, body) =
         if (disposed) return;
         resetCode = payload.reset; await render(); message("一次性重置码已生成，请交给该用户本人");
         root.querySelector("[data-reset-code]")?.focus();
-      } else if (kind === "legacy") { await legacyLogin(data.password); }
-      else if (kind === "profile") { await request("/api/accounts/me", { method: "PATCH", body: data }); await refresh(); message("个人资料已保存"); }
+      } else if (kind === "profile") { await request("/api/accounts/me", { method: "PATCH", body: data }); await refresh(); message("个人资料已保存"); }
       else if (kind === "password") {
         if (data.newPassword !== data.confirmPassword) throw new Error("两次输入的新密码不一致");
         delete data.confirmPassword;

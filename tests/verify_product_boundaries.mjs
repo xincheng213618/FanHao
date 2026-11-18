@@ -42,12 +42,13 @@ try {
     if (product !== "short-videos") createCoreFixture(path.join(data, "fanhao-core-v2.sqlite"));
     const env = { ...process.env, FANHAO_PRODUCT: product, FANHAO_LOAD_ENV: "0", FANHAO_DATA_DIR: data, FANHAO_DISABLE_NVENC: "1",
       FANHAO_CORE_DB: path.join(data, "fanhao-core-v2.sqlite"), FANHAO_CORE_IMAGE_DB: path.join(data, "images.sqlite"),
-      FANHAO_SHORT_VIDEO_DB: path.join(data, "short-videos.sqlite"), FANHAO_WORKFLOW_ROOTS: media,
-      LIBRARY_ROOTS: media, FANHAO_WESTERN_ROOTS: media, FANHAO_SHORT_VIDEO_ROOTS: media,
+      FANHAO_SHORT_VIDEO_DB: path.join(data, "short-videos.sqlite"),
+      LIBRARY_ROOTS: media, FANHAO_WESTERN_ROOTS: media, FANHAO_SHORT_VIDEO_ROOTS: media, FANHAO_INTAKE_ROOTS: media,
       FANHAO_MANGA_ROOT: media, FANHAO_MANGA_DATABASE: path.join(data, "manga.sqlite"),
       FANHAO_PHOTO_SET_ROOTS: media, FANHAO_MUSIC_ROOTS: media, FANHAO_NOVEL_ROOTS: media,
       FANHAO_MOVIE_ROOTS: media, FANHAO_TV_ROOTS: media, FANHAO_ANIME_ROOTS: media,
       FANHAO_DOUYIN_DOWNLOAD_MANAGER_DB: path.join(data, "absent-manager.sqlite"), FANHAO_DOUYIN_SYNC_MS: "0",
+      FANHAO_DOUYIN_DOWNLOAD_MANAGER_URL: "http://127.0.0.1:0",
       FANHAO_EAGER_PREWARM: "0", PORT: "0", HOST: "127.0.0.1", FANHAO_WEB_PASSWORD: "" };
     const entry = product === "suite" ? "server.js" : product === "fanhao" ? "server-fanhao.js" : "server-short-videos.js";
     const child = fork(path.join(repository, "tests/fixtures/product-process.mjs"), [path.join(root, entry)], { env, cwd: root, silent: true });
@@ -61,6 +62,28 @@ try {
     });
     const base = `http://127.0.0.1:${ready.port}`;
     assert.equal((await fetch(`${base}/api/health`)).status, 200);
+    const register = (mode, username) => fetch(`${base}/api/accounts/${mode}`, { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password: "Fixture-product-password", client: "android" })
+    });
+    const setup = await register("setup", "fixture-admin");
+    const signup = await register("register", "fixture-user");
+    assert.equal(setup.status, 201);
+    assert.equal(signup.status, 201);
+    const adminHeaders = { Authorization: `Bearer ${(await setup.json()).token}` };
+    const userHeaders = { Authorization: `Bearer ${(await signup.json()).token}` };
+    const adminFetch = (route) => fetch(`${base}${route}`, { headers: adminHeaders });
+    const maintenanceRoutes = product === "short-videos" ? ["/api/accounts/admin/settings"]
+      : ["/admin", "/api/fanhao/duplicates?limit=2", "/api/fanhao/file-workflows/intake/config",
+        ...(product === "suite" ? ["/api/manga/jobs", "/api/novels/collection", "/api/photo-cover-warm"] : [])];
+    for (const route of maintenanceRoutes) {
+      const requiresAccount = route.startsWith("/api/accounts/");
+      assert.equal((await fetch(`${base}${route}`)).status, requiresAccount ? 401 : 200, `${product} localhost: ${route}`);
+      const proxy = await fetch(`${base}${route}`, { headers: { "X-Forwarded-For": "192.168.1.50" } });
+      assert.equal(proxy.status, requiresAccount ? 401 : 403, `${product} forwarded guest: ${route}`);
+      assert.equal((await fetch(`${base}${route}`, { headers: userHeaders })).status, 403, `${product} ordinary account: ${route}`);
+      assert.equal((await adminFetch(route)).status, 200, `${product} signed-in administrator: ${route}`);
+    }
     const catalog = await (await fetch(`${base}/api/modules`)).json();
     assert.equal(catalog.product.id, product);
     if (product !== "suite") {
@@ -70,16 +93,23 @@ try {
     } else {
       assert(catalog.modules.some((module) => module.id === "fanhao"));
       assert(catalog.modules.some((module) => module.id === "short-videos"));
-      assert.equal((await fetch(`${base}/api/fanhao/file-workflows/config`)).status, 200);
+      assert(!catalog.modules.some((module) => ["market-dashboard", "tools"].includes(module.id)));
+      for (const route of ["/modules/market-dashboard/index.html", "/api/market-dashboard/health", "/api/market-dashboard/quotes", "/tools", "/api/tools/txt-format/batch-download", "/api/tools/txt-format/download/fixture"]) {
+        assert.equal((await fetch(`${base}${route}`)).status, 404, `${route} must stay removed`);
+      }
+      assert.equal((await fetch(`${base}/api/tools/txt-format`, { method: "POST" })).status, 405, "retired TXT writes must reach the generic unsupported-method response");
+      for (const game of ["2048", "huarongdao", "gomoku", "jump"]) {
+        assert.equal((await fetch(`${base}/games/${game}/index.html`)).status, 404, `${game} must stay removed`);
+      }
       assert.equal((await fetch(`${base}/api/short-videos?limit=1`)).status, 200);
-      const warm = await fetch(`${base}/api/photo-cover-warm`);
+      const warm = await adminFetch("/api/photo-cover-warm");
       assert.equal(warm.status, 200, `suite must mount the gallery cover job route\n${output}`);
       assert.deepEqual(await warm.json(), { status: "idle" });
-      const maintenance = await fetch(`${base}/photo/maintenance`);
+      const maintenance = await adminFetch("/photo/maintenance");
       assert.equal(maintenance.status, 200);
       assert.match(await maintenance.text(), /modules\/photos\/maintenance\/maintenance\.js/);
       assert.equal((await fetch(`${base}/photo/maintenance`, { headers: { Origin: "https://example.invalid" } })).status, 403);
-      const scan = await fetch(`${base}/api/photo-maintenance/index`);
+      const scan = await adminFetch("/api/photo-maintenance/index");
       assert.deepEqual(await scan.json(), { task: null });
       for (const mode of ["movie", "tv", "media"]) {
         for (const offset of [0, 48]) {
@@ -94,27 +124,32 @@ try {
         }
       }
     }
+    for (const route of ["/api/fanhao/taste", "/api/fanhao/taste/evidence", "/modules/fanhao/taste/index.html"]) {
+      assert.equal((await fetch(`${base}${route}`)).status, 404, `${route} must be removed for ${product}`);
+    }
     if (product !== "short-videos") {
-      const tasteResponse = await fetch(`${base}/api/fanhao/taste`);
-      const duplicatesResponse = await fetch(`${base}/api/fanhao/duplicates?limit=2`);
+      const duplicatesResponse = await adminFetch("/api/fanhao/duplicates?limit=2");
       assert.equal(duplicatesResponse.status, 200, `duplicate comparison must use the ${product} core database\n${output}`);
       assert(Array.isArray((await duplicatesResponse.json()).groups));
       assert((await (await fetch(`${base}/fanhao/duplicates`)).text()).includes("重复文件比对"));
-      assert.equal(tasteResponse.status, 200, `taste must use the ${product} core database\n${output}`);
-      const taste = await tasteResponse.json();
-      assert(Number.isInteger(taste.summary.total));
-      assert.equal(tasteResponse.headers.get("cache-control"), "no-store");
-      assert((await (await fetch(`${base}/fanhao/taste`)).text()).includes("从特别喜欢的作品"));
-    } else {
-      assert.equal((await fetch(`${base}/api/fanhao/taste`)).status, 404);
+      const oldTastePage = await (await fetch(`${base}/fanhao/taste`)).text();
+      const fanhaoPage = await (await fetch(`${base}/fanhao`)).text();
+      assert.equal(oldTastePage, fanhaoPage, "the removed page must use the usual FanHao fallback");
+      assert.doesNotMatch(fanhaoPage, /href="\/fanhao\/taste"/u);
+      assert.doesNotMatch(fanhaoPage, /href="\/fanhao\/file-workflows"/u);
+      assert.equal(await (await fetch(`${base}/fanhao/file-workflows`)).text(), fanhaoPage);
+      assert.equal((await fetch(`${base}/modules/fanhao/file-workflows/index.html`)).status, 404);
+      assert.equal((await fetch(`${base}/api/fanhao/file-workflows/config`)).status, 404);
+      assert.equal((await adminFetch("/api/fanhao/file-workflows/intake/config")).status, 200);
+      const subtitleBench = await fetch(`${base}/fanhao/file-workflows/intake?mode=subtitle`);
+      assert.equal(subtitleBench.status, 200);
+      assert.match(await subtitleBench.text(), /id="sourceSubtitles"/u);
     }
     if (product === "fanhao") {
       for (const route of ["/api/library?limit=1", "/api/works?limit=1"]) {
         const response = await fetch(`${base}${route}`);
         assert.equal(response.status, 200, `${route}: ${await response.text()}\n${output}`);
       }
-      assert.equal((await fetch(`${base}/api/fanhao/file-workflows/config`)).status, 200);
-      assert((await (await fetch(`${base}/fanhao/file-workflows`)).text()).includes("新建文件计划"));
       assert(!fs.existsSync(path.join(data, "short-videos.sqlite")));
       assert(!fs.existsSync(path.join(data, "image-gallery.sqlite")));
     } else if (product === "short-videos") {
@@ -160,7 +195,7 @@ function createCoreFixture(file) {
   const db = new DatabaseSync(file);
   db.exec(`
     CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT, name_search TEXT, display_name TEXT, folder_path TEXT, gender TEXT, status TEXT, source TEXT, updated_at TEXT, created_at TEXT);
-    CREATE TABLE works(id INTEGER PRIMARY KEY, code TEXT, code_search TEXT, title TEXT, release_date TEXT, duration_minutes REAL, rating REAL, rating_count INTEGER, director TEXT, fields_json TEXT, status TEXT, updated_at TEXT, created_at TEXT);
+    CREATE TABLE works(id INTEGER PRIMARY KEY, code TEXT, code_search TEXT, title TEXT, release_date TEXT, duration_minutes REAL, rating REAL, rating_count INTEGER, director TEXT, fields_json TEXT, raw_text TEXT, status TEXT, updated_at TEXT, created_at TEXT);
     CREATE TABLE local_works(id INTEGER PRIMARY KEY, work_id INTEGER, local_path TEXT, source_mtime TEXT, updated_at TEXT);
     CREATE TABLE work_people(work_id INTEGER, person_id INTEGER, role TEXT, sort_order INTEGER, source TEXT, updated_at TEXT, created_at TEXT);
     CREATE TABLE person_aliases(id INTEGER PRIMARY KEY, person_id INTEGER, alias TEXT, alias_search TEXT, source TEXT, updated_at TEXT);

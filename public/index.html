@@ -97,7 +97,7 @@
         };
         document.addEventListener("DOMContentLoaded", renderStartupNotice, { once: true });
         const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(window.location.pathname);
-        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-2551548a232c";
+        const shortVideoModuleUrl = "/short-video-app.min.js?v=bundle-00e4933b0819";
         const preloadEntryModule = (href) => {
           const modulePreload = document.createElement("link");
           modulePreload.rel = "modulepreload";
@@ -112,7 +112,7 @@
         const shortVideoStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
-          "/modules/short-videos/styles/list.css?v=20260917-author-delete-01",
+          "/modules/short-videos/styles/list.css?v=20261116-author-collector-status-01",
           "/modules/short-videos/styles/viewer.css?v=20261027-caption-01",
           "/modules/short-videos/styles/gallery-navigation.css?v=20260711-player-modal-focus-75",
           "/modules/short-videos/styles/panels.css?v=20261027-speed-picker-01",
@@ -125,12 +125,12 @@
         const fanhaoStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
-          "/modules/fanhao/styles.css?v=20261113-ranking-coverage-01",
+          "/modules/fanhao/styles.css?v=20261114-person-search-01",
           "/modules/fanhao/work-cards.css?v=20261113-direct-favorite-folder-01",
           "/modules/system/admin.css?v=20260727-hidden-overlays-01",
           "/css/player.css?v=20260710-web-css-modules-01",
           "/css/responsive.css?v=20260712-module-settings-02",
-          "/modules/fanhao/browse-refinements.css?v=20261111-person-controls-01",
+          "/modules/fanhao/browse-refinements.css?v=20261114-person-search-01",
           "/modules/fanhao/code-batch-lookup.css?v=20261113-code-batch-lookup-01",
           "/modules/fanhao/features/studios/series-picker.css?v=20261113-studio-series-picker-01",
           "/modules/fanhao/person-shortcuts.css?v=20261113-people-shortcuts-01"
@@ -139,8 +139,7 @@
           "/css/foundation.css?v=20260710-web-css-modules-01",
           "/css/shell.css?v=20260713-search-index-02",
           "/modules/content-index/styles.css?v=20261113-photo-slideshow-01",
-          "/modules/content-index/catalog.css?v=20261113-media-watchlist-01",
-          "/modules/media/continue-watching.css?v=20261113-media-continue-hide-01"
+          "/modules/content-index/catalog.css?v=20261113-media-watchlist-01"
         ];
         const mangaStyleUrls = [
           "/css/foundation.css?v=20260710-web-css-modules-01",
@@ -163,13 +162,8 @@
           "/modules/music/styles/player.css?v=20261113-music-list-search-01",
           "/modules/music/styles/responsive.css?v=20260711-music-compact-sidebar-10"
         ];
-        const toolsStyleUrls = [
-          "/css/foundation.css?v=20260710-web-css-modules-01",
-          "/css/shell.css?v=20260713-search-index-02",
-          "/modules/tools/styles.css?v=20261113-txt-append-01"
-        ];
         const shortVideoDetailEntry = /^\/(?:short-videos|short-video|douyin)\/(?!(?:stats|authors|transcoding)(?:\/|$))[^/]+\/?$/.test(window.location.pathname);
-        const standaloneStyleEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname);
+        const standaloneStyleEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname);
         document.documentElement.classList.add("app-module-loading");
         const styleUrls = shortVideoEntry
           ? (shortVideoDetailEntry
@@ -182,9 +176,7 @@
                 ? novelStyleUrls
               : /^\/(?:music|musics|songs)(?:\/|$)/.test(window.location.pathname)
                 ? musicStyleUrls
-                : /^\/tools(?:\/|$)/.test(window.location.pathname)
-                  ? toolsStyleUrls
-                  : galleryStyleUrls)
+                : galleryStyleUrls)
             : fanhaoStyleUrls;
         const stylePromises = new Map();
         const loadStyle = (href) => {
@@ -212,18 +204,18 @@
         window.__fanhaoStylesReady = loadStyleUrls(styleUrls)
           .finally(() => document.documentElement.classList.remove("app-styles-loading"));
         if (standaloneStyleEntry) {
-          preloadEntryModule("/standalone-app.js?v=20261113-txt-append-01");
+          preloadEntryModule("/standalone-app.js?v=20261114-remove-tools-01");
         } else if (!shortVideoEntry) {
           // The shell imports the core dynamically, so preload both module URLs.
-          preloadEntryModule("/fanhao-app.js?v=20261113-search-route-01");
-          preloadEntryModule("/app.js?v=20261113-search-route-01");
+          preloadEntryModule("/fanhao-app.js?v=20261114-person-search-01");
+          preloadEntryModule("/app.js?v=20261114-person-search-01");
         }
       })();
     </script>
   </head>
   <body>
     <script>
-      if (/^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|short-videos|short-video|douyin|music|musics|songs|tools)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname)) {
+      if (/^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|short-videos|short-video|douyin|music|musics|songs)(?:\/|$)/.test(window.location.pathname) || /^\/western\/.+/.test(window.location.pathname)) {
         document.body.classList.add("standalone-module-view");
       }
       if (/^\/music(?:\/|$)/.test(window.location.pathname)) document.body.classList.add("music-view");
@@ -243,13 +235,11 @@
         <a class="product-tab" href="/novels" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="novels">小说</a>
         <a class="product-tab" href="/short-videos" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="shortVideos">短视频</a>
         <a class="product-tab" href="/music" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="music">音乐</a>
-        <a class="product-tab" href="/tools" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="tools">小工具</a>
-        <a class="product-tab" href="/modules/market-dashboard/index.html" target="_blank" rel="noopener" data-module-navigation="window" data-product-view="marketDashboard">行情</a>
       </nav>
       <div class="product-actions">
         <a class="product-action" href="/account">用户中心</a>
         <a class="product-action" href="/android-update">手机端</a>
-        <a class="product-action" id="topAdminLink" href="/admin#overview">设置与运维</a>
+        <a class="product-action" id="topAdminLink" href="/admin#overview" hidden>设置与运维</a>
       </div>
     </header>
     <div class="app-shell">
@@ -263,7 +253,6 @@
           <div class="fanhao-nav-group" role="group" aria-labelledby="fanhaoBrowseLabel">
             <h3 id="fanhaoBrowseLabel">资料浏览</h3>
             <a class="view-tab active" href="/fanhao" data-view="people" data-people-scope="main" aria-current="page">人物</a>
-            <a class="view-tab" href="/fanhao/codes" data-view="codes">番号</a>
             <a class="view-tab" href="/fanhao?classification=all" data-work-classifications>分类</a>
             <a class="view-tab" href="/fanhao/studios" data-view="studios">厂商</a>
           </div>
@@ -279,13 +268,11 @@
             <h3 id="fanhaoPersonalLabel">我的</h3>
             <a class="view-tab" href="/fanhao/favorites" data-view="favorites">收藏</a>
             <a class="view-tab" href="/fanhao/history" data-view="history">历史</a>
-            <a class="view-tab fanhao-side-link" href="/fanhao/taste">口味分析</a>
           </div>
           <div class="fanhao-nav-group fanhao-nav-management" role="group" aria-labelledby="fanhaoManagementLabel">
             <h3 id="fanhaoManagementLabel">管理</h3>
             <a class="view-tab fanhao-side-link" href="/disk-usage">存储空间</a>
             <a class="view-tab fanhao-side-link" href="/fanhao/duplicates">重复文件比对</a>
-            <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows">整理与迁移</a>
             <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows/intake">视频洗版</a>
             <a class="view-tab fanhao-side-link" href="/fanhao/file-workflows/intake?mode=subtitle" target="_blank" rel="noopener">字幕工作台</a>
           </div>
@@ -369,9 +356,9 @@
     <script type="module">
       const pathname = window.location.pathname;
       const shortVideoEntry = /^\/(?:short-videos|short-video|douyin)(?:\/|$)/.test(pathname);
-      const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs|tools)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
+      const standaloneEntry = /^\/(?:gallery|photo|photos|photo-sets|manga|media|video|videos|movie|movies|tv|novel|novels|music|musics|songs)(?:\/|$)/.test(pathname) || /^\/western\/.+/.test(pathname);
       if (shortVideoEntry) {
-        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-2551548a232c");
+        const shortVideoModulePromise = import("/short-video-app.min.js?v=bundle-00e4933b0819");
         shortVideoModulePromise.catch(() => window.__fanhaoReportStartupFailure?.());
         await window.__fanhaoStylesReady;
         try {
@@ -384,7 +371,7 @@
       } else if (standaloneEntry) {
         await window.__fanhaoStylesReady;
         try {
-          await import("/standalone-app.js?v=20261113-txt-append-01");
+          await import("/standalone-app.js?v=20261114-remove-tools-01");
         } catch {
           window.__fanhaoReportStartupFailure?.();
         } finally {
@@ -393,7 +380,7 @@
       } else {
         await window.__fanhaoStylesReady;
         try {
-          await import("/fanhao-app.js?v=20261113-search-route-01");
+          await import("/fanhao-app.js?v=20261114-person-search-01");
         } catch {
           window.__fanhaoReportStartupFailure?.();
         } finally {

@@ -39,6 +39,7 @@
 .fanhao-feedback { color: var(--muted); margin-bottom: 12px; }
 .fanhao-feedback:empty, .fanhao-dialog-status:empty { display: none; }
 .fanhao-more { margin: 14px auto 0; }
+.grid > .card > .cover { content-visibility: auto; }
 
 .fanhao-local-state {
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px;
@@ -53,6 +54,8 @@
 
 .fanhao-dialog form { margin: 0; }
 .fanhao-dialog-actions { flex-wrap: wrap; }
+.fanhao-import-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.fanhao-import-actions a { display: inline-flex; align-items: center; }
 .fanhao-view-form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; }
 .fanhao-view-form label { display: grid; flex: 1 1 180px; min-width: 0; gap: 4px; color: var(--muted); font-size: var(--text-sm); }
 .fanhao-view-form input, .fanhao-view-input {

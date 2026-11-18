@@ -418,34 +418,23 @@ textarea:focus-visible,
   padding: 0 10px;
 }
 
-.tools-view .work-search,
 .gallery-view .work-search,
-.tools-view .toolbar-controls {
-  display: none;
-}
-
 .gallery-view .toolbar-controls {
   display: none;
 }
 
 body.gallery-view .app-shell,
-body.tools-view .app-shell,
 body.short-video-view .app-shell {
   display: block;
 }
 
 body.gallery-view .sidebar,
-body.tools-view .sidebar,
 body.short-video-view .sidebar {
   display: none;
 }
 
-body.gallery-view .main,
-body.tools-view .main {
-  padding: 0 36px 42px;
-}
-
 body.gallery-view .main {
+  padding: 0 36px 42px;
   overflow: visible;
 }
 

@@ -89,10 +89,9 @@ Web 并非统一的单页应用：番号入口、短视频入口与独立页面�
 | --- | --- |
 | 番号 | `public/fanhao-app.js` → `public/app.js` |
 | 短视频 | `public/short-video-app.js` → `public/modules/short-videos/` |
-| 图库、影视、小说、音乐、小工具 | `public/standalone-app.js` → `public/js/standalone-host.js` |
-| 行情 | `public/modules/market-dashboard/index.html` |
+| 图库、影视、小说、音乐 | `public/standalone-app.js` → `public/js/standalone-host.js` |
 
-Android 的模块注册器合并服务端描述符与本地后备目录，再加载声明的 `android-module.js`。因此新增服务端描述符并不会自动生成 Android 页面；目前行情只有 Web 声明。
+Android 的模块注册器合并服务端描述符与本地后备目录，再加载描述符声明的 `android-module.js`。
 
 Web 与 Android 可共享 API 契约，但各有页面控制器和原生能力边界。更改数据含义时应检查两端消费者，不要假定修改 Web 文件会自动同步 Android。
 

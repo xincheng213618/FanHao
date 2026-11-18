@@ -1,4 +1,4 @@
-import { imageUrlForWork } from "../../../../js/image.js?v=assets-06c1d7f13464";
+import { imageUrlForWork } from "../../../../js/image.js?v=assets-78764ed05056";
 
 export function workDataSignature(data = {}) {
   const works = Array.isArray(data.works) ? data.works : [];

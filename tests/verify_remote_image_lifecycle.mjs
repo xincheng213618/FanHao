@@ -17,10 +17,42 @@ function service(options = {}) {
     isAllowedRemoteImageUrl: () => true, notFound: () => {}, sendText: (res,status,body) => { res.writeHead(status); res.end(body); }, proxiedRemoteImageUrl: (url) => url,
     warn: () => {}, ...options });
 }
-async function miss(instance, target) {
+async function miss(instance, target, wait = false) {
   const res = response();
-  await instance.serveCachedRemoteImage({}, res, new URL("http://fixture/media/remote-image?url=" + encodeURIComponent(target)));
+  await instance.serveCachedRemoteImage({}, res, new URL("http://fixture/media/remote-image?url=" + encodeURIComponent(target) + (wait ? "&wait=1" : "")));
   return res;
+}
+
+async function verifyDownloadBeforeServing() {
+  let fetched = 0, written = 0;
+  const target = "https://fixture.invalid/new.gif";
+  const instance = service({
+    isAllowedRemoteImageUrl: (url) => url.hostname === "fixture.invalid",
+    fetchRemoteImage: async (url, { redirect }) => {
+      assert.equal(redirect, "manual");
+      fetched++;
+      if (url.endsWith("/invalid.gif")) return new Response("not an image");
+      if (url.endsWith("/redirect.gif")) return new Response(null, { status: 302, headers: { Location: "https://outside.invalid/image.gif" } });
+      return new Response(tinyGif, { headers: { "Content-Type": "image/gif" } });
+    },
+    mediaBlobStore: { remoteImage: async () => null, upsertRemote: async ({ buffer }) => {
+      assert.deepEqual(buffer, tinyGif);
+      written++;
+      return true;
+    } }
+  });
+  try {
+    const responses = await Promise.all([miss(instance, target, true), miss(instance, target, true)]);
+    assert.deepEqual(responses.map(({ status }) => status), [200, 200]);
+    assert.deepEqual(responses[0].body, tinyGif);
+    assert.equal(written, 1);
+    assert.equal((await miss(instance, target, true)).status, 200);
+    assert.equal(fetched, 1);
+    assert.equal((await miss(instance, "https://fixture.invalid/invalid.gif", true)).status, 502);
+    assert.equal((await miss(instance, "https://fixture.invalid/redirect.gif", true)).status, 502);
+    assert.equal(fetched, 3);
+    assert.equal(written, 1);
+  } finally { await instance.stop(); }
 }
 
 async function verifyBodyLimits() {
@@ -308,4 +340,5 @@ await verifyStartIntentFence();
 await verifyActualChunkedBody();
 await verifyCompletedCacheBudget();
 await verifyRemoteUrlAdmission();
+await verifyDownloadBeforeServing();
 console.log("remote image lifecycle verification passed: streaming limits, direct-request admission, redirect fallback, abort/drain ownership, source epoch, queued replacement, actual loopback chunked cancellation, completed cache key/metadata weight and entry cap, direct/prewarm URL boundaries");

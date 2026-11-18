@@ -40,6 +40,9 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
         if (runtime.pending) { runtime.pending.arrived(); await runtime.pending.wait; }
         return json(res, { prefixes, localWorkCount: 720600, mappedCount: prefixes.length });
       }
+      if (url.pathname === "/api/works/fixture-prefix-work") {
+        return json(res, { work: { id: "fixture-prefix-work", title: "Synthetic work", infoSummary: { code: runtime.code }, videos: [] } });
+      }
       if (url.pathname.startsWith("/api/code-prefixes/")) { runtime.details.push(decodeURIComponent(url.pathname.split("/").at(-1))); return json(res, { codePrefix: { prefix: runtime.details.at(-1), localCount: 1 }, works: [{ id: "selected-work", title: "Selected synthetic work", videoCount: 1 }], total: 1, facets: { all: 1 } }); }
       if (url.pathname.startsWith("/api/")) return json(res, {});
       if (url.pathname === "/favicon.ico") { res.writeHead(204); res.end(); return; }
@@ -53,6 +56,37 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`, browser = await chromium.launch({ executablePath, headless: true });
   try {
+    await run("work metadata links to a prefix without a standalone sidebar entry", async () => {
+      runtime = { reads: 0, details: [], code: "[A].300mium-123" };
+      const page = await browser.newPage();
+      page.on("pageerror", error => faults.push(error.message));
+      try {
+        const playerUrl = `${base}/player.html?workId=fixture-prefix-work`;
+        await page.goto(playerUrl);
+        const prefixLink = page.getByRole("link", { name: "浏览 300MIUM 前缀作品" });
+        assert.equal(await prefixLink.textContent(), "300mium");
+        assert.equal(await prefixLink.locator("..").textContent(), runtime.code);
+        await prefixLink.press("Enter");
+        await page.waitForURL(`${base}/fanhao/codes?prefix=300MIUM`);
+        await page.locator('.work-card[data-work-id="selected-work"]').waitFor();
+        assert.deepEqual(runtime.details, ["300MIUM"]);
+        assert.equal(await page.locator('#fanhaoNavigation a[href="/fanhao/codes"]').count(), 0);
+        await page.getByRole("button", { name: "返回番号索引" }).click();
+        await page.getByRole("button", { name: "批量核对番号" }).waitFor();
+        await page.waitForURL(`${base}/fanhao/codes`);
+
+        runtime.code = "FC2_PPV–123456";
+        await page.goto(playerUrl);
+        const fc2Link = page.getByRole("link", { name: "浏览 FC2-PPV 前缀作品" });
+        assert.equal(await fc2Link.textContent(), "FC2_PPV");
+        assert.equal(await fc2Link.getAttribute("href"), "/fanhao/codes?prefix=FC2-PPV");
+
+        runtime.code = "无前缀 123";
+        await page.goto(playerUrl);
+        await page.locator("#playerMeta").getByText(runtime.code, { exact: true }).waitFor();
+        assert.equal(await page.locator("#playerMeta .player-code-prefix-link").count(), 0);
+      } finally { await page.close(); }
+    });
     await run("batch code lookup classifies a pasted list without leaving the index", async () => {
       const page = await open();
       try {
@@ -232,8 +266,11 @@ export async function runPrefixSearch({ casePattern = "", sourceOverrides = {} }
         unobserve() {}
       };
     });
-    await page.goto(`${base}${pending ? "/fanhao" : "/fanhao/codes"}`);
-    if (pending) { await page.locator("#fanhaoNavigationButton").click(); await page.locator('[data-view="codes"]:not([data-code-prefix])').click(); }
+    await page.goto(`${base}/fanhao/codes${pending ? "?prefix=PFX-0000" : ""}`);
+    if (pending) {
+      await page.getByRole("button", { name: "返回番号索引" }).click();
+      runtime.details.length = 0;
+    }
     if (waitForRows) await page.locator(".code-prefix-row").first().waitFor(); return page;
   }
   async function frames(page) { await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }

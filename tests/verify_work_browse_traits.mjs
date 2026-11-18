@@ -71,7 +71,10 @@ function fixture(count = 50, workHasCoreCover = () => true) {
     defaultWorkLimit: 2, maxWorkLimit: 64,
     enrichLocalWorksWithActorMovieIndex: (values) => values,
     library: { worksById: new Map(works.map((work) => [work.id, work])) },
-    peopleScopeService: { normalize: () => "main", workMatches: (_work, scope) => scope === "main" },
+    peopleScopeService: {
+      normalize: (scope) => scope === "western" ? "western" : "main",
+      workMatches: (work, scope) => scope === "main" || Boolean(work.westernFixture)
+    },
     prewarmRemoteImagesForWorks: () => {}, publicWork: (work) => ({ id: work.id, title: work.title }),
     localSearchWorkByCodeKey: () => new Map(works.map((work) => [work.infoSummary.code.replace("-", "").toLowerCase(), work])),
     localWorksByCodePrefix: () => works, fastMissingCodeSearch: () => [],
@@ -193,6 +196,39 @@ check("classification search is paginated, local-only, and intersects with text 
   assert.equal(search("class:ltx AB").total, 3);
   assert.deepEqual(search("class:ltx AB-101").works.map(({ id }) => id), ["work-1"]);
   assert.deepEqual(search("class:ltx text fixture").works.map(({ id }) => id), ["work-1"]);
+});
+
+check("classification and opt-in catalogue reads exclude Western works before pagination and facets", () => {
+  const { works, rows, service } = fixture(4);
+  works[0].westernFixture = true;
+  works[0].videos = [{ name: "AB-100-LTX.mp4" }];
+  rows.set(works[0].id, { trait_tags: ["Western fixture"] });
+  works[1].videos = [{ name: "AB-101-LTX.mp4" }];
+  const search = (q, extra = {}) => service.searchPayload(request("all", { q, ...extra }));
+  const list = (extra = {}) => service.listPayload(request("all", extra));
+  assert.equal(search("AB").total, 4);
+  assert.equal(search("AB", { excludeWestern: "1" }).total, 3);
+  assert.equal(search("AB").total, 4, "scoped reads must not populate the ordinary search cache");
+  assert.deepEqual(search("class:ltx").works.map(({ id }) => id), ["work-1"]);
+  assert.deepEqual(search("class:all AB-100").works, []);
+  const classified = search("class:all");
+  assert.equal(classified.total, 3);
+  assert.equal(tagCount(classified, "Western fixture"), 0);
+  assert.equal(list({ excludeWestern: "1" }).total, 3);
+  assert.equal(list().total, 4);
+  assert.deepEqual(list({ scope: "western" }).works.map(({ id }) => id), ["work-0"]);
+});
+
+check("a Western exact code does not mask an eligible copy in a scoped search", () => {
+  const { works, service } = fixture(3);
+  const [westernWork, eligibleWork] = works;
+  westernWork.westernFixture = true;
+  eligibleWork.title = eligibleWork.directoryName = eligibleWork.infoSummary.code = westernWork.title;
+  const q = westernWork.title;
+  // The synthetic exact-match index preserves the most recent key.
+  works.reverse();
+  assert.deepEqual(service.searchPayload(request("all", { q })).works.map(({ id }) => id), [westernWork.id]);
+  assert.deepEqual(service.searchPayload(request("all", { q, excludeWestern: "1" })).works.map(({ id }) => id), [eligibleWork.id]);
 });
 
 check("library hydration preserves natural person order and reads only version-matched video dimensions", () => {

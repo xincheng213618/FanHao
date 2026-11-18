@@ -77,7 +77,7 @@ function matchesIntakeDescriptor(item, file, stat) {
     && (!item.relative || file.replaceAll("\\", "/").toLowerCase().endsWith(`/${item.relative.replaceAll("\\", "/").toLowerCase()}`));
 }
 
-async function searchIntakeFiles(roots, excludedRoots, wanted) {
+async function searchIntakeFiles(roots, excludedRoots, wanted, excludePath) {
   const searchRoots = new Map(roots.map((root) => [pathKey(root), root]));
   const signal = AbortSignal.timeout(5000);
   async function search(root) {
@@ -86,13 +86,14 @@ async function searchIntakeFiles(roots, excludedRoots, wanted) {
     // Breadth-first so a large subtree cannot consume the volume's entire search budget.
     for (let index = 0; index < directories.length && !signal.aborted; index++) {
       const dir = directories[index];
-      if (excludedRoots.some((excluded) => inside(dir, excluded))) continue;
+      if (excludePath?.(dir) || excludedRoots.some((excluded) => inside(dir, excluded))) continue;
       try {
         const folder = await fsp.opendir(dir);
         for await (const entry of folder) {
           if (signal.aborted || ++visited > 20000) return;
           if (EXCLUDED.test(entry.name) || entry.isSymbolicLink()) continue;
           const file = path.join(dir, entry.name);
+          if (excludePath?.(file)) continue;
           if (entry.isDirectory() && !searchRoots.has(pathKey(file))) directories.push(file);
           if (!entry.isFile()) continue;
           const candidates = wanted.get(entry.name.toLowerCase());
@@ -117,7 +118,7 @@ async function searchIntakeFiles(roots, excludedRoots, wanted) {
   finally { signal.removeEventListener("abort", onTimeout); }
 }
 
-export async function collectIntakeFiles(input, roots, { searchRoots = intakeSearchRoots, excludedRoots = [], findIndexed } = {}) {
+export async function collectIntakeFiles(input, roots, { searchRoots = intakeSearchRoots, excludedRoots = [], findIndexed, excludePath } = {}) {
   const paths = new Map(), folderOrigins = new Map();
   let visited = 0;
   async function collect(dir, depth, match) {
@@ -126,6 +127,7 @@ export async function collectIntakeFiles(input, roots, { searchRoots = intakeSea
       if (++visited > 20000) throw intakeError("目录太大，请粘贴更具体的视频或文件夹路径", 400);
       if (EXCLUDED.test(entry.name) || entry.isSymbolicLink()) continue;
       const file = path.join(dir, entry.name);
+      if (excludePath?.(file)) continue;
       if (entry.isDirectory()) await collect(file, depth - 1, match);
       else if (entry.isFile() && VIDEO.test(entry.name)) match(file, entry.name);
     }
@@ -156,12 +158,13 @@ export async function collectIntakeFiles(input, roots, { searchRoots = intakeSea
   if (findIndexed) for (const items of wanted.values()) for (const item of items) {
     for (const file of findIndexed(item.name, item.size)) {
       if (item.hits.size >= 10) break;
+      if (excludePath?.(file)) continue;
       try {
         if (matchesIntakeDescriptor(item, file, await fsp.lstat(file))) item.hits.set(pathKey(file), checkedPath(file, excludedRoots));
       } catch { /* The indexed file is unavailable. */ }
     }
   }
-  await searchIntakeFiles([...roots, ...await searchRoots()], excludedRoots, wanted);
+  await searchIntakeFiles([...roots, ...await searchRoots()], excludedRoots, wanted, excludePath);
   const unmatched = [];
   for (const items of wanted.values()) for (const item of items) {
     const hits = [...item.hits.values()];
@@ -176,7 +179,7 @@ export async function collectIntakeFiles(input, roots, { searchRoots = intakeSea
   return { files: [...paths.values()], unmatched, folderOrigins };
 }
 
-function subtitleSuffix(name, videoName, legacy) {
+export function subtitleSuffix(name, videoName, legacy) {
   if (!SUBTITLE.test(name)) return "";
   const lower = name.toLowerCase();
   if (legacy) {
@@ -198,6 +201,23 @@ export function subtitleFiles(video, { legacy = false, exclusive = false } = {})
     if (!suffix || siblings.some((other) => subtitleSuffix(name, other, legacy))) return [];
     return [{ file: path.join(folder, name), suffix }];
   });
+}
+
+export async function sameIntakeFileContent(left, right, { leftSignature, rightSignature }) {
+  if (leftSignature[2] !== rightSignature[2]) return false;
+  const abort = new AbortController();
+  const hashes = [left, right].map((file) => hashFile(file, () => {}, abort.signal));
+  try {
+    const [leftHash, rightHash] = await Promise.all(hashes);
+    if (!same(signature(regular(left)), leftSignature) || !same(signature(regular(right)), rightSignature)) {
+      throw intakeError("同名字幕在比对时已改变，请重新核对");
+    }
+    return leftHash === rightHash;
+  } catch (error) {
+    abort.abort();
+    await Promise.allSettled(hashes);
+    throw error;
+  }
 }
 
 export async function probeIntakeVideo(executable, file) {
@@ -241,6 +261,23 @@ export function safeName(value, fallback = "作品") {
 function editionSuffix({ ltx, u, c }) {
   if (ltx) return `-LTX${c ? "C" : ""}${u ? "-U" : ""}`;
   return u || c ? `-${u ? "U" : ""}${c ? "C" : ""}` : "";
+}
+
+export function videoMarkerName(file, desired = null) {
+  const { name, ext } = path.parse(file);
+  const [, markedName, localLtx = ""] = /^([\s\S]*?)(\s*\[LTX 本地\])?$/i.exec(name);
+  const [, base, edition = "", quality = ""] = /^([\s\S]*?)((?:[-_. ](?:LTXC?(?:[-_. ]?restored)?|UC|U|C)|\s*\[(?:LTXC?|UC|U|C)\])*)([-_. ](?:4K|2160P|1080P|720P))?$/i.exec(markedName);
+  const glued = /^((?:\[[^\]]+\][.\s_-]*)*(?:[A-Z]{2,12}[-_. ]?\d{2,8}|FC2[-_. ]*(?:PPV[-_. ]*)?\d{4,9}|\d{6}[-_]\d{2,4}|N\d{4}))(UC|U|C)$/i.exec(base);
+  const stem = glued?.[1] || base;
+  const tokens = [...edition.toUpperCase().matchAll(/LTXC?|UC|U|C/g)].map(([token]) => token);
+  if (glued) tokens.push(glued[2].toUpperCase() === "UC" ? "U" : glued[2].toUpperCase());
+  const hasLtxSuffix = tokens.some((token) => token.startsWith("LTX"));
+  const tags = { ltx: Boolean(localLtx) || hasLtxSuffix,
+    c: tokens.some((token) => token.endsWith("C")), u: tokens.some((token) => token.startsWith("U")) };
+  if (!desired || Object.keys(tags).every((key) => tags[key] === desired[key])) return { name: name + ext, tags };
+  if (!stem.trim()) throw intakeError("去除标签后没有可保留的文件名", 400);
+  const next = { ...desired, ltx: desired.ltx && (!localLtx || hasLtxSuffix) };
+  return { name: `${stem}${editionSuffix(next)}${quality}${desired.ltx ? localLtx : ""}${ext}`, tags: desired };
 }
 
 export function nameWithIntakeMarks(file, tags, existing) {

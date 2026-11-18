@@ -13,8 +13,6 @@ sources:
   - src/modules/novels/module.js
   - src/modules/short-videos/module.js
   - src/modules/music/module.js
-  - src/modules/tools/module.js
-  - src/modules/market-dashboard/module.js
   - src/modules/content-index/server/routes.js
   - android-client/www/js/android-module-registry.js
   - public/js/module-navigation.js
@@ -24,7 +22,7 @@ sources:
 
 # 模块清单与协议
 
-核对日期时，注册器发现 **10 个模块：8 个可见模块、2 个隐藏模块**。其中 7 个可见模块声明了 Android 入口；行情目前只声明 Web 入口。
+注册器发现 **8 个模块：6 个可见模块、2 个隐藏模块**。6 个可见模块均声明了 Android 入口。Android 的「我的」由客户端本地注册。
 
 清单来自 `discoverFanHaoModuleDefinitions()` 对 `src/modules/*/module.js` 的实际发现结果。`tests/verify_module_structure.mjs` 中的 `requiredModules` 是必须保留的最低集合，不能用它推断全部模块数量。
 
@@ -40,8 +38,6 @@ sources:
 | 40 | `novels` / 小说 | 书库、阅读、采集 | `/novels` | 有 |
 | 50 | `short-videos` / 短视频 | 信息流、作者、收藏、本地播放与管理器集成 | `/short-videos` | 有 |
 | 60 | `music` / 音乐 | 音乐库与歌单 | `/music` | 有 |
-| 70 | `tools` / 小工具 | TXT 格式化与离线游戏 | `/tools` | 有 |
-| 80 | `market-dashboard` / 行情 | 贵金属、汇率和全球指数展示 | `/modules/market-dashboard/index.html` | 未声明 |
 
 每个 id 的服务端入口均为 `src/modules/<id>/module.js`，再进入其 `server/runtime.js`。Android 的已声明入口均遵循 `./modules/<id>/android-module.js`，路径相对于 Android WebView 根目录。
 

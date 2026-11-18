@@ -22,6 +22,5 @@ function nextPath() {
 }
 mountAccountPanel(document.getElementById("accountRoot"), {
   request, initialMode: location.pathname === "/register" ? "register" : "login",
-  onSignedIn: () => { const next = nextPath(); if (next) location.assign(next); },
-  legacyLogin: async (password) => { await request("/auth/login", { method: "POST", body: { password } }); publishWebAccountChange(); location.assign(nextPath() || "/"); }
+  onSignedIn: () => { const next = nextPath(); if (next) location.assign(next); }
 });

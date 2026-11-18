@@ -1,15 +1,15 @@
-import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-06c1d7f13464";
-import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-06c1d7f13464";
+import { deleteJson, fetchJson, postJson } from "../../js/api.js?v=assets-78764ed05056";
+import { cacheAgeText, clearCachedJsonByPrefix, readCachedJson, writeCachedJson } from "../../js/cache.js?v=assets-78764ed05056";
 import { formatBytes, formatNumber } from "../../js/format.js";
-import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-06c1d7f13464";
-import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { deleteLocalNovelEntry, loadLocalNovelSummaries, readLocalNovelSummary, readLocalNovelCatalog, readLocalNovelChapter, readLocalNovelEntry, saveLocalNovelEntry, saveLocalNovelProgress, listLocalNovelRecoveryBooks, readLocalNovelRecoveryEntry } from "../../js/local-novels.js?v=assets-78764ed05056";
+import { openMobileActionSheet } from "../../js/mobile-action-sheet.js?v=assets-78764ed05056";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-06c1d7f13464";
+import { enhanceAutoLoadMore } from "../../js/auto-load.js?v=assets-78764ed05056";
 import { openChapterSearch } from "./chapter-search.js";
 import { createBookTextSearch } from "./book-text-search.js";
 import { openNovelReadLater, readNovelReadLater, toggleNovelReadLater } from "./read-later.js";
 import { mountNovelBookmarks } from "./bookmarks.js";
-import { createNovelAutoScroll, NOVEL_AUTO_SCROLL_SPEEDS } from "./reader-auto-scroll.js?v=assets-06c1d7f13464";
+import { createNovelAutoScroll, NOVEL_AUTO_SCROLL_SPEEDS } from "./reader-auto-scroll.js?v=assets-78764ed05056";
 
 const NOVEL_SETTINGS_KEY = "fanhao.android.novel.settings";
 const NOVEL_SORT_STORAGE_KEY = "fanhao.android.novelSort";

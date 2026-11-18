@@ -1871,6 +1871,11 @@ try {
   const localComment = store.createLocalComment(liveId, { body: "本地评论测试" });
   assert.equal(localComment.comments[0]?.body, "本地评论测试", "local comments must remain separate from synced Douyin comments");
   assert.equal(localComment.remoteTotal, 1);
+  const accountComment = store.createLocalComment(liveId, { body: "账号评论测试" }, "account:owner");
+  assert.deepEqual(accountComment.comments.map(comment => comment.body), ["账号评论测试"]);
+  assert.deepEqual(store.localComments(liveId).comments.map(comment => comment.body), ["本地评论测试"]);
+  assert.throws(() => store.deleteLocalComment(liveId, accountComment.comment.id, "account:another"), { statusCode: 404 });
+  assert.equal(store.deleteLocalComment(liveId, accountComment.comment.id, "account:owner").comments.length, 0);
 
   const distributionDb = new DatabaseSync(targetDbPath);
   distributionDb.prepare(`

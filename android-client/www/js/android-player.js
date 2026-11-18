@@ -1,9 +1,9 @@
-import { fetchJson } from "./api.js?v=assets-06c1d7f13464";
+import { fetchJson } from "./api.js?v=assets-78764ed05056";
 import { formatBytes, formatNumber, formatTime } from "./format.js";
 import { absoluteUrl } from "./image.js";
 import { createDetailSectionTitle, revealDetailBlock } from "./detail-ui.js";
 import { captureAccountOwner, isAccountOwnerCurrent } from "./account-owner.js";
-import { openMobileActionSheet } from "./mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { openMobileActionSheet } from "./mobile-action-sheet.js?v=assets-78764ed05056";
 
 const VIDEO_PICKER_PAGE_SIZE = 40;
 

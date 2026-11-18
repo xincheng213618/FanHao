@@ -207,9 +207,7 @@ try {
   // The production worker must neither fall back to a full scan on an old
   // downloader nor leave a draining backlog alive after stop().
   source.exec("UPDATE links SET last_seen_at='worker'");
-  const sourceKeys = [];
-  service = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath, roots: [root], intervalMs: 60_000,
-    onStateKey: key => sourceKeys.push(key) });
+  service = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath, roots: [root], intervalMs: 60_000 });
   const originalStatSync = fs.statSync;
   let mainThreadSourceStats = 0;
   let worker;
@@ -224,8 +222,6 @@ try {
   assert.equal(worker.ok, true);
   assert.equal(worker.changeJournal, true);
   assert.equal(worker.hasMore, true);
-  assert.equal(sourceKeys.length, 1);
-  assert.match(sourceKeys[0], /^manager\.sqlite:/);
   await service.stop(); service = null;
   const stoppedCursor = cursor();
   await new Promise(resolve => setTimeout(resolve, 250));
@@ -236,15 +232,15 @@ try {
   const unavailable = await service.sync({ force: true });
   assert.equal(unavailable.requiresJournalUpgrade, true);
 
-  const workers = [], changes = [], imports = [], syncedKeys = [];
+  const workers = [], changes = [], imports = [];
   class HeldSyncWorker extends EventEmitter {
     constructor() { super(); workers.push(this); this.terminateCalls = 0; }
     terminate() { this.terminateCalls++; return Promise.resolve(0); }
-    reply(key) { this.emit("message", { ok: true, result: { ok: true, advanced: true, imported: 1, catalogChanged: true }, sourceStateKey: key }); }
+    reply(result = { ok: true, advanced: true, imported: 1, catalogChanged: true }) { this.emit("message", { ok: true, result }); }
   }
   const recovering = createDownloadManagerSyncService({ sourceDbPath: sourcePath, dbPath: targetPath,
     roots: [root], WorkerCtor: HeldSyncWorker, syncTimeoutMs: 80, workerCloseTimeoutMs: 20,
-    onCatalogChanged: change => changes.push(change), onItemsImported: result => imports.push(result), onStateKey: key => syncedKeys.push(key) });
+    onCatalogChanged: change => changes.push(change), onItemsImported: result => imports.push(result) });
   try {
     assert.equal(await recovering.sync({ force: true }), null, "a hung worker must finish the caller's request at the deadline");
     const hung = workers[0];
@@ -252,24 +248,31 @@ try {
     assert.equal(await recovering.sync({ force: true }), null);
     await assert.rejects(recovering.stop(), { code: "SHORT_VIDEO_SYNC_CLOSE_UNCONFIRMED" });
     recovering.start();
-    hung.reply("late");
+    hung.reply();
     assert.equal(await recovering.sync({ force: true }), null);
     assert.equal(workers.length, 1, "a successful terminate request must not free an unexited worker");
     assert.deepEqual(changes, []);
     hung.emit("exit", 0);
     assert.deepEqual(changes, [{ uncertain: true }], "a possibly committed batch with a lost result must invalidate catalog reads");
-    assert.deepEqual(syncedKeys, [], "a retired worker cannot publish its source stamp");
     assert.deepEqual(imports, []);
 
     let settled = false;
-    const next = recovering.sync({ force: true }).then(result => { settled = true; return result; });
+    const next = recovering.sync().then(result => { settled = true; return result; });
     assert.equal(workers.length, 2);
-    workers[1].reply("recovered");
+    const forced = recovering.sync({ force: true });
+    assert.equal(recovering.sync({ force: true }), forced, "concurrent collector requests must share the queued forced sync");
+    workers[1].reply();
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(settled, false, "a result must await actual worker exit before giving up its slot");
+    assert.equal(workers.length, 2, "the forced sync must wait for the periodic worker to exit");
     workers[1].emit("exit", 0);
     assert.equal((await next).imported, 1);
-    assert.deepEqual(syncedKeys, ["recovered"]);
+    assert.equal(workers.length, 3, "one forced worker must run after the periodic worker exits");
+    const noChange = { ok: true, advanced: false, catalogChanged: false };
+    workers[2].reply(noChange);
+    workers[2].emit("exit", 0);
+    assert.deepEqual(await forced, noChange);
+    assert.equal(changes.length, 2, "the forced no-op must leave the recovered catalog cache valid");
     assert.equal(imports.length, 1);
   } finally {
     for (const worker of workers) worker.emit("exit", 0);

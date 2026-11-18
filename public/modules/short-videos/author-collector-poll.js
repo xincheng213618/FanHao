@@ -47,12 +47,12 @@ export function createAuthorCollectorPoll(options = {}) {
         if (!isActive(poll)) return null;
         const job = data?.job;
         if (job) {
-          const progress = data?.progress?.status === "running" ? data.progress : job;
-          onProgress?.({
-            processed: Math.max(0, Number(progress.processed || 0)),
-            total: Math.max(0, Number(progress.total || 0))
-          });
           if (["complete", "failed", "stopped"].includes(job.status)) return data;
+          onProgress?.({
+            processed: Math.max(0, Number(job.processed || 0)),
+            total: Math.max(0, Number(job.total || 0)),
+            status: job.status
+          });
         }
         if (!await abortableDelay(poll.controller.signal)) return null;
       }

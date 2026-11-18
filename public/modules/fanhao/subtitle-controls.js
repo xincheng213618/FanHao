@@ -51,7 +51,7 @@ function sameOriginUrl(value) {
   catch { return null; }
 }
 
-export function createSubtitleControls({ api, container = null }) {
+export function createSubtitleControls({ api, container = null, autoLoadMatched = false }) {
   installStyles();
   const root = node("details", "subtitle-controls");
   const summary = node("summary", "", "字幕");
@@ -161,6 +161,13 @@ export function createSubtitleControls({ api, container = null }) {
     media.append(trackElement);
     trackElement.track.mode = "hidden";
   }
+  function defaultTrack() {
+    const recommended = tracks.filter((track) => track.autoSelect === true && track.match !== "manual");
+    if (!autoLoadMatched) return recommended.find(chineseTrack);
+    if (recommended.length === 1) return recommended[0];
+    const matched = tracks.filter((track) => track.match === "exact" || track.match === "language");
+    return matched.find(chineseTrack) || matched[0];
+  }
   function acceptTracks(payload, prefer = null) {
     tracks = (payload.tracks || (payload.track ? [...tracks.filter((item) => item.id !== payload.track.id), payload.track] : []))
       .filter((track) => track?.id && sameOriginUrl(track.url));
@@ -170,7 +177,7 @@ export function createSubtitleControls({ api, container = null }) {
     } else if (preferences.has(key)) {
       selected = tracks.some((track) => String(track.id) === preferences.get(key)) ? preferences.get(key) : "";
     } else {
-      selected = String(tracks.find((track) => track.autoSelect === true && chineseTrack(track))?.id || "");
+      selected = String(defaultTrack()?.id || "");
     }
     renderSelect(); applyTrack();
   }
@@ -182,7 +189,7 @@ export function createSubtitleControls({ api, container = null }) {
       if (!current()) return;
       if (!queryEdited && typeof data.query === "string") query.value = data.query.trim();
       acceptTracks(data);
-      message(tracks.length ? `${tracks.length} 条字幕${selected ? "，已选择中文或上次选轨" : "，当前关闭"}` : "没有匹配字幕。可加载本地文件，或按番号搜索。");
+      message(tracks.length ? `${tracks.length} 条字幕${selected ? `，已选择：${selectedTrack().label || selected}` : "，当前关闭"}` : "没有匹配字幕。可加载本地文件，或按番号搜索。");
     }, refresh);
   }
   function downloadFile(result, file) {

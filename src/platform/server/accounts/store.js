@@ -16,11 +16,11 @@ const publicUser = (row) => row ? ({ id: row.id, username: row.username, display
 
 export function accountError(statusCode, message) { return Object.assign(new Error(message), { statusCode }); }
 function requireValue(condition, message) { if (!condition) throw accountError(400, message); }
-function credentials(body) {
+function credentials(body, minimumLength = 10) {
   const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
   requireValue(/^[a-z0-9][a-z0-9_.-]{2,31}$/.test(username), "用户名须为 3–32 位字母、数字、下划线、点或短横线");
-  requireValue(typeof body.password === "string" && body.password.length >= 10 && body.password.length <= 128,
-    "密码长度须为 10–128 位");
+  requireValue(typeof body.password === "string" && body.password.length >= minimumLength && body.password.length <= 128,
+    `密码长度须为 ${minimumLength}–128 位`);
   return { username, password: body.password };
 }
 function displayName(value, fallback = "") {
@@ -127,7 +127,7 @@ export function createAccountStore({ dbPath, now = Date.now }) {
   }
   function hasAdmin() { return Boolean(database().prepare("SELECT 1 FROM account_users WHERE role='admin' LIMIT 1").get()); }
   function userById(id) { return database().prepare("SELECT * FROM account_users WHERE id=?").get(id); }
-  function session(token) {
+  function session(token, { allowAdministrator = true } = {}) {
     if (!/^usr\.[0-9]{1,12}\.[A-Za-z0-9_-]{43}$/.test(String(token || ""))) return null;
     const timestamp = Number(now());
     const tokenHash = hash(token);
@@ -135,6 +135,7 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     sessionRead ??= connection.prepare(`SELECT u.*,s.last_seen_at FROM account_sessions s JOIN account_users u ON u.id=s.user_id
       WHERE s.token_hash=? AND s.expires_at>? AND u.disabled=0`);
     const row = sessionRead.get(tokenHash, timestamp);
+    if (row?.role === "admin" && !allowAdministrator) return null;
     if (row && timestamp - row.last_seen_at >= ACTIVITY_INTERVAL_MS) {
       // Recording approximate activity must never wait on a writer and stall media authentication.
       connection.exec("PRAGMA busy_timeout = 0");
@@ -220,7 +221,7 @@ export function createAccountStore({ dbPath, now = Date.now }) {
       return issueSession(id, sessionMetadata);
     });
   }
-  async function login(body, sessionMetadata) {
+  async function login(body, sessionMetadata, { allowAdministrator = true } = {}) {
     const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
     requireValue(typeof body.password === "string" && body.password.length <= 128, "用户名或密码不正确");
     const row = database().prepare("SELECT * FROM account_users WHERE username=?").get(username);
@@ -229,6 +230,7 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     return transaction(() => {
       const fresh = userById(row.id);
       if (fresh.disabled || fresh.password_hash !== row.password_hash) throw accountError(401, "账号状态已改变，请重新登录");
+      if (fresh.role === "admin" && !allowAdministrator) throw accountError(403, "管理员账号只能在本机或局域网使用");
       return issueSession(row.id, sessionMetadata);
     });
   }
@@ -237,10 +239,10 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     return publicUser(userById(id));
   }
   async function changePassword(id, body, token) {
-    credentials({ username: "validation", password: body.newPassword });
     requireValue(typeof body.currentPassword === "string" && body.currentPassword.length <= 128, "当前密码不正确");
     const row = userById(id);
     if (!row || !(await matches(body.currentPassword, row.password_hash))) throw accountError(400, "当前密码不正确");
+    credentials({ username: "validation", password: body.newPassword }, row.role === "admin" ? 8 : 10);
     const encoded = await passwordHash(body.newPassword);
     transaction((connection) => {
       const fresh = userById(id);
@@ -277,20 +279,21 @@ export function createAccountStore({ dbPath, now = Date.now }) {
       return { username: target.username, code, expiresAt };
     });
   }
-  async function resetPassword(body) {
+  async function resetPassword(body, { allowAdministrator = true } = {}) {
     credentials({ username: "validation", password: body.newPassword });
     const username = typeof body.username === "string" ? body.username.trim().toLowerCase() : "";
     const code = typeof body.resetCode === "string" ? body.resetCode.trim() : "";
     const invalid = () => accountError(400, "重置码无效或已过期，请向管理员重新获取");
     if (username.length > 32 || !/^FHR-[A-Za-z0-9_-]{32}$/.test(code)) throw invalid();
     const codeHash = hash(code);
-    const lookup = () => database().prepare(`SELECT u.id FROM account_password_resets r JOIN account_users u ON u.id=r.user_id
+    const lookup = () => database().prepare(`SELECT u.id,u.role FROM account_password_resets r JOIN account_users u ON u.id=r.user_id
       WHERE u.username=? AND r.code_hash=? AND r.expires_at>? AND u.disabled=0`).get(username, codeHash, Number(now()));
     if (!lookup()) throw invalid();
     const encoded = await passwordHash(body.newPassword);
     return transaction((connection) => {
       const target = lookup();
       if (!target) throw invalid();
+      if (target.role === "admin" && !allowAdministrator) throw accountError(403, "管理员账号只能在本机或局域网使用");
       connection.prepare("UPDATE account_users SET password_hash=? WHERE id=?").run(encoded, target.id);
       connection.prepare("DELETE FROM account_password_resets WHERE user_id=?").run(target.id);
       connection.prepare("DELETE FROM account_sessions WHERE user_id=?").run(target.id);
@@ -354,15 +357,19 @@ export function createAccountStore({ dbPath, now = Date.now }) {
     const count = integer(body.count, 1, 1, 100, "生成数量");
     const maxUses = integer(body.maxUses, 1, 1, 1000, "可用次数");
     const days = integer(body.expiresInDays, 7, 1, 365, "有效天数");
+    const customCode = typeof body.code === "string" ? body.code.trim().toUpperCase() : "";
+    requireValue(body.code === undefined || count === 1 && /^[A-Z0-9][A-Z0-9-]{5,99}$/.test(customCode), "自定义邀请码须为 6–100 位字母、数字或短横线，每次创建一个");
     requireValue(body.note === undefined || (typeof body.note === "string" && body.note.length <= 120), "备注不能超过 120 字");
     return transaction((connection) => {
+      if (customCode && connection.prepare("SELECT 1 FROM account_invites WHERE code_hash=?").get(hash(customCode)))
+        throw accountError(409, "该邀请码已存在");
       const invites = Array.from({ length: count }, () => {
-      const code = `FH-${crypto.randomBytes(12).toString("hex").toUpperCase().match(/.{1,6}/g).join("-")}`;
-      const id = crypto.randomUUID();
-      const expiresAt = Number(now()) + days * 86400000;
-      connection.prepare("INSERT INTO account_invites(id,code_hash,suffix,created_by,created_at,expires_at,max_uses,note) VALUES(?,?,?,?,?,?,?,?)")
-        .run(id, hash(code), code.slice(-6), actor, new Date(Number(now())).toISOString(), expiresAt, maxUses, body.note || "");
-      return { id, code, maxUses, expiresAt };
+        const code = customCode || `FH-${crypto.randomBytes(12).toString("hex").toUpperCase().match(/.{1,6}/g).join("-")}`;
+        const id = crypto.randomUUID();
+        const expiresAt = Number(now()) + days * 86400000;
+        connection.prepare("INSERT INTO account_invites(id,code_hash,suffix,created_by,created_at,expires_at,max_uses,note) VALUES(?,?,?,?,?,?,?,?)")
+          .run(id, hash(code), code.slice(-6), actor, new Date(Number(now())).toISOString(), expiresAt, maxUses, body.note || "");
+        return { id, code, maxUses, expiresAt };
       });
       audit.record("invites.created", actor, null, `生成 ${count} 个邀请码，每码可用 ${maxUses} 次，有效期 ${days} 天`);
       return invites;

@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { DatabaseSync } from "node:sqlite";
 import { createFileWorkflowService } from "../src/modules/fanhao/server/workflows/file-workflow-service.js";
 
-// The CLI and Web UI share one plan/journal protocol. No legacy hard-coded
+// The CLI uses the existing plan/journal protocol. No legacy hard-coded
 // drive list, overwrite, duplicate removal or online metadata request is run.
 const { values } = parseArgs({ options: {
   "data-dir": { type: "string" }, root: { type: "string", multiple: true },

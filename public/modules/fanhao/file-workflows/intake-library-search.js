@@ -1,6 +1,6 @@
 import { classificationQuery, EDITION_FILTERS } from "../browse-traits.js";
 import { captureWebAccount, checkWebAccountResponse } from "../../../platform/accounts/session-context.js";
-import { createLibraryPeopleFilter } from "./intake-library-people.js?v=2";
+import { createLibraryPeopleFilter } from "./intake-library-people.js?v=3";
 
 const classificationFilters = new Map([["ltx-local", "ltxLocal"], ...EDITION_FILTERS.map(([key, label]) => [label.toLowerCase(), key])]);
 const reviewStoragePrefix = "fanhao.subtitle-reviewed-no-chinese:";
@@ -101,8 +101,7 @@ export function createIntakeLibrarySearch({ section, form, status, results, sele
   function applyBrowseSettings(settings = {}) {
     input.value = typeof settings.query === "string" ? settings.query.slice(0, input.maxLength) : "";
     classification = classificationFilters.has(settings.classification) ? settings.classification : "";
-    personId = typeof settings.personId === "string" ? settings.personId.slice(0, 200) : "";
-    people.setSelection(personId);
+    personId = people.setSelection(typeof settings.personId === "string" ? settings.personId.slice(0, 200) : "");
     for (const button of catalog.tools.querySelectorAll("[data-classification]")) {
       button.setAttribute("aria-pressed", String(button.dataset.classification === classification));
     }
@@ -417,7 +416,7 @@ export function createIntakeLibrarySearch({ section, form, status, results, sele
   function globalCatalogSource(query) {
     const q = classification ? classificationQuery(classification, query) : query;
     const filter = onlyMarkedA ? "localOnly,localMarkedA" : "localOnly";
-    const params = new URLSearchParams({ filter, sort: catalog.sort.value });
+    const params = new URLSearchParams({ filter, sort: catalog.sort.value, excludeWestern: "1" });
     if (q) params.set("q", q);
     return { endpoint: q ? "/api/fanhao/search" : "/api/works", params, key: JSON.stringify([q, filter]) };
   }
@@ -667,7 +666,7 @@ export function createIntakeLibrarySearch({ section, form, status, results, sele
     if (catalog) { startFeed(query); return; }
     showResults();
     void run("正在搜索馆藏…", async (signal) => {
-      const params = new URLSearchParams({ q: query, filter: "localOnly" });
+      const params = new URLSearchParams({ q: query, filter: "localOnly", excludeWestern: "1" });
       const { works, total, nextOffset } = await readWorksPage("/api/fanhao/search", params, offset, {}, signal);
       if (signal.aborted) return;
       function showWorks() {

@@ -27,7 +27,7 @@ const webPackageScripts = JSON.parse(readFileSync(new URL('../package.json', imp
 const webCommands = expandCommands(WEB_SCRIPTS, webPackageScripts);
 assert.equal(webPackageScripts['verify:web-core'], 'node tests/run_verification.mjs web');
 assert.equal(webCommands.length, new Set(webCommands).size, 'Web verification must execute shared commands once');
-for (const script of ['verify:web-browser-behavior', 'verify:fanhao-requests', 'verify:web-player-browser', 'verify:web-player-plyr', 'verify:photo-reader-browser', 'verify:manga-reader-browser', 'verify:novel-reader-browser', 'verify:music-reader-browser', 'verify:tools-txt-browser', 'verify:tools-gomoku-browser', 'verify:person-profile-browser']) {
+for (const script of ['verify:web-browser-behavior', 'verify:fanhao-requests', 'verify:web-player-browser', 'verify:web-player-plyr', 'verify:photo-reader-browser', 'verify:manga-reader-browser', 'verify:novel-reader-browser', 'verify:music-reader-browser', 'verify:person-profile-browser']) {
   assert(WEB_SCRIPTS.includes(script), `Web verification must retain its ${script} flow`);
 }
 assert(!webCommands.some(command => /android-client|verify_fanhao_structure|sync:cache|server\.js/.test(command)), 'Web verification must use Web fixtures without Android UI gates, cache writes or a real server');
@@ -48,15 +48,6 @@ assert(!DAILY_SCRIPTS.includes('verify:web-bootstrap-browser'));
 const sharedHtml = selectScripts(['public/index.html']);
 assert.deepEqual(sharedHtml.scripts, FULL_SCRIPTS, 'shared HTML retains the conservative full verification selection');
 assert.deepEqual(sharedHtml.unknownSourceFiles, ['public/index.html']);
-
-assert.equal(webPackageScripts['verify:tools-2048-browser'], 'node tests/verify_tools_2048_lifecycle.mjs');
-assert.deepEqual(selectScripts(['tests/verify_tools_2048_lifecycle.mjs']).scripts, ['verify:tools-2048-browser', 'verify:imports']);
-for (const file of ['public/games/2048/main.js', 'public/games/2048/worker.js', 'public/games/2048/index.html', 'public/games/2048/ai_core.wasm']) {
-  assert.deepEqual(selectScripts([file]).scripts, ['verify:tools-2048-browser', 'verify:imports']);
-}
-assert(WEB_SCRIPTS.includes('verify:tools-2048-browser'), 'the tools AI game has an independent browser lifecycle fixture');
-assert(FULL_SCRIPTS.includes('verify:tools-2048-browser'));
-assert(!DAILY_SCRIPTS.includes('verify:tools-2048-browser'));
 
 assert.equal(webPackageScripts['verify:music-search-dedup-browser'], 'node tests/verify_music_search_deduplication.mjs');
 assert.deepEqual(selectScripts(['tests/verify_music_search_deduplication.mjs']).scripts, ['verify:music-search-dedup-browser', 'verify:imports']);
@@ -197,14 +188,7 @@ for (const [file, script] of [
   ['public/modules/music/views/components.js', 'verify:music-rating-browser'],
   ['tests/verify_gallery_search_input.mjs', 'verify:gallery-search-input'],
   ['public/modules/content-index/gallery-renderer.js', 'verify:gallery-search-input'],
-  ['tests/verify_tools_txt_browser.mjs', 'verify:tools-txt-browser'],
-  ['public/modules/tools/tools-page.js', 'verify:tools-txt-browser'],
-  ['public/modules/tools/txt-format-tool.js', 'verify:tools-txt-browser'],
-  ['public/modules/tools/styles.css', 'verify:tools-txt-browser'],
-  ['src/modules/tools/server/txt-format-service.js', 'verify:tools-txt-browser'],
-  ['src/platform/server/stored-zip-stream.js', 'verify:tools-txt-browser'],
   ['src/platform/server/stored-zip-stream.js', 'verify:manga-streams'],
-  ['public/js/standalone-host.js', 'verify:tools-txt-browser'],
   ['tests/verify_music_playback_recovery.mjs', 'verify:music-playback-recovery-browser'],
   ['public/modules/music/player/engine.js', 'verify:music-playback-recovery-browser'],
   ['tests/verify_manga_image_retry.mjs', 'verify:manga-image-retry'],
@@ -240,10 +224,6 @@ for (const [file, script] of [
   ['tests/verify_browser_behavior.mjs', 'verify:browser-behavior'],
   ['tests/verify_gallery_search_focus.mjs', 'verify:gallery-search-focus'],
   ['public/modules/content-index/gallery-renderer.js', 'verify:gallery-search-focus'],
-  ['tests/verify_tools_gomoku_lifecycle.mjs', 'verify:tools-gomoku-browser'],
-  ['public/games/gomoku/gomoku.js', 'verify:tools-gomoku-browser'],
-  ['public/games/gomoku/index.html', 'verify:tools-gomoku-browser'],
-  ['public/games/gomoku/styles.css', 'verify:tools-gomoku-browser'],
   ['src/modules/fanhao/server/duplicates/service.js', 'verify:duplicates'],
   ['public/modules/fanhao/duplicates/app.js', 'verify:duplicates'],
   ['tests/verify_duplicate_model.mjs', 'verify:duplicates'],
@@ -529,9 +509,6 @@ const nativeShortVideo = selectScripts([
 assert(nativeShortVideo.scripts.includes('verify:short-video-client'));
 assert(!nativeShortVideo.scripts.includes('verify:android-media'));
 
-assert(selectScripts(['public/modules/market-dashboard/app.js']).scripts.includes('verify:market-dashboard'));
-assert(selectScripts(['public/games/gomoku/gomoku.js']).scripts.includes('verify:gomoku'));
-assert(selectScripts(['public/games/jump/integration.js']).scripts.includes('verify:jump'));
 
 const androidUpdate = selectScripts(['src/modules/system/server/android-update/service.js']);
 assert(androidUpdate.scripts.includes('verify:android-release-workflow'));
@@ -919,7 +896,7 @@ for (const file of ['src/modules/fanhao/server/people/actor-avatar-service.js', 
   assert.deepEqual(selectScripts([file]).scripts, ['verify:actor-avatar-import', 'verify:core-images', 'verify:fanhao', 'verify:settings', 'verify:auth', 'verify:mutation-auth', 'verify:imports']);
 }
 assert.deepEqual(selectScripts(['tests/verify_static_file_lifecycle.mjs']).scripts, ['verify:static-files', 'verify:auth', 'verify:mutation-auth', 'verify:imports']);
-for (const file of ['src/platform/server/static-files.js', 'src/platform/server/http-app.js', 'src/apps/short-video-server.js', 'tests/verify_file_workflows_ui.mjs']) {
+for (const file of ['src/platform/server/static-files.js', 'src/platform/server/http-app.js', 'src/apps/short-video-server.js']) {
   assert.deepEqual(selectScripts([file]).scripts, ['verify:static-files', 'verify:shutdown', 'verify:products', 'verify:auth', 'verify:accounts', 'verify:mutation-auth', 'verify:startup', 'verify:file-workflows-ui', 'verify:imports']);
 }
 for (const file of ['tests/verify_module_lifecycle.mjs', 'tests/verify_server_shutdown_lifecycle.mjs']) {
@@ -962,11 +939,11 @@ assert.equal(fullCommands.filter(command => command === 'node tests/verify_andro
 for (const file of ['verify_android_bottom_layout', 'verify_android_bottom_layout_metrics']) {
   assert.equal(fullCommands.filter(command => command === `node tests/${file}.mjs`).length, 1, 'bottom navigation layout behavior must run once in full verification');
 }
-for (const file of ['verify_gallery_search_input', 'verify_music_playback_recovery', 'verify_tools_txt_browser', 'verify_gallery_control_construction', 'verify_music_queue_move_performance', 'verify_web_player_time_links', 'verify_gallery_page_jump', 'verify_novel_reader_position', 'verify_music_lyric_find']) {
+for (const file of ['verify_gallery_search_input', 'verify_music_playback_recovery', 'verify_gallery_control_construction', 'verify_music_queue_move_performance', 'verify_web_player_time_links', 'verify_gallery_page_jump', 'verify_novel_reader_position', 'verify_music_lyric_find']) {
   assert.equal(fullCommands.filter(command => command === `node tests/${file}.mjs`).length, 1, 'new Web input and recovery checks must run once in full verification');
 }
 assert.equal(fullCommands.filter(command => command === 'node tests/verify_browser_behavior.mjs --web-only').length, 1);
-for (const file of ['verify_gallery_search_focus', 'verify_tools_gomoku_lifecycle', 'verify_novel_reader_panels']) {
+for (const file of ['verify_gallery_search_focus', 'verify_novel_reader_panels']) {
   assert.equal(fullCommands.filter(command => command === `node tests/${file}.mjs`).length, 1);
 }
 const jsonResponseCommand = 'node tests/verify_json_responses.mjs';
@@ -994,18 +971,17 @@ assert.deepEqual(selectScripts(['tests/verify_music_playlist_order.mjs']).script
 assert.equal(expandCommands(selectScripts(['src/modules/music/server/store.js']).scripts, actualScripts).filter(command => command === playlistOrderCommand).length, 1, 'music store changes must cover playlist ordering');
 const fileWorkflowCommand = 'node tests/verify_file_workflows.mjs';
 assert.equal(fullCommands.filter(command => command === fileWorkflowCommand).length, 1, 'file workflows must run once in full verification');
-const fileWorkflowUiCommand = 'node tests/verify_file_workflows_ui.mjs';
-assert.equal(fullCommands.filter(command => command === fileWorkflowUiCommand).length, 1, 'full verification must exercise the workflow confirmation UI');
-const fileWorkflowUiFiles = ['app.js', 'index.html', 'styles.css'].map(name => `public/modules/fanhao/file-workflows/${name}`);
+const fileWorkflowUiCommand = 'node tests/verify_media_intake.mjs';
+assert.equal(fullCommands.filter(command => command === fileWorkflowUiCommand).length, 1, 'full verification must exercise media intake');
+const fileWorkflowUiFiles = ['intake.js', 'intake.html', 'intake.css', 'styles.css'].map(name => `public/modules/fanhao/file-workflows/${name}`);
 for (const file of fileWorkflowUiFiles) {
   const plan = selectScripts([file]);
   assert.deepEqual(plan.unknownSourceFiles, []);
   assert.equal(expandCommands(plan.scripts, actualScripts).filter(command => command === fileWorkflowUiCommand).length, 1, `${file} must exercise the real workflow UI`);
 }
-assert.equal(expandCommands(selectScripts([...fileWorkflowUiFiles, 'tests/verify_file_workflows_ui.mjs']).scripts, actualScripts).filter(command => command === fileWorkflowUiCommand).length, 1, 'related workflow UI changes must share one browser run');
+assert.equal(expandCommands(selectScripts([...fileWorkflowUiFiles, 'tests/verify_media_intake.mjs', 'src/modules/fanhao/server/workflows/routes.js']).scripts, actualScripts).filter(command => command === fileWorkflowUiCommand).length, 1, 'related intake changes must share one fixture run');
 const fileWorkflowFiles = [
   'src/modules/fanhao/server/workflows/file-workflow-service.js',
-  'src/modules/fanhao/server/workflows/routes.js',
   'tools/fanhao_file_workflows.mjs',
   'tests/verify_file_workflows.mjs',
 ];
@@ -1046,7 +1022,7 @@ for (const file of ['verify_static_file_lifecycle', 'verify_module_lifecycle', '
   assert.equal(fullCommands.filter((command) => command === `node tests/${file}.mjs`).length, 1, `${file} must run once in full verification`);
 }
 for (const file of ['public/js/standalone-host.js', 'public/standalone-app.js']) {
-  assert.deepEqual(selectScripts([file]).scripts, ['verify:photo-reader-browser', 'verify:manga-reader-browser', 'verify:music-reader-browser', 'verify:novel-reader-browser', 'verify:photo-reader', 'verify:tools-txt-browser', 'verify:browser-behavior', 'verify:imports']);
+  assert.deepEqual(selectScripts([file]).scripts, ['verify:photo-reader-browser', 'verify:manga-reader-browser', 'verify:music-reader-browser', 'verify:novel-reader-browser', 'verify:photo-reader', 'verify:browser-behavior', 'verify:imports']);
 }
 assert.deepEqual(selectScripts(['public/modules/photos/manga-page.js']).scripts, ['verify:manga-reader-browser', 'verify:manga-image-layout', 'verify:manga-image-retry', 'verify:manga-chapter-navigation', 'verify:manga-library-input-browser', 'verify:manga-reader-position', 'verify:manga-page-navigation-browser', 'verify:manga', 'verify:manga-add-draft-browser', 'verify:manga-directory-return-browser', 'verify:manga-directory-search-browser', 'verify:manga-library-cards-browser', 'verify:manga-library-covers-browser', 'verify:manga-fit-position-browser', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_manga_reader_requests.mjs']).scripts, ['verify:manga-reader-browser', 'verify:manga-chapter-navigation', 'verify:manga-library-input-browser', 'verify:manga-reader-position', 'verify:manga-page-navigation-browser', 'verify:manga', 'verify:manga-add-draft-browser', 'verify:manga-directory-return-browser', 'verify:manga-directory-search-browser', 'verify:manga-library-cards-browser', 'verify:manga-library-covers-browser', 'verify:manga-fit-position-browser', 'verify:imports']);
@@ -1188,7 +1164,9 @@ assert.deepEqual(selectScripts(['tests/fixtures/novel-write-worker-fault.mjs']).
 assert.deepEqual(selectScripts(['tests/verify_novel_credentials_async.mjs']).scripts, ['verify:novel-credentials-async', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/verify_novel_collection_worker.mjs']).scripts, ['verify:novel-collection-worker', 'verify:imports']);
 assert.deepEqual(selectScripts(['tests/fixtures/novel-collection-worker-fault.mjs']).scripts, ['verify:novel-collection-worker', 'verify:imports']);
-assert.deepEqual(selectScripts(['tests/verify_novel_reimport_async.mjs']).scripts, ['verify:novel-reimport-async', 'verify:imports']);
+for (const file of ['tests/verify_novel_reimport_async.mjs', 'tests/verify_novel_text_formatter.py', 'tools/novel_text_formatter.py']) {
+  assert.deepEqual(selectScripts([file]).scripts, ['verify:novel-reimport-async', 'verify:imports']);
+}
 assert.deepEqual(selectScripts(['tools/rescan_novel_library.py']).scripts, ['verify:novels', 'verify:novel-summary-cache', 'verify:imports']);
 
 const docs = selectScripts(['docs/site/reference/verification.md']);

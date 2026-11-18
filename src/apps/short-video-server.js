@@ -13,15 +13,13 @@ export async function startShortVideoServer(config = SERVER_CONFIG) {
   const auth = createAuthServices({
     authSecretPath: config.AUTH_SECRET_PATH,
     accountsDbPath: path.join(config.DATA_DIR, "accounts.sqlite"),
-    remoteWebPassword: config.REMOTE_WEB_PASSWORD,
     ensureDataDir: () => fs.mkdirSync(config.DATA_DIR, { recursive: true }),
     readBodyText, sendJson, sendHtml, redirect
   });
   function requireLocalAdmin(req, res) {
     const state = auth.requestAuthState(req, new URL(req.url || "/", "http://localhost"));
     const access = auth.requestAccess(req);
-    if (state.reason === "expired-account" || (state.accountLoginRequired && !state.user)
-      || (state.user && state.user.role !== "admin")
+    if ((state.user?.role !== "admin" && !state.localAdministrator)
       || !auth.isTrustedNetworkAccess(access) || !auth.isSameTrustedNetworkOrigin(req, access)) {
       sendJson(res, 403, { error: "需要本机或局域网同源的管理员权限" });
       return false;

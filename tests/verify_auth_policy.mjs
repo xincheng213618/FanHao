@@ -442,7 +442,7 @@ try {
     projectRoot: tempRoot,
     spawn: () => ({ status: 1, stdout: "", stderr: "" })
   });
-  assert.equal(config.REMOTE_WEB_PASSWORD, "", "the repository must not ship a remote login password");
+  assert.equal(Object.hasOwn(config, "REMOTE_WEB_PASSWORD"), false, "product configuration no longer includes a remote login password");
   const persistedAuthRecord = JSON.parse(fs.readFileSync(authSecretPath, "utf8"));
   assert.equal(persistedAuthRecord.version, 2, "auth secrets must persist a credential-bound epoch record");
   assert.equal(typeof persistedAuthRecord.webPasswordBinding, "string");

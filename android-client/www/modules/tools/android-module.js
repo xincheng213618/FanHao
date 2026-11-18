@@ -1,5 +1,5 @@
-import { fetchJson } from "../../js/api.js?v=assets-06c1d7f13464";
-import { createToolViews } from "./tool-views.js?v=assets-06c1d7f13464";
+import { fetchJson } from "../../js/api.js?v=assets-78764ed05056";
+import { createToolViews } from "./tool-views.js?v=assets-78764ed05056";
 
 export function createAndroidModule({ host }) {
   const toolViews = createToolViews({

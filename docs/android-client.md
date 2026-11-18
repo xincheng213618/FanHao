@@ -31,7 +31,7 @@ android-client/
 ├── build-debug.ps1         # 构建 debug APK（可选连真机安装）
 ├── publish-debug-update.ps1# 构建并把 APK 发布到更新通道目录
 ├── install-published-debug.ps1 # 校验并安装 latest.json 当前发布 APK
-├── www/                    # Android 专用 Web 壳；仅 games/ 从根目录 public/games 同步
+├── www/                    # Android 专用 WebView 资源
 └── android/                # 原生安卓工程（Gradle）
 ```
 
@@ -242,5 +242,5 @@ Android 远程内容使用显式密码登录：设置中填写服务地址和访
 ## 调试建议
 
 - 真机调试：USB 调试授权后 `build-debug.ps1 -Install`，日志用 `adb logcat`。
-- 改了 `android-client/www/` 的 Web 代码后，必须 `cap sync android`（即 `npm run sync`）再构建，原生层才会拿到新资源；小游戏源文件只修改根目录 `public/games/`，同步脚本会将其复制到 `android-client/www/games/`。
+- 修改 `android-client/www/` 后，构建前运行 `npm run sync`，将新版 WebView 资源同步到原生工程。
 - 改了 `android/` 原生代码（如权限、插件）则直接走 Android Studio 打开 `android/` 工程。

@@ -2,7 +2,8 @@ import { installFilterViews, writeFilterViewUrl } from "./filter-views.js?v=2026
 
 const $ = (id) => document.getElementById(id);
 const scope = { header: "db15c80d", sort: "276abc24", side: "e8550fad", avatar: "190f65b8", main: "ff5b15bf", card: "289703c3" };
-const BATCH_SIZE = 60;
+const BATCH_SIZE = 20;
+const ACTOR_BATCH_SIZE = 40;
 const collator = new Intl.Collator("zh-CN", { numeric: true });
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Shanghai"
@@ -43,9 +44,21 @@ const state = {
   libraryChecked: false, downloadsChecked: false
 };
 let localCatalogRequest;
+let actorView;
+let recentPreview;
+const actorSentinel = element("div", "sentinel", "", "main");
+actorSentinel.setAttribute("aria-hidden", "true");
+const actorObserver = new IntersectionObserver((entries) => {
+  if (entries.some(({ isIntersecting }) => isIntersecting)) appendActors();
+}, { root: $("actors"), rootMargin: "160px 0px" });
+const coverImages = createViewportImageLoader({ rootMargin: "200px 0px" });
+const avatarImages = createViewportImageLoader();
 const visibleMedia = new Map();
+const resolutionQueue = new Map();
 let mediaCache = new Map();
+let activeMedia = new Map();
 let mediaRequests = 0;
+let resolutionRenderTimer;
 const mediaObserver = new IntersectionObserver((entries) => {
   for (const { target, isIntersecting } of entries) {
     if (isIntersecting) visibleMedia.set(target, target.dataset.code);
@@ -117,17 +130,30 @@ function isResourceLink(link) {
 
 const normalize = (text) => String(text || "").normalize("NFKC").trim().toLowerCase();
 const normalizeCode = (text) => normalize(text).replace(/[-_.\s]+/g, "");
+const searchIndex = new WeakMap();
 const hasLocal = ({ local }) => Boolean(local.library || local.downloads);
 const isPending = (item) => !item.libraryOnly && Boolean(item.pending || item.waiting || item.missing || !item.links.length);
-const hasMediaUrl = (url) => typeof url === "string" && /^\/media\/(?:remote-image\?|image\/[^/?#]+$)/.test(url);
+const hasMediaUrl = (url) => typeof url === "string" && /^\/media\/(?:remote-image\?|image\/[^/?#]+$|core-image\/\d+\?)/.test(url);
+const coverSources = (item) => [item.coverUrl, ...(item.coverFallbacks || [])].filter(hasMediaUrl);
 
-function searchableItem(item) {
-  const links = item.links.filter(isResourceLink);
-  return {
-    ...item, links, maxSize: Math.max(0, ...links.map(({ size }) => size || 0), item.libraryOnly ? largestLocalSize(item) : 0),
-    searchCode: normalizeCode(item.code),
-    searchText: normalize([item.code, item.title, item.originalTitle, item.maker, ...item.actors, ...(item.genres || [])].join(" "))
-  };
+function prepareItem(item) {
+  item.links = item.links.filter(isResourceLink);
+  let maxSize = item.libraryOnly ? largestLocalSize(item) : 0;
+  for (const { size } of item.links) maxSize = Math.max(maxSize, size || 0);
+  item.maxSize = maxSize;
+  return item;
+}
+
+function matchesSearch(item, query, codeQuery) {
+  let search = searchIndex.get(item);
+  if (!search) {
+    search = {
+      code: normalizeCode(item.code),
+      text: normalize([item.code, item.title, item.originalTitle, item.maker, ...item.actors, ...(item.genres || [])].join(" "))
+    };
+    searchIndex.set(item, search);
+  }
+  return search.text.includes(query) || Boolean(codeQuery && search.code.includes(codeQuery));
 }
 
 async function readLibraryJson(url) {
@@ -173,7 +199,7 @@ async function readLocalCatalog() {
   return [...items.values()].map((item) => {
     const count = item.local.copies.length;
     Object.assign(item.local, { library: count, marked: count, ltxLocal: count });
-    return searchableItem(item);
+    return prepareItem(item);
   });
 }
 
@@ -316,22 +342,61 @@ async function submitBatch() {
   status.textContent = `已写入剪贴板 ${copied}/${total} 条。${reason || (copied < total ? "已停止，可继续剩余链接。" : "请在 115 查看接收结果。")}`;
 }
 
-function appendImage(parent, url, alt, cover = false) {
-  if (!hasMediaUrl(url)) return;
+function loadImageSources(image, urls, onFailure) {
+  let index = 0;
+  const next = () => {
+    if (index < urls.length) image.src = urls[index++];
+    else {
+      image.onerror = null;
+      image.removeAttribute("src");
+      onFailure();
+    }
+  };
+  image.onerror = next;
+  next();
+}
+
+function createViewportImageLoader(options) {
+  const pending = new WeakMap();
+  const observer = new IntersectionObserver((entries) => {
+    for (const { target, isIntersecting } of entries) {
+      if (!isIntersecting || !target.isConnected) continue;
+      observer.unobserve(target);
+      const sources = pending.get(target);
+      pending.delete(target);
+      if (sources) loadImageSources(target, sources, () => target.remove());
+    }
+  }, options);
+  return {
+    observe(image, sources) {
+      pending.set(image, sources);
+      observer.observe(image);
+    },
+    unobserve(image) {
+      pending.delete(image);
+      observer.unobserve(image);
+    },
+    disconnect() {
+      observer.disconnect();
+    }
+  };
+}
+
+function appendImage(parent, urls, alt, cover = false) {
+  const sources = (Array.isArray(urls) ? urls : [urls]).filter(hasMediaUrl);
+  if (!sources.length) return;
   const image = element("img", "", "", cover ? "card" : "avatar");
   image.alt = alt;
-  image.loading = "lazy";
   image.decoding = "async";
   if (cover) image.classList.add("in");
-  image.addEventListener("error", () => image.remove(), { once: true });
-  image.src = url;
   parent.append(image);
+  (cover ? coverImages : avatarImages).observe(image, sources);
 }
 
 function showCover(item) {
   $("coverTitle").textContent = item.code;
   $("coverPreview").alt = `${item.code} 封面`;
-  $("coverPreview").src = item.coverUrl;
+  loadImageSources($("coverPreview"), coverSources(item), () => {});
   $("coverDialog").showModal();
 }
 
@@ -384,54 +449,73 @@ function renderLocalMedia(row, copies, pending = false) {
 function localMediaView(item) {
   const row = element("div", "fanhao-local-media");
   const cached = mediaCache.get(item.code);
-  renderLocalMedia(row, cached ?? item.local.copies, !cached);
-  if (!cached) {
+  const pending = !mediaCache.has(item.code);
+  renderLocalMedia(row, cached ?? item.local.copies, pending);
+  if (pending) {
     row.dataset.code = item.code;
     mediaObserver.observe(row);
   }
   return row;
 }
 
+function readItemMedia(item) {
+  const { code } = item;
+  const cache = mediaCache;
+  const active = activeMedia;
+  mediaRequests++;
+  const media = item.libraryOnly
+    ? Promise.all(item.local.copies.map(async (copy) => {
+      const info = await readLibraryJson(`/api/playinfo/${encodeURIComponent(copy.videoId)}`).catch(() => ({}));
+      return { ...copy, width: info.width, height: info.height };
+    }))
+    : readLibraryJson(`/api/fanhao/ltx/local-media?${new URLSearchParams({ code })}`).then(({ copies }) => copies);
+  const request = media.catch(() => null).then((copies) => {
+    if (copies != null || (cache === mediaCache && resolutionQueue.has(code))) cache.set(code, copies);
+    return copies;
+  }).finally(() => {
+    active.delete(code);
+    mediaRequests--;
+    if (cache === mediaCache && resolutionQueue.delete(code) && !resolutionRenderTimer) {
+      resolutionRenderTimer = setTimeout(() => renderResults(false, true), 250);
+    }
+    loadVisibleMedia();
+  });
+  active.set(code, request);
+  return request;
+}
+
 function loadVisibleMedia() {
+  if (recentPreview) return;
   for (const [row, code] of visibleMedia) {
-    if (mediaRequests >= 3) return;
+    const active = activeMedia.get(code);
+    if (row.isConnected && !mediaCache.has(code) && !active && mediaRequests >= 3) break;
     visibleMedia.delete(row);
     mediaObserver.unobserve(row);
     if (!row.isConnected) continue;
-    const cached = mediaCache.get(code);
-    if (cached) {
-      renderLocalMedia(row, cached);
-      continue;
-    }
-    const cache = mediaCache;
-    mediaRequests++;
     const item = state.results.find((item) => item.code === code);
-    const media = item?.libraryOnly
-      ? Promise.all(item.local.copies.map(async (copy) => {
-        const info = await readLibraryJson(`/api/playinfo/${encodeURIComponent(copy.videoId)}`).catch(() => ({}));
-        return { ...copy, width: info.width, height: info.height };
-      }))
-      : readLibraryJson(`/api/fanhao/ltx/local-media?${new URLSearchParams({ code })}`).then(({ copies }) => copies);
-    media
-      .then((copies) => {
-        cache.set(code, copies);
-        if (row.isConnected) renderLocalMedia(row, copies);
-      }).catch(() => {
-        if (row.isConnected && item) renderLocalMedia(row, item.local.copies);
-      }).finally(() => {
-        mediaRequests--;
-        loadVisibleMedia();
+    if (!item) continue;
+    if (mediaCache.has(code)) {
+      renderLocalMedia(row, mediaCache.get(code) ?? item.local.copies);
+    } else {
+      (active ?? readItemMedia(item)).then((copies) => {
+        if (row.isConnected) renderLocalMedia(row, copies ?? item.local.copies);
       });
+    }
+  }
+  for (const [code, item] of resolutionQueue) {
+    if (mediaRequests >= 3) break;
+    if (!activeMedia.has(code)) readItemMedia(item);
   }
 }
 
 function createCover(item) {
   const cover = element("div", "cover", "", "card");
   cover.append(element("span", "ph", "", "card"));
-  if (hasMediaUrl(item.coverUrl)) {
+  const sources = coverSources(item);
+  if (sources.length) {
     const preview = button("", () => showCover(item), "cover-btn", "card");
     preview.setAttribute("aria-label", `查看 ${item.code} 的完整封面`);
-    appendImage(preview, item.coverUrl, `${item.code} 封面`, true);
+    appendImage(preview, sources, `${item.code} 封面`, true);
     cover.append(preview);
   }
   const code = button(item.code, () => copyText(item.code, $("feedback"), code), "code", "card");
@@ -537,8 +621,7 @@ function cardView(item) {
 
 function actorRow(actor, label, count) {
   const row = button("", () => setActor(actor), "actor", "side");
-  row.classList.toggle("on", state.actor === actor);
-  row.setAttribute("aria-pressed", String(state.actor === actor));
+  setActorRowSelected(row, state.actor === actor);
   const marker = element("span", actor ? "avatar" : "all-mark", "", actor ? "avatar" : "side");
   if (actor) {
     marker.setAttribute(`data-v-${scope.side}`, "");
@@ -551,21 +634,59 @@ function actorRow(actor, label, count) {
   return row;
 }
 
+function setActorRowSelected(row, selected) {
+  row.classList.toggle("on", selected);
+  row.setAttribute("aria-pressed", String(selected));
+}
+
+function appendActors() {
+  const { matching, rows, shown } = actorView;
+  const next = matching.slice(shown, shown + ACTOR_BATCH_SIZE);
+  const fragment = document.createDocumentFragment();
+  for (const [actor, count] of next) {
+    const row = actorRow(actor, actor, count);
+    rows.set(actor, row);
+    fragment.append(row);
+  }
+  actorSentinel.before(fragment);
+  actorView.shown += next.length;
+  actorObserver.unobserve(actorSentinel);
+  if (actorView.shown < matching.length) actorObserver.observe(actorSentinel);
+}
+
 function renderActors() {
   const nav = $("actors");
-  const top = nav.scrollTop;
   const query = normalize($("actorSearch").value);
-  const matching = state.actors.filter(([actor]) => !query || normalize(actor).includes(query));
-  const rows = matching.map(([actor, count]) => actorRow(actor, actor, count));
-  if (!query && state.actor && !state.actors.some(([actor]) => actor === state.actor)) {
-    rows.unshift(actorRow(state.actor, state.actor, 0));
+  const extraActor = !query && state.actor && !state.actors.some(([actor]) => actor === state.actor) ? state.actor : "";
+  if (actorView?.facets !== state.actors || actorView.query !== query || actorView.extraActor !== extraActor
+    || actorView.itemCount !== state.actorItemCount || actorView.avatars !== state.avatars) {
+    const top = actorView ? nav.scrollTop : 0;
+    const keepTop = actorView?.query === query;
+    const matching = query ? state.actors.filter(([actor]) => normalize(actor).includes(query)) : state.actors;
+    avatarImages.disconnect();
+    const all = actorRow("", "全部", state.actorItemCount);
+    const rows = new Map([["", all]]);
+    const fragment = document.createDocumentFragment();
+    fragment.append(all);
+    if (extraActor) {
+      const row = actorRow(extraActor, extraActor, 0);
+      rows.set(extraActor, row);
+      fragment.append(row);
+    }
+    fragment.append(actorSentinel);
+    nav.replaceChildren(fragment);
+    actorView = { facets: state.actors, avatars: state.avatars, itemCount: state.actorItemCount,
+      query, extraActor, selected: state.actor, matching, rows, shown: 0 };
+    appendActors();
+    if (top) nav.scrollTop = keepTop ? top : 0;
+    $("actorCount").textContent = `${matching.length} 人`;
+  } else if (actorView.selected !== state.actor) {
+    const previous = actorView.rows.get(actorView.selected);
+    const selected = actorView.rows.get(state.actor);
+    if (previous) setActorRowSelected(previous, false);
+    if (selected) setActorRowSelected(selected, true);
+    actorView.selected = state.actor;
   }
-  $("actorCount").textContent = `${matching.length} 人`;
-  nav.replaceChildren(
-    actorRow("", "全部", state.actorItemCount),
-    ...rows
-  );
-  nav.scrollTop = top;
   $("actorChip").hidden = !state.actor;
   $("actorChip").textContent = state.actor ? `${state.actor} ×` : "";
 }
@@ -576,8 +697,10 @@ function updateActorFacets(items) {
     for (const actor of new Set(actors)) counts.set(actor, (counts.get(actor) || 0) + 1);
   }
   state.actorItemCount = items.length;
-  state.actors = [...counts].sort(([left, leftCount], [right, rightCount]) =>
-    rightCount - leftCount || collator.compare(left, right));
+  if (counts.size !== state.actors.length || state.actors.some(([actor, count]) => counts.get(actor) !== count)) {
+    state.actors = [...counts].sort(([left, leftCount], [right, rightCount]) =>
+      rightCount - leftCount || collator.compare(left, right));
+  }
   renderActors();
 }
 
@@ -604,9 +727,8 @@ function renderSort() {
   }));
 }
 
-function renderStatus(items) {
-  const pending = items.filter(isPending).length;
-  const labels = [["all", "全部", items.length], ["confirmed", "已确认", items.length - pending], ["pending", "待确认", pending]];
+function renderStatus(total, pending) {
+  const labels = [["all", "全部", total], ["confirmed", "已确认", total - pending], ["pending", "待确认", pending]];
   $("status").replaceChildren(...labels.map(([status, label, count]) => {
     const node = button(label, () => { state.status = status; updateFilters(); }, `seg ${status}`, "main");
     node.classList.toggle("on", status === state.status);
@@ -616,16 +738,56 @@ function renderStatus(items) {
   }));
 }
 
-function appendResults() {
-  const next = state.results.slice(state.shown, state.shown + BATCH_SIZE);
-  $("grid").append(...next.map(cardView));
+function appendResults(count = BATCH_SIZE) {
+  const next = state.results.slice(state.shown, state.shown + count);
+  if (next.length) $("grid").append(...next.map(cardView));
   state.shown += next.length;
-  $("loadMore").hidden = state.shown >= state.results.length;
+  updateResultPagination();
 }
 
-function renderLocalVolume(results, filter) {
+function updateResultPagination() {
+  const hasMore = state.shown < state.results.length;
+  $("loadMore").hidden = !hasMore;
+  const sentinel = $("sentinel");
+  pagination.unobserve(sentinel);
+  if (hasMore) pagination.observe(sentinel);
+}
+
+function reconcileResultCards(previousResults, count) {
+  const previous = previousResults.slice(0, state.shown);
+  if (previous.every((item, index) => item === state.results[index])) {
+    appendResults(count - state.shown);
+    return;
+  }
+
+  const grid = $("grid");
+  const next = state.results.slice(0, count);
+  const retained = new Set(next);
+  const cards = new Map(previous.map((item, index) => [item, grid.children[index]]));
+  for (const [item, card] of cards) {
+    if (retained.has(item)) continue;
+    const image = card.querySelector(".cover img");
+    if (image) coverImages.unobserve(image);
+    const media = card.querySelector(".fanhao-local-media");
+    if (media) {
+      visibleMedia.delete(media);
+      mediaObserver.unobserve(media);
+    }
+    card.remove();
+  }
+  let cursor = grid.firstElementChild;
+  for (const item of next) {
+    const card = cards.get(item);
+    if (card === cursor && card) cursor = card.nextElementSibling;
+    else grid.insertBefore(card ?? cardView(item), cursor);
+  }
+  state.shown = next.length;
+  updateResultPagination();
+}
+
+function renderLocalVolume(results, filter, splitUnmarked) {
   const volume = $("localVolume");
-  volume.hidden = !["marked", "ltx-local", "unmarked"].includes(filter);
+  volume.hidden = !splitUnmarked && !["marked", "ltx-local", "unmarked"].includes(filter);
   if (volume.hidden) return;
   let count = 0, size = 0;
   for (const { local } of results) {
@@ -638,30 +800,50 @@ function renderLocalVolume(results, filter) {
   volume.textContent = `本地体积 ${size ? formatSize(size) : "0 B"} · ${count} 份`;
 }
 
-function renderResults(resetScroll = false) {
+function renderResults(resetScroll = false, reuseCards = false) {
+  const scrollToTop = resetScroll && window.scrollY > 0;
+  if (recentPreview) {
+    if ($("reload").disabled) $("feedback").textContent = "正在读取完整目录…";
+    if (scrollToTop) window.scrollTo({ top: 0 });
+    return;
+  }
+  clearTimeout(resolutionRenderTimer);
+  resolutionRenderTimer = undefined;
+  resolutionQueue.clear();
   const query = normalize($("search").value);
   const codeQuery = normalizeCode(query);
   const filter = $("filter").value;
+  const splitUnmarked = filter === "unmarked-4k" || filter === "unmarked-non4k";
   const subtitle = $("subtitleFilter").value;
   let items = state.items;
   if (filter === "ltx-local") {
-    const keys = new Set(items.filter(({ local }) => local.ltxLocal > 0).map(({ searchCode }) => searchCode));
-    items = [...items, ...state.localItems.filter(({ searchCode }) => !keys.has(searchCode))];
+    const keys = new Set(items.filter(({ local }) => local.ltxLocal > 0).map(({ code }) => normalizeCode(code)));
+    items = [...items, ...state.localItems.filter(({ code }) => !keys.has(normalizeCode(code)))];
   }
   const matching = items.filter((item) => {
-    if (query && !item.searchText.includes(query) && (!codeQuery || !item.searchCode.includes(codeQuery))) return false;
+    if (query && !matchesSearch(item, query, codeQuery)) return false;
     if (subtitle === "available" && !item.subtitleUrl && !hasSubtitledLtx(item)) return false;
     if (subtitle === "ltx-c" && !hasSubtitledLtx(item)) return false;
     if (filter === "present") return hasLocal(item);
     if (filter === "marked") return item.local.marked > 0;
     if (filter === "ltx-local") return item.local.ltxLocal > 0;
-    if (filter === "unmarked") return hasLocal(item) && !item.local.marked;
+    if (filter === "unmarked" || splitUnmarked) {
+      if (!hasLocal(item) || item.local.marked) return false;
+      if (!splitUnmarked) return true;
+      if (!mediaCache.has(item.code)) {
+        resolutionQueue.set(item.code, item);
+        return false;
+      }
+      const has4k = mediaCache.get(item.code)?.some(({ width, height }) =>
+        width > 0 && height > 0 && (Math.max(width, height) >= 3840 || Math.min(width, height) >= 2160)) ?? false;
+      return has4k === (filter === "unmarked-4k");
+    }
     if (filter === "remote-larger") return Boolean(findBatchLink(item, "larger", largestLocalSize(item), linksForSubtitleFilter(item, subtitle)));
     if (filter === "missing") return !hasLocal(item);
     return true;
   });
   const eligible = state.actor ? matching.filter(({ actors }) => actors.includes(state.actor)) : matching;
-  renderStatus(eligible);
+  renderStatus(eligible.length, eligible.filter(isPending).length);
   const matchesStatus = (item) => state.status === "all" || (state.status === "pending") === isPending(item);
   updateActorFacets(matching.filter(matchesStatus));
   const results = eligible.filter(matchesStatus);
@@ -671,18 +853,28 @@ function renderResults(resetScroll = false) {
     const primary = typeof left === "number" ? left - right : collator.compare(left, right);
     return state.direction * primary || collator.compare(a.code, b.code);
   });
+  const previousResults = state.results;
   state.results = results;
-  renderLocalVolume(results, filter);
-  state.shown = 0;
-  $("results").textContent = `${results.length} 部 · 本地 ${results.filter(hasLocal).length} · LTX ${results.filter(({ local }) => local.marked).length}`;
+  renderLocalVolume(results, filter, splitUnmarked);
+  const count = reuseCards ? Math.max(BATCH_SIZE, state.shown) : BATCH_SIZE;
+  const resolutionNote = resolutionQueue.size ? ` · 正在读取 ${resolutionQueue.size} 部的分辨率…` : "";
+  $("results").textContent = `${results.length} 部 · 本地 ${results.filter(hasLocal).length} · LTX ${results.filter(({ local }) => local.marked).length}${resolutionNote}`;
   $("batchLinks").disabled = !results.some(({ links }) => links.length);
   $("batchCount").textContent = String(results.length);
-  mediaObserver.disconnect();
-  visibleMedia.clear();
-  $("grid").replaceChildren();
-  $("empty").hidden = results.length !== 0;
-  appendResults();
-  if (resetScroll) window.scrollTo({ top: 0 });
+  $("empty").hidden = results.length !== 0 || resolutionQueue.size !== 0;
+  if (reuseCards) {
+    reconcileResultCards(previousResults, count);
+  } else {
+    state.shown = 0;
+    mediaObserver.disconnect();
+    coverImages.disconnect();
+    visibleMedia.clear();
+    $("grid").replaceChildren();
+    appendResults(count);
+  }
+  loadVisibleMedia();
+  if ($("batchDialog").open && batchReady) renderBatch();
+  if (scrollToTop) window.scrollTo({ top: 0 });
 }
 
 function toggleActors(open) {
@@ -695,46 +887,93 @@ function toggleActors(open) {
   if (open) $("actorSearch").focus();
 }
 
-async function load({ refresh = false, sync = false } = {}) {
+function applyCatalogMetadata(payload) {
+  state.libraryChecked = payload.libraryChecked;
+  state.downloadsChecked = payload.downloadsChecked;
+  const avatars = payload.avatars || {};
+  const sameAvatars = recentPreview && Object.keys(avatars).length === Object.keys(state.avatars).length
+    && Object.entries(avatars).every(([actor, url]) => state.avatars[actor] === url);
+  if (!sameAvatars) state.avatars = avatars;
+  const date = new Date(payload.fetchedAt);
+  const snapshot = $("snapshot");
+  snapshot.textContent = Number.isFinite(date.valueOf()) ? `本地快照 · ${dateFormatter.format(date)}` : "本地快照";
+  $("reload").title = snapshot.textContent;
+}
+
+function showRecentPreview(payload) {
+  applyCatalogMetadata(payload);
+  const { total, local, marked, pending } = payload.counts;
+  state.actors = payload.actors;
+  state.actorItemCount = total;
+  state.results = payload.items.map(prepareItem);
+  recentPreview = { items: new Map(state.results.map((item) => [item.code, item])), display: JSON.stringify(display) };
+  renderStatus(total, pending);
+  renderActors();
+  $("results").textContent = `${total} 部 · 本地 ${local} · LTX ${marked}`;
+  $("batchCount").textContent = String(total);
+  $("empty").hidden = total !== 0;
+  appendResults();
+}
+
+async function readCatalogResponse(url) {
+  const response = await fetch(url);
+  return { ok: response.ok, payload: await response.json() };
+}
+
+async function load({ refresh = false, catalogJson, initialUrl = "/api/fanhao/ltx" } = {}) {
   const reload = $("reload");
   const syncButton = $("syncCatalog");
   const feedback = $("feedback");
   if (reload.disabled) return false;
+  const sync = catalogJson !== undefined;
   reload.disabled = syncButton.disabled = true;
-  syncButton.textContent = sync ? "更新中…" : "更新目录";
-  feedback.textContent = sync ? "正在从 Jasna-LTX 同步目录…" : "";
+  syncButton.textContent = sync ? "导入中…" : "更新目录";
+  feedback.textContent = sync ? "正在校验并导入目录…" : "";
   let synced = false;
   try {
     if (sync) {
-      const result = await fetch("/api/fanhao/ltx/sync", { method: "POST" });
+      const result = await fetch("/api/fanhao/ltx/sync", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: catalogJson
+      });
       if (!result.ok) {
         const payload = await result.json().catch(() => ({}));
         throw new Error(payload.error || "同步请求失败，请重试。");
       }
       synced = true;
       feedback.textContent = "目录已同步，正在读取本地状态…";
+      $("catalogImportJson").value = "";
+      $("catalogImport").close();
     }
-    const response = await fetch(refresh ? "/api/fanhao/ltx?refresh=1" : "/api/fanhao/ltx");
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "读取本地 LTX 目录失败。");
-    state.libraryChecked = payload.libraryChecked;
-    state.downloadsChecked = payload.downloadsChecked;
-    state.avatars = payload.avatars || {};
-    state.items = payload.items.map(searchableItem);
-    localCatalogRequest = null;
+    let { ok, payload } = await readCatalogResponse(refresh ? "/api/fanhao/ltx?refresh=1" : initialUrl);
+    if (ok && payload.preview === "recent") {
+      if (getFilterParams().toString() === "sort=recent") showRecentPreview(payload);
+      ({ ok, payload } = await readCatalogResponse("/api/fanhao/ltx"));
+    }
+    if (!ok) throw new Error(payload.error || "读取本地 LTX 目录失败。");
+    const reuseCards = Boolean(recentPreview && recentPreview.display === JSON.stringify(display)
+      && state.libraryChecked === payload.libraryChecked && state.downloadsChecked === payload.downloadsChecked);
+    const previewItems = reuseCards ? recentPreview.items : null;
+    applyCatalogMetadata(payload);
+    state.items = payload.items.map((item) => {
+      const prepared = prepareItem(item);
+      const previous = previewItems?.get(item.code);
+      return previous && JSON.stringify(previous) === JSON.stringify(prepared) ? previous : prepared;
+    });
+    const hadPreview = Boolean(recentPreview);
+    recentPreview = null;
+    if (!hadPreview || refresh || sync) localCatalogRequest = null;
     if ($("filter").value === "ltx-local") loadLocalCatalog();
-    const date = new Date(payload.fetchedAt);
-    $("snapshot").textContent = Number.isFinite(date.valueOf()) ? `本地快照 · ${dateFormatter.format(date)}` : "本地快照";
-    reload.title = $("snapshot").textContent;
     mediaCache = new Map();
-    renderResults();
+    activeMedia = new Map();
+    renderResults(false, reuseCards && !refresh && !sync);
     const note = !state.libraryChecked || !state.downloadsChecked ? "部分本地目录或索引暂不可读，结果可能不完整。" : "";
     feedback.textContent = synced ? `目录已更新，共 ${state.items.length} 部。${note}` : note;
     return true;
   } catch (error) {
+    if (sync && !synced) $("catalogImportStatus").textContent = error.message;
     feedback.textContent = synced ? "目录已同步，页面读取失败，请重读本地状态。"
       : sync ? `更新失败：${error.message}` : error.message;
-    if (!state.items.length) $("snapshot").textContent = "本地快照暂不可用";
+    if (!state.items.length && !recentPreview) $("snapshot").textContent = "本地快照暂不可用";
     return false;
   } finally {
     syncButton.textContent = "更新目录";
@@ -807,6 +1046,9 @@ $("closeActors").addEventListener("click", () => { toggleActors(false); $("openA
 $("actorScrim").addEventListener("click", () => toggleActors(false));
 $("actorChip").addEventListener("click", () => setActor(""));
 $("actorSearch").addEventListener("input", renderActors);
+$("actors").addEventListener("focusin", (event) => {
+  if (event.target === actorSentinel.previousElementSibling && actorView.shown < actorView.matching.length) appendActors();
+});
 $("search").addEventListener("input", (event) => {
   if (!event.isComposing) updateFilters("replace");
 });
@@ -826,9 +1068,132 @@ for (const control of $("displayDialog").querySelectorAll("[data-display]")) {
     renderResults();
   });
 }
-$("loadMore").addEventListener("click", appendResults);
+$("loadMore").addEventListener("click", () => appendResults());
 $("reload").addEventListener("click", () => load({ refresh: true }));
-$("syncCatalog").addEventListener("click", () => load({ sync: true }));
+$("syncCatalog").addEventListener("click", () => {
+  $("catalogImportStatus").textContent = "";
+  $("catalogImport").showModal();
+});
+const LTX_CATALOG_ORIGIN = "https://ltxlib.dpdns.org";
+const MAX_CATALOG_IMPORT_BYTES = 32 * 1024 * 1024;
+let catalogPopup;
+function closeCatalogPopup() {
+  if (!catalogPopup) return;
+  clearInterval(catalogPopup.timer);
+  catalogPopup.window.close();
+  catalogPopup = null;
+  $("openCatalogSync").disabled = false;
+}
+
+$("openCatalogSync").addEventListener("click", () => {
+  const status = $("catalogImportStatus");
+  if (!["http://127.0.0.1:29998", "http://localhost:29998"].includes(location.origin)) {
+    status.textContent = "请在服务电脑的 29998 端口打开 FanHao 再同步。";
+    return;
+  }
+  if (catalogPopup) return;
+  const id = crypto.randomUUID();
+  const url = new URL(LTX_CATALOG_ORIGIN);
+  url.hash = new URLSearchParams({ fanhaoCatalog: id, fanhaoOrigin: location.origin });
+  const popup = window.open(url, "_blank", "popup,width=980,height=720");
+  if (!popup) {
+    status.textContent = "浏览器拦截了小窗，请允许弹出窗口后重试。";
+    return;
+  }
+  $("openCatalogSync").disabled = true;
+  status.textContent = "请在小窗完成官网验证。";
+  const openedAt = Date.now();
+  catalogPopup = { id, window: popup, timer: setInterval(() => {
+    const elapsed = Date.now() - openedAt;
+    if (!popup.closed && elapsed < 5 * 60_000) {
+      if (!catalogPopup.connected && elapsed > 10_000) {
+        status.textContent = "还没连接到官网。请安装或更新同步脚本，再重新打开小窗。";
+      } else if (catalogPopup.connected && elapsed > 15_000) {
+        status.textContent = "已连接官网小窗，但尚未收到完整目录。如果官网已显示作品列表，当前同步仍无法导入新站目录。本地快照可继续使用。";
+      }
+      return;
+    }
+    status.textContent = popup.closed ? "官网小窗已关闭，可以重新打开。" : "没有收到可导入的官网目录，已保留本地快照。";
+    closeCatalogPopup();
+  }, 500) };
+});
+$("catalogImport").addEventListener("close", closeCatalogPopup);
+window.addEventListener("pagehide", closeCatalogPopup);
+window.addEventListener("message", async (event) => {
+  const attempt = catalogPopup;
+  if (!attempt || event.origin !== LTX_CATALOG_ORIGIN || event.source !== attempt.window
+    || event.data?.id !== attempt.id || attempt.importing) return;
+  if (event.data.type === "fanhao:ltx:ready") {
+    attempt.connected = true;
+    $("catalogImportStatus").textContent = "已连接官网小窗，正在等待可导入的完整目录。";
+    return;
+  }
+  if (event.data.type !== "fanhao:ltx:catalog" || typeof event.data.json !== "string") return;
+  attempt.importing = true;
+  clearInterval(attempt.timer);
+  $("catalogImportStatus").textContent = "已收到目录，正在导入…";
+  await load({ catalogJson: event.data.json });
+  if (catalogPopup === attempt) closeCatalogPopup();
+});
+async function importManualCatalog(text) {
+  if (!text || $("reload").disabled) return;
+  closeCatalogPopup();
+  $("catalogImportSubmit").disabled = true;
+  $("catalogImportStatus").textContent = "正在导入…";
+  try { await load({ catalogJson: text }); }
+  finally { $("catalogImportSubmit").disabled = false; }
+}
+
+$("catalogImportClipboard").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  const dialog = $("catalogImport");
+  const status = $("catalogImportStatus");
+  if ($("reload").disabled) return;
+  button.disabled = true;
+  try {
+    let text;
+    try { text = (await navigator.clipboard.readText()).trim(); }
+    catch {
+      if (!dialog.open) return;
+      $("catalogImportManual").open = true;
+      $("catalogImportJson").focus();
+      status.textContent = "浏览器未允许读取剪贴板，请在文本框中粘贴目录 JSON。";
+      return;
+    }
+    if (!dialog.open) return;
+    if (new Blob([text]).size > MAX_CATALOG_IMPORT_BYTES) {
+      status.textContent = "剪贴板内容超过 32 MiB。";
+      return;
+    }
+    let catalog;
+    try { catalog = JSON.parse(text); } catch { /* Report invalid clipboard input below. */ }
+    const items = (catalog?.data ?? catalog)?.items;
+    if (!Array.isArray(items) || !items.length || !items.some((item) => Array.isArray(item?.links) && item.links.length)) {
+      status.textContent = "剪贴板里没有可导入的目录 JSON。请复制完整目录后重试。";
+      return;
+    }
+    await importManualCatalog(text);
+  } finally { button.disabled = false; }
+});
+$("catalogImportChoose").addEventListener("click", () => $("catalogImportFile").click());
+$("catalogImportFile").addEventListener("change", async (event) => {
+  const input = event.target;
+  const [file] = input.files;
+  input.value = "";
+  if (!file) return;
+  if (file.size > MAX_CATALOG_IMPORT_BYTES) {
+    $("catalogImportStatus").textContent = "目录文件超过 32 MiB。";
+    return;
+  }
+  try {
+    $("catalogImportJson").value = await file.text();
+    $("catalogImportStatus").textContent = `已选 ${file.name}，点「导入目录」继续。`;
+  } catch { $("catalogImportStatus").textContent = "读取 JSON 文件失败。"; }
+});
+$("catalogImportForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await importManualCatalog($("catalogImportJson").value.trim());
+});
 $("batchLinks").addEventListener("click", openBatchLinks);
 $("batchMode").addEventListener("change", () => {
   $("batchStatus").textContent = "";
@@ -855,6 +1220,5 @@ smallScreen.addEventListener("change", () => { toggleActors(false); sizeMobileHe
 const pagination = new IntersectionObserver((entries) => {
   if (entries.some(({ isIntersecting }) => isIntersecting) && state.shown < state.results.length) appendResults();
 }, { rootMargin: "500px" });
-pagination.observe($("sentinel"));
 renderSort();
-void load();
+void load({ initialUrl: $("catalogPreload")?.getAttribute("href") });

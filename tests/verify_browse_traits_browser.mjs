@@ -171,6 +171,11 @@ try {
 
   await page.goto(`${address}/fanhao?personId=trait-person`);
   await advancedSearch.waitFor();
+  const toolbarControls = await page.locator(".work-browse-controls").evaluate(toolbar =>
+    ['[data-work-filter="all"]', ".browse-advanced-toggle", ".person-work-sort", ".browse-select-works"]
+      .map(selector => toolbar.querySelector(selector).getBoundingClientRect().toJSON()));
+  assert(toolbarControls.every(({ y, height }) => Math.abs(y - toolbarControls[0].y) < 1
+    && Math.abs(height - toolbarControls[0].height) < 1), "desktop person filters, sort and multi-select align");
   assert.equal(await advancedSearch.getAttribute("aria-expanded"), "false");
   assert.equal(await page.locator(".browse-traits").isVisible(), false, "advanced person filters start collapsed");
   assert.equal(await page.locator(".browse-result-summary, .browse-traits-note").count(), 0, "person pages omit duplicate result totals");
@@ -258,11 +263,21 @@ try {
   const personSearchStatus = personSearch.getByRole("status").filter({ hasText: "1 部匹配" });
   const personMatch = page.locator('.work-card[data-work-id="trait-95"]');
   await page.locator('.work-card[data-work-id="trait-0"]').waitFor();
+  await personQuery.waitFor();
+  assert.equal(await page.locator("#personProfile > .person-work-search-form").count(), 1);
+  assert.equal(await personSearch.locator('button[type="submit"]').count(), 0);
+  const [searchBoxRect, profileRect, profileTitleRect] = await Promise.all([
+    personSearch.boundingBox(), page.locator("#personProfile").boundingBox(),
+    page.locator("#personProfile .person-profile-name-row").boundingBox()
+  ]);
+  assert(Math.abs(searchBoxRect.x + searchBoxRect.width - profileRect.x - profileRect.width) < 1);
+  assert(Math.abs(searchBoxRect.y - profileTitleRect.y) < 1);
   assert.equal(await personMatch.count(), 0, "the target starts beyond the first person page");
   const personSearchStart = requests.length;
-  await personQuery.fill("ZZZ-195");
   await personQuery.dispatchEvent("compositionstart");
+  await personQuery.fill("ZZZ-195");
   await personQuery.press("Enter");
+  await page.waitForTimeout(350);
   assert.equal(requests.length, personSearchStart, "an IME composition is never submitted as a search");
   await personQuery.dispatchEvent("compositionend");
   failPersonSearch = true;
@@ -294,8 +309,8 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), "person search fits a phone-width page");
   await personQuery.fill("missing fixture title");
-  await personSearch.getByRole("button", { name: "查找", exact: true }).click();
   await page.getByText("当前人物没有符合条件的作品。").waitFor();
+  assert(await personQuery.evaluate(input => input === document.activeElement), "search results keep the input focused");
   await personSearch.getByRole("button", { name: "清除搜索", exact: true }).click();
   await page.locator('.work-card[data-work-id="trait-0"]').waitFor();
   assert.equal(await personQuery.inputValue(), "");

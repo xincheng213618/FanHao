@@ -1,4 +1,5 @@
 import { openPersonOrganizationDialog } from "./person-organization.js";
+import { canManageWebLibrary } from "../../platform/accounts/session-context.js";
 
 export function normalizeActorMappingInput(value) {
   return String(value || "").split(/\r?\n/u)
@@ -135,7 +136,10 @@ function renderPersonProfile(person) {
 
   els.personProfile.hidden = false;
   els.personProfile.classList.remove("ranking-profile-panel");
-  els.personProfile.innerHTML = "";
+  const search = els.personProfile.querySelector(":scope > .person-work-search-form");
+  for (const child of [...els.personProfile.children]) {
+    if (child !== search) child.remove();
+  }
 
   const avatar = document.createElement("div");
   avatar.className = "person-avatar";
@@ -196,7 +200,7 @@ function renderPersonProfile(person) {
   copy.append(createProfileSummary(person, profile));
   const actions = createPersonProfileActions(person);
   if (actions) copy.append(actions);
-  els.personProfile.append(avatar, copy);
+  els.personProfile.prepend(avatar, copy);
 }
 
 async function saveActorProfileMapping(person, options) {
@@ -1140,7 +1144,7 @@ async function refreshPersonLocal(person, button) {
 }
 
 function canOfferEmptyPersonCleanup(person) {
-  return state.accessMode === "local"
+  return canManageWebLibrary(state.accessMode === "local")
     && !person?.detailPending
     && Number(person?.workCount || 0) === 0
     && Number(person?.videoCount || 0) === 0
@@ -1187,7 +1191,7 @@ async function cleanupEmptyPerson(person, button) {
 }
 
 function createPersonProfileActions(person) {
-  const canOpenLocalFolders = state.accessMode === "local";
+  const canOpenLocalFolders = canManageWebLibrary(state.accessMode === "local");
   const canRefreshLocal = canOpenLocalFolders && Boolean(person?.id);
   const paths = uniqueSourcePaths(person);
   if (!canOpenLocalFolders && !canRefreshLocal) return null;
@@ -1195,7 +1199,7 @@ function createPersonProfileActions(person) {
   const actions = document.createElement("div");
   actions.className = "person-profile-actions";
 
-  if (state.accessMode === "local") {
+  if (canOpenLocalFolders) {
     const edit = document.createElement("button");
     edit.type = "button";
     edit.className = "folder-button";

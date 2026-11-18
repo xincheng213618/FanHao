@@ -1,11 +1,11 @@
-import { createShortVideoApi } from "./api.js?v=assets-06c1d7f13464";
-import { createShortVideoListController } from "./list/controller.js?v=assets-06c1d7f13464";
-import { createShortVideoListView } from "./list/view.js?v=assets-06c1d7f13464";
-import { createShortVideoNativeFeed } from "./player/native-feed.js?v=assets-06c1d7f13464";
-import { createShortVideoSearch } from "./search.js?v=assets-06c1d7f13464";
-import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=assets-06c1d7f13464";
-import { createShortVideoIcons } from "./ui/icons.js?v=assets-06c1d7f13464";
-import { createShortVideoInteractions } from "./ui/interactions.js?v=assets-06c1d7f13464";
+import { createShortVideoApi } from "./api.js?v=assets-78764ed05056";
+import { createShortVideoListController } from "./list/controller.js?v=assets-78764ed05056";
+import { createShortVideoListView } from "./list/view.js?v=assets-78764ed05056";
+import { createShortVideoNativeFeed } from "./player/native-feed.js?v=assets-78764ed05056";
+import { createShortVideoSearch } from "./search.js?v=assets-78764ed05056";
+import { DEFAULT_SORT, DEFAULT_SOURCE } from "./shared.js?v=assets-78764ed05056";
+import { createShortVideoIcons } from "./ui/icons.js?v=assets-78764ed05056";
+import { createShortVideoInteractions } from "./ui/interactions.js?v=assets-78764ed05056";
 
 export function createShortVideoViews(deps) {
   const { els, getActiveUrl, setActiveBottom } = deps;

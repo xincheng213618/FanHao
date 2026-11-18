@@ -194,54 +194,80 @@ assert(!pageSource.includes('href="/shutdown"'), "the control page must not rest
 const serverSource = fs.readFileSync(path.join(root, "server.js"), "utf8");
 const authFixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "fanhao-control-auth-"));
 const authSecretPath = path.join(authFixtureDir, "synthetic-secret.json");
+const accountsDbPath = path.join(authFixtureDir, "accounts.sqlite");
+const auth = createAuthServices({ remoteWebPassword: "", authSecretPath, accountsDbPath, ensureDataDir() {} });
 process.once("exit", () => {
-  if (fs.existsSync(authSecretPath)) fs.unlinkSync(authSecretPath);
+  auth.closeAccounts();
+  for (const file of [authSecretPath, accountsDbPath, `${accountsDbPath}-wal`, `${accountsDbPath}-shm`]) {
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  }
   fs.rmdirSync(authFixtureDir);
 });
-const auth = createAuthServices({ remoteWebPassword: "", authSecretPath, ensureDataDir() {} });
 let securedResponse, securedReads = 0, securedDispatches = 0;
 const sendJson = (_res, status, payload) => { securedResponse = { status, payload }; };
 const gateContext = vm.createContext({ sendJson,
   requestAuthState: (req, url) => ({ ...auth.requestAuthState(req, url), ...(req.fixtureUser ? { user: req.fixtureUser } : {}) }),
   requestAccess: auth.requestAccess, isTrustedNetworkAccess: auth.isTrustedNetworkAccess, isSameTrustedNetworkOrigin: auth.isSameTrustedNetworkOrigin, URL });
-for (const name of ["requireTrustedNetworkPage", "requireLocalAdmin"]) {
+for (const name of ["requireTrustedNetworkPage", "requireLocalAdmin", "canUseLanGuestSleep"]) {
   const method = serverSource.match(new RegExp(`^function ${name}\\([^]*?^\\}`, "m"));
   assert(method, `Missing production ${name}`); vm.runInContext(method[0], gateContext);
 }
 const securedDeps = {
+  canUseLanGuestSleep: gateContext.canUseLanGuestSleep,
   requireLocalAdmin: gateContext.requireLocalAdmin, sendJson,
-  readJsonBody: async () => { securedReads++; return { action: "sleep" }; }
+  readJsonBody: async req => { securedReads++; return { action: req.fixtureAction || "sleep" }; }
 };
 const securedRuntime = createComputerControlRuntime({ ...securedDeps, service: {
-  actionDescriptors: () => [], status: () => ({ ok: true, actions: [{ id: "sleep" }] }),
-  dispatch: () => { securedDispatches++; return { ok: true }; }
+  actionDescriptors: service.actionDescriptors, status: service.status,
+  dispatch: (action) => { assert.equal(action, "sleep"); securedDispatches++; return { ok: true }; }
 } });
 const androidHeaders = { origin: "http://localhost", "x-fanhao-client": "android" };
 const cases = [
-  { name: "direct LAN Android", peer: "192.168.1.50", host: "192.168.1.20:29998", allowed: true },
-  { name: "loopback", peer: "::ffff:127.0.0.1", host: "localhost:29998", allowed: true },
-  { name: "LAN IPv6", peer: "fd00::2", host: "[fd00::1]:29998", allowed: true },
+  { name: "LAN Android guest", peer: "192.168.1.50", host: "192.168.1.20:29998", guestSleep: true },
+  { name: "LAN IPv6 Android guest", peer: "fd00::2", host: "[fd00::1]:29998", guestSleep: true },
+  { name: "LAN Android guest behind proxy", peer: "192.168.1.50", host: "192.168.1.20:29998", extra: { via: "reverse-proxy" }, allowed: false },
+  { name: "LAN Android guest without origin", peer: "192.168.1.50", host: "192.168.1.20:29998", extra: { origin: undefined }, allowed: false },
+  { name: "LAN Android guest from unrelated origin", peer: "192.168.1.50", host: "192.168.1.20:29998", extra: { origin: "https://foreign.example" }, allowed: false },
+  { name: "LAN Android admin", peer: "192.168.1.50", host: "192.168.1.20:29998", user: { role: "admin" }, allowed: true },
+  { name: "loopback browser", peer: "::ffff:127.0.0.1", host: "localhost:29998", headers: { origin: "http://localhost:29998" }, allowed: true },
+  { name: "LAN IPv6 admin", peer: "fd00::2", host: "[fd00::1]:29998", user: { role: "admin" }, allowed: true },
   { name: "public peer", peer: "203.0.113.5", host: "public.example", allowed: false },
-  { name: "public peer spoofing LAN Host", peer: "203.0.113.5", host: "192.168.1.20:29998", allowed: false },
-  { name: "public Host through NAT loopback", peer: "192.168.1.1", host: "public.example", allowed: false },
-  { name: "public Host through local proxy", peer: "127.0.0.1", host: "public.example", allowed: false },
-  { name: "forwarded header cannot grant LAN", peer: "203.0.113.5", host: "192.168.1.20:29998", extra: { "x-forwarded-for": "192.168.1.50" }, allowed: false },
+  { name: "public peer spoofing LAN Host", peer: "203.0.113.5", host: "192.168.1.20:29998", user: { role: "admin" }, allowed: false },
+  { name: "public Host through NAT loopback", peer: "192.168.1.1", host: "public.example", user: { role: "admin" }, allowed: false },
+  { name: "public Host through local proxy", peer: "127.0.0.1", host: "public.example", user: { role: "admin" }, allowed: false },
+  { name: "forwarded header cannot grant LAN", peer: "203.0.113.5", host: "192.168.1.20:29998", user: { role: "admin" }, extra: { "x-forwarded-for": "192.168.1.50" }, allowed: false },
   { name: "public admin account", peer: "203.0.113.5", host: "public.example", user: { role: "admin" }, allowed: false },
   { name: "LAN ordinary account", peer: "192.168.1.50", host: "192.168.1.20:29998", user: { role: "user" }, allowed: false },
-  { name: "cross-origin LAN page", peer: "192.168.1.50", host: "192.168.1.20:29998", extra: { origin: "https://foreign.example" }, allowed: false }
+  { name: "cross-origin LAN page", peer: "192.168.1.50", host: "192.168.1.20:29998", user: { role: "admin" }, extra: { origin: "https://foreign.example" }, allowed: false }
 ];
 for (const testCase of cases) for (const entry of ["status", "control", "settings-action"]) {
   securedResponse = null; securedReads = 0; securedDispatches = 0;
   const req = { method: entry === "status" ? "GET" : "POST", socket: { remoteAddress: testCase.peer },
-    headers: { host: testCase.host, ...androidHeaders, ...testCase.extra }, fixtureUser: testCase.user };
+    headers: { host: testCase.host, ...(testCase.headers || androidHeaders), ...testCase.extra }, fixtureUser: testCase.user };
   if (entry === "settings-action") {
     await routeAdminApi(req, {}, new URL("http://fixture/api/admin/settings/system/actions/sleep"), { ...securedDeps,
       adminSettingsService: { async runModuleSettingsActionResponse() { securedDispatches++; return { statusCode: 202, payload: { ok: true } }; } } });
   } else await securedRuntime.routeApi(req, {}, new URL("http://fixture/api/system/control"));
-  assert.equal(securedResponse.status, testCase.allowed ? entry === "status" ? 200 : 202 : 403, `${testCase.name}: ${entry}`);
-  const expectedWrites = testCase.allowed && entry !== "status" ? 1 : 0;
+  const allowed = testCase.allowed || (testCase.guestSleep && entry !== "settings-action");
+  assert.equal(securedResponse.status, allowed ? entry === "status" ? 200 : 202 : 403, `${testCase.name}: ${entry}`);
+  if (allowed && entry === "status") {
+    assert(securedResponse.payload.actions.some(action => action.id === "sleep"));
+    if (testCase.guestSleep) assert.deepEqual(securedResponse.payload.actions.map(action => action.id), ["sleep"]);
+  }
+  const expectedWrites = allowed && entry !== "status" ? 1 : 0;
   assert.equal(securedReads, expectedWrites, `${testCase.name}: reject before reading a command`);
   assert.equal(securedDispatches, expectedWrites, `${testCase.name}: reject before queuing any OS action`);
+}
+for (const action of ["shutdown", "restart", "cancel", "mute", "lock"]) {
+  securedDispatches = 0;
+  await securedRuntime.routeApi({
+    method: "POST",
+    socket: { remoteAddress: "192.168.1.50" },
+    headers: { host: "192.168.1.20:29998", ...androidHeaders },
+    fixtureAction: action
+  }, {}, new URL("http://fixture/api/system/control"));
+  assert.equal(securedResponse.status, 403, `guest must be denied ${action}`);
+  assert.equal(securedDispatches, 0);
 }
 console.log(`System control verification passed: ${cases.length * 3} actual network/admin gate cases, dispatch/failure status and safe real console launch (power actions mocked; no real OS action executed).`);
 

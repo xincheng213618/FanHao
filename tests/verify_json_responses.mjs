@@ -4,9 +4,9 @@ import http from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import zlib, { brotliDecompressSync, gunzipSync } from "node:zlib";
+import zlib, { brotliCompressSync, brotliDecompressSync, gunzipSync } from "node:zlib";
 import { createRequestHandler } from "../src/platform/server/http-app.js";
-import { sendJson as actualSendJson, sendJsonParts, sendText } from "../src/platform/server/responses.js";
+import { createCachedJsonSender, sendJson as actualSendJson, sendJsonParts, sendText } from "../src/platform/server/responses.js";
 
 // A supplied sender permits an isolated negative control without changing the
 // production module. Every response still crosses an actual loopback socket.
@@ -15,6 +15,7 @@ export async function runJsonResponseFixture({ sendJson = actualSendJson } = {})
   const small = { text: "合成", ok: true };
   const textParts = ({ text, count }) => [Buffer.from('{"text":'), Buffer.from(JSON.stringify(text)), Buffer.from(`,"count":${count}}`)];
   const largeParts = textParts(large);
+  const sendCachedJson = createCachedJsonSender();
   const origin = "https://fixture.invalid";
   const logs = [], completed = [];
   let scenario;
@@ -30,7 +31,8 @@ export async function runJsonResponseFixture({ sendJson = actualSendJson } = {})
       current.response = res;
       if (current.vary !== undefined) res.setHeader("Vary", current.vary);
       current.onResponse?.(res);
-      if (current.parts) sendJsonParts(res, current.status ?? 201, current.parts);
+      if (current.cached) sendCachedJson(res, current.status ?? 201, current.payload);
+      else if (current.parts) sendJsonParts(res, current.status ?? 201, current.parts);
       else sendJson(res, current.status ?? 201, current.payload ?? large);
       return true;
     },
@@ -153,6 +155,39 @@ export async function runJsonResponseFixture({ sendJson = actualSendJson } = {})
     });
     await run("parts reject all excluded representations", async () => {
       check(await start({ accepted: "br;q=0, gzip;q=0, identity;q=0", parts: largeParts }).promise, { status: 406, empty: true });
+    });
+    await run("cached object shares one serialization and compression per encoding", async () => {
+      let serializations = 0;
+      const payload = { toJSON() { serializations++; return large; } };
+      await withCompressionGate("br", async gate => {
+        const closed = deferred(), secondEntered = deferred();
+        const first = start({ accepted: "br", cached: true, payload, onResponse: res => res.once("close", closed.resolve) });
+        await bounded(gate.entered, "initial cached compression entry");
+        const second = start({ accepted: "br", cached: true, payload, onResponse: secondEntered.resolve });
+        await bounded(secondEntered.promise, "second request joins compression");
+        first.request.destroy();
+        await bounded(closed.promise, "initiating cached request disconnects");
+        await assert.rejects(first.promise);
+        gate.finish(null, brotliCompressSync(Buffer.from(JSON.stringify(large))));
+        check(await second.promise, { encoding: "br" });
+        check(await start({ accepted: "br", cached: true, payload }).promise, { encoding: "br" });
+        check(await start({ accepted: "gzip", cached: true, payload }).promise, { encoding: "gzip" });
+        check(await start({ accepted: "identity", cached: true, payload }).promise);
+        check(await start({ accepted: "*;q=0", cached: true, payload }).promise, { status: 406, empty: true });
+      });
+      assert.equal(serializations, 1);
+      const next = { ...large, count: large.count + 1 };
+      check(await start({ accepted: "br", cached: true, payload: next }).promise, { payload: next, encoding: "br" });
+    });
+    await run("failed cached compression remains retryable", async () => {
+      const payload = { ...large };
+      await withCompressionGate("gzip", async gate => {
+        const pending = start({ accepted: "gzip, identity;q=0", cached: true, payload });
+        await bounded(gate.entered, "cached compression attempt");
+        gate.finish(new Error("controlled cached compression failure"));
+        check(await pending.promise, { status: 500, empty: true });
+      });
+      check(await start({ accepted: "gzip", cached: true, payload }).promise, { encoding: "gzip" });
     });
     for (const identityAllowed of [true, false]) await run(`parts compression failure / identity ${identityAllowed}`, async () => {
       await withCompressionGate("br", async gate => {

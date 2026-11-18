@@ -10,15 +10,5 @@ body.people-index-view .stats-row:has(> .person-shortcuts) > .stat { display: no
 .person-shortcut-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 .person-shortcut-row > span { min-width: 56px; color: var(--muted); font-size: 12px; }
 .person-shortcut-row .person-shortcut { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-.person-shortcuts-clear {
-  min-height: 30px;
-  padding: 3px 7px;
-  border: 0;
-  background: transparent;
-  color: var(--accent-strong);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
 .person-profile-name-row .person-pin-control { min-height: 30px; padding: 4px 8px; white-space: nowrap; }
 .person-pin-control[aria-pressed="true"] { color: var(--accent-strong); border-color: var(--accent); background: var(--panel-soft); }

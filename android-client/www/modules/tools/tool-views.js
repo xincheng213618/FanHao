@@ -36,9 +36,9 @@ export function createToolViews(context) {
     const summary = document.createElement("summary");
     summary.textContent = "本机工具与实验";
     const description = document.createElement("span");
-    description.textContent = "证卡扫描、人脸验证与小游戏";
+    description.textContent = "证卡扫描、人脸验证";
     summary.append(description);
-    group.append(summary, createVisionExplorationSection(), createGamesSection());
+    group.append(summary, createVisionExplorationSection());
     return group;
   }
 
@@ -46,9 +46,6 @@ export function createToolViews(context) {
     const section = document.createElement("section");
     section.className = "tools-native-section computer-control-section";
     section.hidden = true;
-    const view = { section, button: null, detail: null, sourceUrl: getActiveUrl(), allowed: false, accessRequest: 0 };
-    computerControlView = view;
-
     const head = document.createElement("div");
     head.className = "tools-section-head";
     const title = document.createElement("strong");
@@ -59,17 +56,7 @@ export function createToolViews(context) {
 
     const list = document.createElement("div");
     list.className = "tools-native-list";
-    const button = createNativeRow({
-      icon: "sleep",
-      title: "休眠电脑",
-      detail: "让运行 FanHao 的电脑进入休眠",
-      onOpen: () => { void requestComputerSleep(view); }
-    });
-    view.button = button;
-    view.detail = button.querySelector("small");
-    button.disabled = computerControlBusy;
-    button.setAttribute("aria-busy", String(computerControlBusy));
-    list.append(button);
+    computerControlView = { section, list, sourceUrl: getActiveUrl(), accessRequest: 0 };
     section.append(head, list);
     return section;
   }
@@ -79,63 +66,68 @@ export function createToolViews(context) {
     if (!view?.section.isConnected) return;
     const request = ++view.accessRequest;
     view.sourceUrl = getActiveUrl();
-    view.allowed = false;
     view.section.hidden = true;
-    view.button.disabled = true;
+    view.list.replaceChildren();
     try {
       // This uncached GET uses the same server-side network/admin gate as POST.
       const status = await getComputerControlStatus(view.sourceUrl);
-      if (!isComputerControlViewActive(view) || request !== view.accessRequest) return;
-      view.allowed = status?.ok === true && Array.isArray(status.actions) && status.actions.some(action => action.id === "sleep");
-      view.section.hidden = !view.allowed;
-      view.button.disabled = computerControlBusy || !view.allowed;
+      if (!isComputerControlViewActive(view, request) || status?.ok !== true
+        || !Array.isArray(status.actions) || !status.actions.some(action => action?.id === "sleep")) return;
+      const button = createNativeRow({
+        icon: "sleep",
+        title: "休眠电脑",
+        detail: "让运行 FanHao 的电脑进入休眠",
+        onOpen: (trigger) => { void requestComputerSleep(view, request, trigger); }
+      });
+      button.querySelector("small").setAttribute("aria-live", "polite");
+      view.list.append(button);
+      setComputerControlBusy(computerControlBusy);
+      view.section.hidden = false;
     } catch {
       // Unknown, offline and forbidden connections never expose host controls.
     }
   }
 
-  async function requestComputerSleep(view) {
-    if (computerControlBusy || !view.allowed || !isComputerControlViewActive(view)) return;
+  async function requestComputerSleep(view, request, button) {
+    if (computerControlBusy || !isComputerControlViewActive(view, request)) return;
     const sourceUrl = view.sourceUrl;
-    const accessRequest = view.accessRequest;
+    const detail = button.querySelector("small");
     setComputerControlBusy(true);
     try {
-      const confirmed = await confirmAction({
+      if (!await confirmAction({
         title: "让电脑休眠？",
         message: "将让当前连接的 FanHao 主机进入休眠。休眠后手机会暂时无法连接，确定继续吗？",
         confirmLabel: "立即休眠",
         danger: false
-      });
-      if (!confirmed) return;
-      if (!view.allowed || !isComputerControlViewActive(view) || view.sourceUrl !== sourceUrl || view.accessRequest !== accessRequest) return;
-      updateComputerControlDetail(view, "正在发送休眠指令…", "busy");
+      })) return;
+      if (!isComputerControlViewActive(view, request)) return;
+      detail.textContent = "正在发送休眠指令…";
       const result = await sleepComputer(sourceUrl);
-      if (view.sourceUrl !== sourceUrl || view.accessRequest !== accessRequest) return;
-      updateComputerControlDetail(view, result?.message || "休眠指令已发送，电脑即将进入休眠", "success");
+      if (isComputerControlViewActive(view, request)) {
+        detail.textContent = result?.message || "休眠指令已发送，电脑即将进入休眠";
+      }
     } catch (error) {
-      if (view.sourceUrl !== sourceUrl || view.accessRequest !== accessRequest) return;
-      updateComputerControlDetail(view, `休眠失败：${error?.message || "请确认手机与电脑在同一局域网"}`, "error");
+      if (isComputerControlViewActive(view, request)) {
+        detail.textContent = `休眠失败：${error?.message || "请确认手机与电脑在同一局域网"}`;
+      }
     } finally {
       setComputerControlBusy(false);
     }
   }
 
-  function isComputerControlViewActive(view) {
-    return view === computerControlView && Boolean(view?.section.isConnected) && view.sourceUrl === getActiveUrl();
+  function isComputerControlViewActive(view, request) {
+    return view === computerControlView && view.section.isConnected
+      && view.sourceUrl === getActiveUrl() && view.accessRequest === request;
   }
 
   function setComputerControlBusy(busy) {
     computerControlBusy = busy;
     const view = computerControlView;
-    if (!isComputerControlViewActive(view)) return;
-    view.button.disabled = busy || !view.allowed;
-    view.button.setAttribute("aria-busy", String(busy));
-  }
-
-  function updateComputerControlDetail(view, message, state) {
-    if (!isComputerControlViewActive(view) || !view.detail) return;
-    view.detail.textContent = message;
-    view.detail.dataset.state = state;
+    if (!view || !isComputerControlViewActive(view, view.accessRequest)) return;
+    for (const button of view.list.children) {
+      button.disabled = busy;
+      button.setAttribute("aria-busy", String(busy));
+    }
   }
 
   function createProfileHeader() {
@@ -251,49 +243,12 @@ export function createToolViews(context) {
     return section;
   }
 
-  function createGamesSection() {
-    const section = document.createElement("section");
-    section.className = "tools-native-section";
-    const head = document.createElement("div");
-    head.className = "tools-section-head";
-    const title = document.createElement("strong");
-    title.textContent = "小游戏";
-    const meta = document.createElement("span");
-    meta.textContent = "离线可用";
-    head.append(title, meta);
-    section.append(head, createGameLauncher());
-    return section;
-  }
-
-  function createGameLauncher() {
-    const wrap = document.createElement("div");
-    wrap.className = "tools-native-list";
-    wrap.append(
-      createNativeRow({
-        icon: "game",
-        title: "2048 AI",
-        detail: "手玩、AI 建议或自动运行",
-        url: "./games/2048/index.html"
-      }),
-      createNativeRow({
-        icon: "puzzle",
-        title: "华容道",
-        detail: "经典滑块与 AI 自动解",
-        url: "./games/huarongdao/index.html#/game"
-      })
-    );
-    return wrap;
-  }
-
   function createNativeRow(item) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "tool-native-row";
     button.setAttribute("aria-label", `打开${item.title}`);
-    button.addEventListener("click", () => {
-      if (typeof item.onOpen === "function") item.onOpen(button);
-      else window.location.assign(item.url);
-    });
+    button.addEventListener("click", () => item.onOpen(button));
 
     const icon = document.createElement("span");
     icon.className = `tool-native-icon is-${item.icon || "tool"}`;
@@ -324,9 +279,7 @@ export function createToolViews(context) {
       storage: '<svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6m-15 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/></svg>',
       sleep: '<svg viewBox="0 0 24 24"><path d="M20 15.2A8 8 0 0 1 8.8 4a8 8 0 1 0 11.2 11.2z"/></svg>',
       document: '<svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2.5"/><circle cx="9" cy="11" r="2"/><path d="M13 10h4m-4 3h4m-9 3h9"/></svg>',
-      face: '<svg viewBox="0 0 24 24"><path d="M8 4H5a1 1 0 0 0-1 1v3m12-4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3m12 4h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="11" r="4"/><path d="M10.5 10h.1m2.8 0h.1m-3.2 3c1 .8 2.4.8 3.4 0"/></svg>',
-      game: '<svg viewBox="0 0 24 24"><path d="M7 8h10c2.2 0 4 1.8 4 4v3.5c0 2-2.3 3.2-3.9 2l-2.1-1.6H9l-2.1 1.6c-1.6 1.2-3.9 0-3.9-2V12c0-2.2 1.8-4 4-4z"/><path d="M8 11v4m-2-2h4m6-1h.1m2 2h.1"/></svg>',
-      puzzle: '<svg viewBox="0 0 24 24"><path d="M4 4h6v3a2 2 0 1 0 4 0V4h6v6h-3a2 2 0 1 0 0 4h3v6h-6v-3a2 2 0 1 0-4 0v3H4v-6h3a2 2 0 1 0 0-4H4z"/></svg>'
+      face: '<svg viewBox="0 0 24 24"><path d="M8 4H5a1 1 0 0 0-1 1v3m12-4h3a1 1 0 0 1 1 1v3M8 20H5a1 1 0 0 1-1-1v-3m12 4h3a1 1 0 0 0 1-1v-3"/><circle cx="12" cy="11" r="4"/><path d="M10.5 10h.1m2.8 0h.1m-3.2 3c1 .8 2.4.8 3.4 0"/></svg>'
     };
     return icons[icon] || icons.settings;
   }

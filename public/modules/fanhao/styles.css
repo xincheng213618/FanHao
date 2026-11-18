@@ -1370,7 +1370,7 @@
   justify-content: space-between;
 }
 
-:is(.favorite-search-form, .history-search-form, .person-work-search-form) {
+:is(.favorite-search-form, .history-search-form) {
   display: flex;
   flex-wrap: wrap;
   grid-column: 1 / -1;
@@ -1378,7 +1378,7 @@
   gap: 6px;
 }
 
-:is(.favorite-search-form, .history-search-form, .person-work-search-form) input {
+:is(.favorite-search-form, .history-search-form) input {
   flex: 1 1 140px;
   width: 100%;
   min-width: 0;
@@ -1392,18 +1392,7 @@
   font-size: 16px;
 }
 
-:is(.favorite-search-form, .history-search-form, .person-work-search-form) button { min-height: 44px; }
-
-.person-work-search-form {
-  flex: 1 1 100%;
-}
-
-.person-work-search-status {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.person-work-search-status:empty { display: none; }
+:is(.favorite-search-form, .history-search-form) button { min-height: 44px; }
 
 .favorite-batch-toolbar {
   position: fixed;
@@ -1542,10 +1531,6 @@ body.code-prefix-index-view .work-grid {
   .code-prefix-maker span {
     display: none;
   }
-}
-
-.tools-view .work-grid {
-  display: block;
 }
 
 .gallery-view .work-grid {

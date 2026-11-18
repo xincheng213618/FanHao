@@ -14,8 +14,6 @@
 | `novels` | 可见 | 小说书库、章节、阅读进度和采集任务 | [novels.md](./novels.md) |
 | `short-videos` | 可见 | 短视频信息流、作者、收藏、评论和播放缓存 | [short-videos.md](./short-videos.md) |
 | `music` | 可见 | 音乐扫描、搜索、队列、歌单和播放 | [music.md](./music.md) |
-| `tools` | 可见 | TXT 格式化和离线小游戏入口 | [tools.md](./tools.md) |
-| `market-dashboard` | 可见 | 贵金属、汇率和全球指数行情 | [market-dashboard.md](./market-dashboard.md) |
 
 `disk-usage` 位于 `src/modules/fanhao/server/disk-usage/`，由 `fanhao` runtime 装配；它没有自己的 `module.js`，因此记录在 [fanhao 模块](./fanhao.md) 中。
 

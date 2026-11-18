@@ -1,6 +1,7 @@
 import { createShortVideoStore } from "./store.js";
 import { routeShortVideoAuthorCleanup } from "./author-cleanup-route.js";
 import { routeShortVideoApi } from "./routes.js";
+import { shortVideoCommentOwner } from "./comments-repository.js";
 import { createShortVideoCatalogWorkerClient } from "./catalog-worker-client.js";
 import { createShortVideoListCacheFiles } from "./list-cache-files.js";
 import { createShortVideoListStatsService, shortVideoCatalogAdmissionError } from "./list-stats-service.js";
@@ -164,8 +165,6 @@ export function createShortVideosRuntime({
     dbPath,
     ffmpegPath,
     roots,
-    initialStateKey: () => store.downloadManagerSourceStateKey(),
-    onStateKey: (stateKey) => store.downloadManagerSourceStateKey(stateKey),
     onCatalogChanged: () => clearShortVideoListCache(),
     onItemsImported: (result) => {
       console.log(`[short-video-sync] imported=${result.imported} updated=${result.updated} backfill=${result.backfillRows || 0} total=${result.summary?.totals?.videos ?? ""}`);
@@ -420,7 +419,8 @@ export function createShortVideosRuntime({
         });
         if (result?.ok === false) throw new Error(result.message || "抖音评论拉取失败");
         const imported = store.importRemoteComments(videoId, result?.comments || [], {
-          availableTotal: Number(result?.available_total || 0)
+          availableTotal: Number(result?.available_total || 0),
+          owner: shortVideoCommentOwner(req.authenticatedUser)
         });
         clearShortVideoListCache();
         sendJson(res, 200, imported);

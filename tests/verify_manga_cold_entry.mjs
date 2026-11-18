@@ -113,13 +113,13 @@ async function reader(f, id = "C", chapter) {
   await f.page.waitForFunction(({ id, chapter }) => document.querySelector(".manga-reader")?.dataset.comicId === id && document.querySelector(".manga-reader")?.dataset.chapterIndex === String(chapter), { id, chapter });
   await f.page.waitForFunction(() => !document.documentElement.classList.contains("app-module-loading")); await frames(f.page);
 }
-async function snapshot(f) {
-  return f.page.evaluate(() => ({ comic: __cold.state.manga.comic, chapter: __cold.state.manga.chapter, status: __cold.state.manga.status, loading: __cold.state.manga.loading,
+async function snapshot(f, progressKey = "fanhao.manga.progress:guest") {
+  return f.page.evaluate(progressKey => ({ comic: __cold.state.manga.comic, chapter: __cold.state.manga.chapter, status: __cold.state.manga.status, loading: __cold.state.manga.loading,
     reader: document.querySelector(".manga-reader") ? { className: document.querySelector(".manga-reader").className, title: document.querySelector(".manga-reader-identity strong").textContent,
       chapter: document.querySelector(".manga-reader-identity span").textContent,
       buttons: [...document.querySelectorAll(".manga-reader button")].map(node => ({ text: node.textContent, disabled: node.disabled, action: node.dataset.action || "" })),
       images: [...document.querySelectorAll(".manga-reader-pages img")].map(node => ({ src: node.getAttribute("src"), alt: node.alt, loading: node.loading, width: node.getAttribute("width"), height: node.getAttribute("height") })) } : null,
-    progress: JSON.parse(localStorage.getItem("fanhao.manga.progress") || "{}"), route: location.pathname }));
+    progress: JSON.parse(localStorage.getItem(progressKey) || "{}"), route: location.pathname }), progressKey);
 }
 async function navigate(f, url) { await f.page.evaluate(url => { history.pushState(null, "", url); dispatchEvent(new PopStateEvent("popstate")); }, url); }
 async function verifyFailure(surface) {
@@ -186,7 +186,7 @@ try {
         { action: "choose-chapter", text: "选章节", disabled: false }
       ]);
       currentReader.reader.buttons = currentReader.reader.buttons.filter(button => button.action !== "choose-chapter");
-      assert.deepEqual(currentReader, await snapshot(a), "the frozen reader controls, images and DTO still match");
+      assert.deepEqual(currentReader, await snapshot(a, "fanhao.manga.progress"), "the frozen reader controls, images and DTO still match");
       assert.deepEqual([...b.requests].sort(), [...a.requests].sort(), "the comic and chapter GETs each issue exactly once"); comparisons += 2;
       assert.equal(scale.before.rows, count); measurements.push(scale);
       await b.page.locator('.manga-reader-bar [data-action="detail"]').press("Enter");

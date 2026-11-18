@@ -65,7 +65,6 @@ const DEFAULT_COVER_GENERATE_LIMIT = 0;
 const DEFAULT_DOWNLOAD_MANAGER_STATS_BACKFILL_LIMIT = 50000;
 const DOWNLOAD_MANAGER_BACKFILL_CHUNK_SIZE = 500;
 const DOWNLOAD_MANAGER_GALLERY_IMPORT_VERSION = "4";
-const DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META = "download_manager_source_state_key_v2_account_status";
 const SHORT_VIDEO_SCHEMA_VERSION = "20260825-profile-history-14";
 const NORMALIZED_SCHEMA_VERSION = "2";
 const LIST_VIDEO_COLUMNS = [
@@ -3497,17 +3496,6 @@ function summary() {
     return deleteJobs ? deleteJobs.recoverPending({ db: databaseOrOpen(), jobId: options.jobId || "" }) : deleteJobStatus();
   }
 
-  function downloadManagerSourceStateKey(value) {
-    const database = databaseOrOpen();
-    if (value === undefined) return metaValue(database, DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META);
-    const normalized = String(value || "");
-    database.prepare(`
-      INSERT OR REPLACE INTO short_video_meta (key, value)
-      VALUES (?, ?)
-    `).run(DOWNLOAD_MANAGER_SOURCE_STATE_KEY_META, normalized);
-    return normalized;
-  }
-
   return {
     adjacentVideo,
     addCollectionVideo: collections.addCollectionVideo,
@@ -3534,7 +3522,6 @@ function summary() {
     deleteJobStatus,
     deleteVideoGroup,
     deleteVideos,
-    downloadManagerSourceStateKey,
     facets,
     galleryFile,
     galleryFileAsync,

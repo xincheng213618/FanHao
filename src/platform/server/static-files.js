@@ -46,8 +46,7 @@ const APP_PAGE_PATHS = new Set([
   "/songs",
   "/short-video",
   "/short-videos",
-  "/douyin",
-  "/tools"
+  "/douyin"
 ]);
 
 const APP_PAGE_PREFIXES = [
@@ -79,8 +78,6 @@ const APP_PAGE_PREFIXES = [
 const STANDALONE_PAGE_FILES = new Map([
   ["/fanhao/ltx", "/modules/fanhao/ltx/index.html"],
   ["/fanhao/duplicates", "/modules/fanhao/duplicates/index.html"],
-  ["/fanhao/taste", "/modules/fanhao/taste/index.html"],
-  ["/fanhao/file-workflows", "/modules/fanhao/file-workflows/index.html"],
   ["/fanhao/file-workflows/intake", "/modules/fanhao/file-workflows/intake.html"],
   ["/photo/analysis", "/modules/photos/analysis/index.html"],
   ["/photo/catalog", "/modules/photos/catalog/index.html"],

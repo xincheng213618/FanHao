@@ -2,6 +2,7 @@
 // 真正的视图模块：只读取 music 状态切片、调用稳定的 actions 编排 API、使用 h 渲染原语，
 // 不再通过 ctx 桥接捕获组合根闭包里的十几个内部函数。
 import { formatDuration, formatClock } from "../format.js";
+import { canManageWebLibrary } from "../../../platform/accounts/session-context.js";
 
 export function createMusicHome({ music, actions, h, formatNumber, showError }) {
   const playlistPanels = new WeakMap();
@@ -40,7 +41,8 @@ export function createMusicHome({ music, actions, h, formatNumber, showError }) 
       if (music.current) actions.togglePlayback();
       else if (music.queue[0]?.id) actions.openTrack(music.queue[0].id, { autoplay: true }).catch(showError);
     });
-    actionsEl.append(play, scan);
+    actionsEl.append(play);
+    if (canManageWebLibrary(true)) actionsEl.append(scan);
     hero.append(copy, actionsEl);
     return hero;
   }

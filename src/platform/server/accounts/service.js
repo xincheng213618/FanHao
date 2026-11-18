@@ -28,7 +28,7 @@ export function accountPageHtml() {
     </main><noscript>请启用 JavaScript 使用用户中心。</noscript><script type="module" src="/account-assets/web.js"></script></body></html>`;
 }
 
-export function createAccountServices({ dbPath, now = Date.now, readBodyText, sendJson, sendHtml, requestAccess, requestCorsOrigin }) {
+export function createAccountServices({ dbPath, now = Date.now, readBodyText, sendJson, sendHtml, requestAccess, requestCorsOrigin, isSameTrustedNetworkOrigin }) {
   const store = createAccountStore({ dbPath, now });
   const attempts = new Map();
   function token(req) {
@@ -37,7 +37,11 @@ export function createAccountServices({ dbPath, now = Date.now, readBodyText, se
     const cookie = /(?:^|;\s*)fanhao_web_auth=([^;]*)/.exec(String(req.headers.cookie || ""))?.[1] || "";
     try { return decodeURIComponent(cookie); } catch { return "invalid"; }
   }
-  function user(req) { return store.session(token(req)); }
+  function allowAdministrator(req) {
+    return !req.headers["x-forwarded-for"] && !req.headers.forwarded && !req.headers["x-forwarded-host"]
+      && isSameTrustedNetworkOrigin(req);
+  }
+  function user(req) { return store.session(token(req), { allowAdministrator: allowAdministrator(req) }); }
   function canSetup(req) {
     const access = requestAccess(req);
     return access.clientIsLocal && access.hostIsLocal && !req.headers["x-forwarded-for"] && !req.headers.forwarded
@@ -115,7 +119,7 @@ export function createAccountServices({ dbPath, now = Date.now, readBodyText, se
         limit(req, "password-reset");
         const payload = await body(req);
         const current = user(req);
-        const result = await store.resetPassword(payload);
+        const result = await store.resetPassword(payload, { allowAdministrator: allowAdministrator(req) });
         if (current?.id === result.userId) res.setHeader("Set-Cookie", cookie(req, "", 0));
         sendJson(res, 200, { ok: true }); return true;
       }
@@ -126,7 +130,8 @@ export function createAccountServices({ dbPath, now = Date.now, readBodyText, se
         limit(req, isLogin ? "login" : "register");
         const payload = await body(req);
         const metadata = sessionMetadata(req, payload);
-        const result = isLogin ? await store.login(payload, metadata) : await store.register(payload, { setup, sessionMetadata: metadata });
+        const result = isLogin ? await store.login(payload, metadata, { allowAdministrator: allowAdministrator(req) })
+          : await store.register(payload, { setup, sessionMetadata: metadata });
         signedIn(req, res, result, payload, isLogin ? 200 : 201); return true;
       }
       if (pathname === "/api/accounts/logout" && req.method === "POST") {

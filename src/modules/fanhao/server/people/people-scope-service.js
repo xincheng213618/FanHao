@@ -42,16 +42,6 @@ export function createPeopleScopeService({
     return (person?.works || []).some((workId) => workInRoots(library.worksById.get(workId), roots));
   }
 
-  function personHasNonWesternLocalSource(person) {
-    const library = getLibrary();
-    const paths = [person?.relativePath, ...(person?.sourcePaths || [])].filter(Boolean);
-    if (paths.some((sourcePath) => !sourcePathWithinAnyRoot(sourcePath, westernRoots))) return true;
-    return (person?.works || []).some((workId) => {
-      const work = library.worksById.get(workId);
-      return work && !workInRoots(work, westernRoots);
-    });
-  }
-
   function cacheKey() {
     const library = getLibrary();
     return [
@@ -124,14 +114,10 @@ export function createPeopleScopeService({
 
       const paths = [merged.relativePath, ...(merged.sourcePaths || [])].filter(Boolean);
       const hasWesternPath = paths.some(sourcePathInWesternRoots);
-      const hasNonWesternPath = paths.some((sourcePath) => !sourcePathInWesternRoots(sourcePath));
       const hasMainExcludedPath = paths.some((sourcePath) => sourcePathWithinAnyRoot(sourcePath, mainExcludedRoots));
       const hasMainEligiblePath = paths.some((sourcePath) => !sourcePathWithinAnyRoot(sourcePath, mainExcludedRoots));
       const workIds = (merged.works || []).map((workId) => String(workId || "")).filter(Boolean);
       const hasWesternWork = workIds.some((workId) => westernWorkIds.has(workId));
-      const hasNonWesternWork = workIds.some(
-        (workId) => knownWorkIds.has(workId) && !westernWorkIds.has(workId)
-      );
       const hasMainExcludedWork = workIds.some((workId) => mainExcludedWorkIds.has(workId));
       const hasMainEligibleWork = workIds.some(
         (workId) => knownWorkIds.has(workId) && !mainExcludedWorkIds.has(workId)
@@ -140,7 +126,7 @@ export function createPeopleScopeService({
       const isMainExcludedOnly = (hasMainExcludedPath || hasMainExcludedWork) && !hasMainEligiblePath && !hasMainEligibleWork;
 
       if (isWestern) westernPersonIds.add(personId);
-      if (!isMainExcludedOnly && (!isWestern || hasNonWesternPath || hasNonWesternWork)) mainPersonIds.add(personId);
+      if (!isMainExcludedOnly && !isWestern) mainPersonIds.add(personId);
     }
 
     const nextIndex = { westernWorkIds, mainExcludedWorkIds, mainExcludedPersonIds, knownWorkIds, westernPersonIds, mainPersonIds, knownPersonIds };
@@ -160,9 +146,7 @@ export function createPeopleScopeService({
         : scopeIndex.mainPersonIds.has(personId);
     }
     const isWestern = personInRoots(person, westernRoots);
-    return normalizedScope === "western"
-      ? isWestern
-      : !isWestern || personHasNonWesternLocalSource(person);
+    return normalizedScope === "western" ? isWestern : !isWestern;
   }
 
   function workMatches(work, scope) {
@@ -194,6 +178,12 @@ export function createPeopleScopeService({
       : workInRoots(work, westernRoots);
   }
 
+  function personWorkMatcher(scope) {
+    const normalizedScope = normalize(scope);
+    return matcher((work, requestedScope, scopeIndex) => workMatchesInScope(work, requestedScope, scopeIndex)
+      && (requestedScope !== "main" || !workMatchesInScope(work, "western", scopeIndex)), normalizedScope);
+  }
+
   function invalidate() {
     peopleScopeIndexCache = null;
     revision += 1;
@@ -204,10 +194,10 @@ export function createPeopleScopeService({
     index,
     invalidate,
     normalize,
-    personHasNonWesternLocalSource,
     personInRoots,
     personMatcher: (scope) => matcher(personMatchesInScope, scope),
     personMatches,
+    personWorkMatcher,
     sourcePathInWesternRoots,
     sourcePathWithinAnyRoot,
     workInRoots,

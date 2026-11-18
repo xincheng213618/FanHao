@@ -13,7 +13,7 @@ const LOGIN_BUCKET_LIMIT = 2048;
 export function createAuthServices({
   authSecretPath,
   accountsDbPath,
-  remoteWebPassword,
+  remoteWebPassword = "",
   ensureDataDir,
   readBodyText,
   sendJson,
@@ -23,7 +23,9 @@ export function createAuthServices({
 }) {
   const loginFailures = new Map();
   let authSecretCache = "";
-  const accounts = accountsDbPath ? createAccountServices({ dbPath: accountsDbPath, now, readBodyText, sendJson, sendHtml, requestAccess, requestCorsOrigin }) : null;
+  const accounts = accountsDbPath ? createAccountServices({
+    dbPath: accountsDbPath, now, readBodyText, sendJson, sendHtml, requestAccess, requestCorsOrigin, isSameTrustedNetworkOrigin
+  }) : null;
 
   function getAuthSecret() {
     if (authSecretCache) return authSecretCache;
@@ -224,16 +226,29 @@ export function createAuthServices({
   }
 
   function isSameLocalOrigin(req) {
-    const origin = String(req.headers.origin || "").trim();
-    if (!origin) return true;
+    const fetchSite = String(req.headers["sec-fetch-site"] || "").toLowerCase();
+    if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") return false;
+
+    const origin = req.headers.origin;
+    if (!origin && req.method !== "GET" && req.method !== "HEAD") return false;
 
     try {
-      const originUrl = new URL(origin);
-      const requestHost = String(req.headers.host || "").toLowerCase();
-      return originUrl.host.toLowerCase() === requestHost && isLocalHostName(originUrl.hostname.toLowerCase());
+      const scheme = req.socket.encrypted ? "https" : "http";
+      const requestUrl = new URL(`${scheme}://${req.headers.host}`);
+      const referer = req.headers.referer;
+      return isLocalHostName(requestUrl.hostname)
+        && (!origin || origin === requestUrl.origin)
+        && (!referer || new URL(referer).origin === requestUrl.origin);
     } catch {
       return false;
     }
+  }
+
+  function isDirectLocalRequest(req, access) {
+    if (!access.clientIsLocal || !access.hostIsLocal) return false;
+    const forwarded = Object.keys(req.headers).some((header) => header.startsWith("x-forwarded-")
+      || ["forwarded", "via", "x-real-ip", "cf-connecting-ip"].includes(header));
+    return !forwarded && isSameLocalOrigin(req);
   }
 
   function isLanHost(host) {
@@ -413,8 +428,9 @@ export function createAuthServices({
     const bearer = /^Bearer ([A-Za-z0-9._-]+)$/.exec(String(req.headers.authorization || ""))?.[1];
     const webTokenValid = validateWebAuthToken(bearer || cookies[WEB_AUTH_COOKIE]);
     const user = accounts?.user(req);
+    const accountToken = accounts?.token(req);
     if (user) return { ...state, allowed: true, required: true, reason: "account", user };
-    if (accounts?.token(req)?.startsWith("usr.")) return { ...state, allowed: false, required: true, reason: "expired-account", user: null };
+    if (accountToken?.startsWith("usr.")) return { ...state, allowed: false, required: true, reason: "expired-account", user: null };
     if (accountLoginRequired) return { ...state, allowed: false, required: true, reason: "account-required", user: null };
 
     if (trustedNetwork && appClient) {
@@ -426,8 +442,19 @@ export function createAuthServices({
       };
     }
 
-    if (trustedNetwork) return { ...state, allowed: true, required: false, reason: "trusted-network" };
+    if (trustedNetwork) {
+      // A cookie from the removed web-password login no longer represents a session.
+      const retiredWebCookie = !remoteWebPassword && !req.headers.authorization && accountToken?.startsWith("web.");
+      return {
+        ...state,
+        allowed: true,
+        required: false,
+        reason: "trusted-network",
+        localAdministrator: Boolean(accounts && (!accountToken || retiredWebCookie) && isDirectLocalRequest(req, access))
+      };
+    }
     if (webTokenValid) return { ...state, allowed: true, required: true, reason: "password" };
+    if (accounts && !remoteWebPassword) return { ...state, allowed: false, required: true, reason: "account-required", user: null };
     return { ...state, allowed: false, required: true, reason: "missing-password" };
   }
 
@@ -447,7 +474,7 @@ export function createAuthServices({
     }
 
     sendJson(res, 401, {
-      error: authState.accountLoginRequired ? "访问资料库需要登录用户账号" : "远程网页访问需要登录",
+      error: authState.reason === "account-required" ? "访问资料库需要登录用户账号" : "远程网页访问需要登录",
       reason: authState.reason,
       accountLoginRequired: authState.accountLoginRequired,
       loginUrl: `/login?next=${encodeURIComponent(next)}`,
@@ -481,11 +508,12 @@ export function createAuthServices({
     if (url.pathname === "/auth/login" && req.method === "POST") {
       const fallbackNext = safeNextPath(url.searchParams.get("next") || "/");
       const requireAccountLogin = (next) => {
-        if (!accounts?.settings().accountLoginRequired) return false;
+        const accountLoginRequired = Boolean(accounts?.settings().accountLoginRequired);
+        if (!accountLoginRequired && (!accounts || remoteWebPassword)) return false;
         const loginUrl = `/login?next=${encodeURIComponent(next)}`;
         res.setHeader("Cache-Control", "no-store");
         if (String(req.headers.accept || "").includes("application/json")) {
-          sendJson(res, 403, { error: "当前需要用户账号登录，请前往用户中心", reason: "account-required", accountLoginRequired: true, loginUrl });
+          sendJson(res, 403, { error: "请前往用户中心使用账号登录", reason: "account-required", accountLoginRequired, loginUrl });
         } else redirect(res, loginUrl, 303);
         return true;
       };

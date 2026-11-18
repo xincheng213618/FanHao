@@ -6,7 +6,7 @@
     <title>FanHao 播放</title>
     <link rel="stylesheet" href="/css/foundation.css?v=20260717-player-startup-01" />
     <link rel="stylesheet" href="/vendor/plyr/plyr.css" />
-    <link rel="modulepreload" href="/js/player-page.js?v=20261113-player-switch-time-01" />
+    <link rel="modulepreload" href="/js/player-page.js?v=20261114-correct-tags-01" />
     <style>
       html.app-module-loading body {
         visibility: hidden;
@@ -45,7 +45,7 @@
         margin: 0;
         flex: 1 1 auto;
         min-width: 0;
-        max-width: min(1100px, calc(100% - 150px));
+        max-width: 1100px;
         overflow: hidden;
         color: #fff;
         font-size: clamp(15px, 1.25vw, 21px);
@@ -59,28 +59,7 @@
         flex: 0 0 auto;
         align-items: center;
         gap: 7px;
-        min-height: 36px;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        border-radius: 999px;
-        background: rgba(6, 10, 8, 0.62);
-        color: #eef7f2;
-        cursor: pointer;
-        font: inherit;
-        font-size: 12px;
-        font-weight: 900;
         padding: 7px 11px;
-        pointer-events: auto;
-        backdrop-filter: blur(12px);
-        transition: border-color 150ms ease, background 150ms ease, transform 150ms ease;
-      }
-      .player-sidebar-toggle:hover,
-      .player-sidebar-toggle:focus-visible {
-        border-color: rgba(96, 211, 170, 0.72);
-        background: rgba(19, 61, 46, 0.74);
-        outline: none;
-      }
-      .player-sidebar-toggle:active {
-        transform: scale(0.97);
       }
       .player-sidebar-toggle svg {
         width: 17px;
@@ -126,21 +105,10 @@
         stroke-linejoin: round;
       }
       .player-playback-rate {
-        flex: 0 0 auto;
-        min-height: 40px;
-        border: 1px solid rgba(255, 255, 255, 0.2);
-        border-radius: 9px;
         padding-inline: 8px;
-        background: #101b17;
-        color: #eef7f2;
         color-scheme: dark;
-        font: inherit;
-        font-size: 13px;
         font-variant-numeric: tabular-nums;
-        pointer-events: auto;
-        cursor: pointer;
       }
-      .player-playback-rate:focus-visible { outline: 2px solid #60d3aa; outline-offset: 2px; }
       .player-file-position { color: #eef7f2; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
       .player-episode-navigation .player-file-position {
         max-width: min(28vw, 190px);
@@ -159,9 +127,18 @@
         .player-file-navigation { order: 1; flex-basis: 100%; flex-wrap: wrap; }
         .player-episode-navigation .player-file-position { max-width: 42vw; }
       }
-      body.player-ui-idle.player-sidebar-collapsed .player-page-header:not(:focus-within) {
-        opacity: 0;
-        transform: translateY(-8px);
+      body.player-ui-idle .player-stage:not(.stream-switching):not(:has(:focus-visible, .subtitle-controls[open], .plyr__controls:hover, .player-chrome-bottom:hover)) {
+        & .player-page-header {
+          opacity: 0;
+          transform: translateY(-8px);
+        }
+        & :is(.plyr__controls, .player-chrome-bottom) {
+          opacity: 0;
+          transform: translateY(8px);
+          pointer-events: none;
+        }
+        & .player-file-navigation { pointer-events: none; }
+        & > .player-seek-control { opacity: 0; pointer-events: none; }
       }
       .player-page-main {
         height: 100vh;
@@ -200,12 +177,10 @@
       .player-stage .plyr {
         position: relative;
         display: block;
-        width: min(100%, var(--player-video-max-width, 100%));
-        height: auto;
-        max-height: 100%;
+        width: 100%;
+        height: 100%;
         overflow: hidden;
         border-radius: 0;
-        aspect-ratio: var(--player-video-aspect, 16 / 9);
         --plyr-color-main: #60d3aa;
         --plyr-video-background: #000;
       }
@@ -234,18 +209,80 @@
         height: 100%;
         max-height: none;
         overflow: hidden;
-        aspect-ratio: var(--player-video-aspect, 16 / 9) !important;
       }
-      .player-stage.stream-controls .plyr__video-wrapper {
-        aspect-ratio: var(--player-video-aspect, 16 / 9);
+      .player-stage .plyr--video .plyr__controls,
+      .player-chrome-bottom {
+        position: absolute;
+        inset: auto 0 0;
+        z-index: 8;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-start;
+        align-items: center;
+        gap: 4px;
+        padding: 22px 12px 10px;
+        background: linear-gradient(transparent, rgba(0, 0, 0, 0.72));
+        transition: opacity 180ms ease, transform 180ms ease;
       }
-      .player-stage.stream-switching .plyr__controls {
-        opacity: 1 !important;
-        pointer-events: auto !important;
-        transform: translateY(0) !important;
+      .player-chrome-bottom { justify-content: flex-end; }
+      .player-chrome-bottom[hidden], .player-bottom-controls [hidden] { display: none !important; }
+      .player-stage .plyr__controls > .plyr__controls__item { margin: 0; }
+      .player-stage .plyr__controls > :is(.plyr__progress__container, .player-seek-control) {
+        order: -1;
+        flex: 1 0 100%;
+        padding: 0;
+        min-width: 0;
       }
-      .player-stage.stream-switching .player-seek-control {
-        opacity: 1 !important;
+      .player-stage .plyr__progress { margin: 0; }
+      .player-stage .plyr__controls .plyr__control {
+        border-radius: 100px;
+        background: rgba(0, 0, 0, 0.35);
+      }
+      .player-stage .plyr__controls .plyr__control:hover { background: rgba(255, 255, 255, 0.18); }
+      .player-bottom-controls {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-inline-start: auto;
+      }
+      .player-bottom-controls :is(button.player-sidebar-toggle, select.player-playback-rate, .subtitle-controls > summary) {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 36px;
+        border: 0;
+        border-radius: 100px;
+        background: rgba(0, 0, 0, 0.48);
+        color: #eef7f2;
+        cursor: pointer;
+        font: 600 13px/1.2 system-ui, sans-serif;
+        white-space: nowrap;
+      }
+      .player-bottom-controls :is(button.player-sidebar-toggle, select.player-playback-rate, .subtitle-controls > summary):hover {
+        background: rgba(255, 255, 255, 0.18);
+      }
+      .player-bottom-controls :is(button.player-sidebar-toggle, select.player-playback-rate, .subtitle-controls > summary):focus-visible {
+        outline: 2px solid #60d3aa;
+        outline-offset: 2px;
+      }
+      .player-bottom-controls .subtitle-controls-host {
+        position: static;
+        max-width: none;
+      }
+      .player-bottom-controls .subtitle-controls > summary::-webkit-details-marker { display: none; }
+      .player-bottom-controls .subtitle-panel {
+        position: absolute;
+        inset: auto 8px calc(100% - 14px) auto;
+        width: min(350px, calc(100% - 16px));
+        max-width: calc(100vw - 16px);
+        max-height: calc(100dvh - 150px);
+        box-sizing: border-box;
+        margin: 0;
+      }
+      .player-stage:not(:has(.plyr)) > .player-seek-control {
+        position: absolute;
+        inset: auto 12px 68px;
+        z-index: 7;
       }
       .player-seek-control {
         display: grid;
@@ -255,14 +292,6 @@
       }
       .player-seek-control[hidden] {
         display: none !important;
-      }
-      .player-stage.stream-controls .player-seek-control {
-        display: flex;
-        flex: 1 1 auto;
-        align-items: center;
-        gap: 8px;
-        margin: 0 4px;
-        min-width: 180px;
       }
       .player-status-row {
         display: flex;
@@ -296,10 +325,7 @@
         gap: 9px;
         min-width: 0;
       }
-      .player-stage.stream-controls .player-timeline-row {
-        flex: 1 1 auto;
-        grid-template-columns: minmax(90px, 1fr) 78px;
-      }
+      .plyr__controls .player-timeline-row { grid-template-columns: minmax(0, 1fr); }
       .player-seek-time {
         min-width: 0;
         color: rgba(255, 255, 255, 0.82);
@@ -420,11 +446,11 @@
       }
       .player-side {
         position: absolute;
-        inset: 108px 12px auto auto;
+        inset: auto 12px 82px auto;
         z-index: 9;
         display: grid;
         width: min(340px, calc(100% - 24px));
-        max-height: calc(100% - 168px);
+        max-height: calc(100% - 188px);
         min-width: 0;
         align-content: start;
         gap: 10px;
@@ -549,6 +575,10 @@
         min-width: 0;
         overflow-wrap: anywhere;
       }
+      .player-code-prefix-link {
+        color: #bff5de;
+        text-underline-offset: 3px;
+      }
       .player-entity-row {
         display: grid;
         grid-template-columns: 64px minmax(0, 1fr);
@@ -621,6 +651,13 @@
       .player-utility-dialog input { width: 100%; min-width: 0; min-height: 44px; padding: 10px; border: 1px solid #638172; border-radius: 7px; color: #eef7f2; background: #09140e; font: inherit; }
       .player-utility-dialog button { min-height: 44px; margin-top: 16px; padding: 8px 18px; border: 1px solid #638172; border-radius: 7px; color: #eef7f2; background: #234837; font: inherit; cursor: pointer; }
       .player-utility-dialog :focus-visible { outline: 2px solid #8ce1b8; outline-offset: 3px; }
+      .player-tags-options { display: grid; gap: 8px; min-width: 0; margin: 12px 0; padding: 10px 12px; border: 1px solid #638172; border-radius: 8px; }
+      .player-tags-options label { display: flex; align-items: center; min-height: 36px; cursor: pointer; }
+      .player-tags-options input { width: 18px; min-height: 0; height: 18px; margin: 0; padding: 0; accent-color: #60d3aa; }
+      .player-tags-file, .player-tags-status { overflow-wrap: anywhere; }
+      .player-tags-status:empty { display: none; }
+      .player-tags-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      .player-tags-actions button:disabled { opacity: 0.55; cursor: default; }
       .player-episode-picker { padding: 14px; }
       .player-episode-picker :is(header, form, nav) { display: flex; align-items: center; gap: 8px; }
       .player-episode-picker header { justify-content: space-between; margin-bottom: 10px; }
@@ -797,9 +834,6 @@
         .player-page-header {
           padding: 12px 12px 48px;
         }
-        .player-page-header h1 {
-          max-width: calc(100% - 118px);
-        }
         .player-playback-tools,
         .player-status-row {
           align-items: stretch;
@@ -816,66 +850,19 @@
         .player-page-header h1 {
           display: -webkit-box;
           overflow: hidden;
-          max-width: calc(100% - 62px);
           font-size: 14px;
           white-space: normal;
           -webkit-box-orient: vertical;
           -webkit-line-clamp: 2;
         }
-        .player-sidebar-toggle {
-          width: 38px;
-          min-height: 38px;
-          justify-content: center;
-          padding: 0;
-        }
-        .player-sidebar-toggle-label {
-          display: none;
-        }
-        .player-stage.stream-controls .plyr__controls {
-          flex-wrap: wrap;
-          gap: 6px;
-          padding: 8px;
-        }
-        .player-stage.stream-controls .plyr__volume input[type="range"] {
-          display: none;
-        }
-        .player-stage.stream-controls .player-seek-control {
-          position: absolute;
-          right: 8px;
-          bottom: 8px;
-          left: 8px;
-          z-index: 6;
-          order: 20;
-          display: grid;
-          width: auto;
-          min-width: 0;
-          gap: 6px;
-          margin: 0;
-          box-sizing: border-box;
-          border: 1px solid rgba(255, 255, 255, 0.11);
-          border-radius: 6px;
-          background: rgba(255, 255, 255, 0.05);
-          padding: 8px;
-        }
-        .player-stage.stream-controls .player-timeline-row {
-          width: 100%;
-          grid-template-columns: minmax(0, 1fr) auto;
-          gap: 8px;
-        }
-        .player-stage.stream-controls .player-playback-tools {
-          width: 100%;
-        }
-        .player-stage.stream-controls .player-playback-buttons {
-          display: grid;
-          grid-template-columns: repeat(3, minmax(0, 1fr));
-          width: 100%;
-          gap: 6px;
-        }
-        .player-stage.stream-controls .player-playback-buttons button {
-          min-height: 30px;
-          padding: 6px 4px;
-          text-align: center;
-        }
+        .player-bottom-controls :is(button.player-sidebar-toggle, select.player-playback-rate, .subtitle-controls > summary) { min-height: 40px; }
+        .player-stage .plyr--video .plyr__controls, .player-chrome-bottom { padding: 16px 8px 8px; }
+        .player-stage .plyr__volume { min-width: 0; width: auto; }
+        .player-stage .plyr__volume input[type="range"] { display: none; }
+        .player-stage .plyr__controls > .player-playback-tools { order: 1; flex-basis: 100%; }
+        .player-stage .plyr__controls > .player-playback-tools button { min-height: 34px; }
+        .player-bottom-controls .subtitle-panel { max-height: calc(100dvh - 182px); }
+        .player-stage.stream-controls .player-side { bottom: 116px; max-height: calc(100% - 240px); }
         .player-panel {
           padding: 10px;
         }
@@ -905,26 +892,30 @@
               <button class="player-episode-picker-trigger" data-episode-picker-trigger type="button" aria-haspopup="dialog" aria-controls="playerEpisodePicker">选集</button>
               <button class="player-episode-retry" data-episode-retry type="button" hidden>重试</button>
             </div>
-            <select class="player-playback-rate" id="playerPlaybackRate" aria-label="播放倍速" title="播放倍速（[ / ]）" hidden>
-              <option value="0.5">0.5×</option>
-              <option value="0.75">0.75×</option>
-              <option value="1" selected>1×</option>
-              <option value="1.25">1.25×</option>
-              <option value="1.5">1.5×</option>
-              <option value="1.75">1.75×</option>
-              <option value="2">2×</option>
-              <option value="4">4×</option>
-            </select>
-            <button class="player-sidebar-toggle" id="toggleSidebarButton" type="button" aria-controls="playerSidebar" aria-expanded="true" title="隐藏资料与操作（I）">
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <rect x="2.5" y="3" width="15" height="14" rx="2"></rect>
-                <path d="M13 3v14M5.5 7h4M5.5 10h4M5.5 13h4"></path>
-              </svg>
-              <span class="player-sidebar-toggle-label">隐藏资料</span>
-            </button>
           </header>
+          <div class="player-chrome-bottom">
+            <div class="player-bottom-controls" id="playerBottomControls" role="group" aria-label="播放设置">
+              <div id="playerSubtitles" hidden></div>
+              <select class="player-playback-rate" id="playerPlaybackRate" aria-label="播放倍速" title="播放倍速（[ / ]）" hidden>
+                <option value="0.5">0.5×</option>
+                <option value="0.75">0.75×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.25">1.25×</option>
+                <option value="1.5">1.5×</option>
+                <option value="1.75">1.75×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+              </select>
+              <button class="player-sidebar-toggle" id="toggleSidebarButton" type="button" aria-label="作品资料" aria-controls="playerSidebar" aria-expanded="true" title="隐藏资料与操作（I）">
+                <svg viewBox="0 0 20 20" aria-hidden="true">
+                  <rect x="2.5" y="3" width="15" height="14" rx="2"></rect>
+                  <path d="M13 3v14M5.5 7h4M5.5 10h4M5.5 13h4"></path>
+                </svg>
+                <span>资料</span>
+              </button>
+            </div>
+          </div>
           <div class="player-notice" id="playerNotice">正在读取作品</div>
-          <div id="playerSubtitles" hidden></div>
           <video id="playerVideo" playsinline preload="metadata" autoplay hidden></video>
           <button class="player-stream-start" id="playerStreamStart" type="button" aria-label="开始播放" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z"></path></svg>
@@ -980,7 +971,7 @@
                 <button id="playerBookmarksButton" type="button" disabled aria-haspopup="dialog" aria-controls="playerBookmarksDialog" title="播放书签（B）">播放书签</button>
                 <button id="playerShortcutsButton" type="button" aria-haspopup="dialog" aria-controls="playerShortcutsDialog">快捷键 (?)</button>
                 <span id="playerTimeLinkStatus" class="player-time-link-status" role="status" aria-live="polite" hidden></span>
-                <button id="markerAButton" type="button">标记 A</button>
+                <button id="correctTagsButton" type="button" aria-haspopup="dialog" aria-controls="playerTagsDialog" hidden>订正标签</button>
                 <button id="correctActorButton" type="button" hidden>订正演员</button>
                 <button id="moveToPersonButton" type="button" hidden>迁移演员</button>
                 <button id="openFileButton" type="button" hidden>打开文件夹</button>
@@ -992,6 +983,27 @@
         </section>
       </main>
     </div>
+    <dialog id="playerTagsDialog" class="player-utility-dialog" aria-labelledby="playerTagsTitle">
+      <h2 id="playerTagsTitle">订正标签</h2>
+      <form>
+        <fieldset class="player-tags-options" data-work-tags>
+          <legend>作品目录</legend>
+          <label><input type="checkbox" value="A" />A</label>
+        </fieldset>
+        <fieldset class="player-tags-options" data-video-tags>
+          <legend>当前视频</legend>
+          <p class="player-tags-file" data-tags-file></p>
+          <label><input type="checkbox" value="LTX" />LTX</label>
+          <label><input type="checkbox" value="C" />C（内嵌中文字幕）</label>
+          <label><input type="checkbox" value="U" />U（无码）</label>
+        </fieldset>
+        <p class="player-tags-status" data-tags-status role="status"></p>
+        <div class="player-tags-actions">
+          <button type="button" data-tags-close>取消</button>
+          <button type="submit" disabled>保存</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="playerEpisodePicker" class="player-utility-dialog player-episode-picker" aria-labelledby="playerEpisodePickerTitle">
       <header>
         <h2 id="playerEpisodePickerTitle">选集</h2>
@@ -1049,7 +1061,7 @@
     <script src="/vendor/plyr/plyr.min.js"></script>
     <script type="module">
       try {
-        await import("/js/player-page.js?v=20261113-player-switch-time-01");
+        await import("/js/player-page.js?v=20261114-correct-tags-01");
       } finally {
         document.documentElement.classList.remove("app-module-loading");
       }

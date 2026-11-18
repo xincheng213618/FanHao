@@ -8,6 +8,7 @@ import {
 import { createPhotoReadingPositions } from "./photo-reading-positions.js";
 import { createGalleryImageOverview } from "./gallery-image-overview.js?v=20261113-photo-preview-01";
 import { routeUrl } from "../../js/router.js?v=20261113-series-episode-search-01";
+import { canManageWebLibrary } from "../../platform/accounts/session-context.js";
 
 const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
 const PHOTO_CATEGORY_LABELS = new Map([
@@ -86,10 +87,6 @@ export function createGalleryRenderer(deps) {
   const knownPhotoCardCounts = new WeakMap();
   const pendingPhotoMarks = new Set();
   const photoReadingPositions = createPhotoReadingPositions();
-  const renderContinueWatching = deps.createContinueWatching?.({
-    api,
-    playerUrl: item => galleryMediaPlayerUrl(item, 0, deps.galleryListRoute?.())
-  });
   const watchlist = deps.createMediaWatchlist?.({
     root: els.workGrid,
     isBrowsing: () => state.activeView === "gallery" && ["media", "movie", "tv"].includes(state.gallery.mode) && !state.gallery.media,
@@ -965,7 +962,8 @@ function renderGalleryControls(options = {}) {
     hierarchy.dataset.galleryControlRow = "facets";
     const maintenance = document.createElement("div");
     maintenance.className = "gallery-maintenance";
-    maintenance.append(refresh, status);
+    if (canManageWebLibrary(true)) maintenance.append(refresh);
+    maintenance.append(status);
 
     if (state.gallery.mode === "photo") {
       controls.classList.add("gallery-photo-controls");
@@ -1077,7 +1075,8 @@ function renderGalleryControls(options = {}) {
   }
   const maintenance = document.createElement("div");
   maintenance.className = "gallery-maintenance gallery-media-maintenance";
-  maintenance.append(refresh, status);
+  if (canManageWebLibrary(true)) maintenance.append(refresh);
+  maintenance.append(status);
   filterRow.append(maintenance);
   controls.append(searchRow);
   if (compactMediaBrowse) searchRow.append(createGalleryBrowseNav());
@@ -1198,7 +1197,6 @@ function resetGalleryRenderedState() {
 }
 
 function renderGalleryContent(content) {
-  renderContinueWatching?.(content, state.gallery);
   if (state.gallery.album) {
     renderPhotoReader(content);
   } else if (state.gallery.comic) {
@@ -2861,59 +2859,14 @@ function renderPagedImageLibrary(container) {
     renderPagedPhotoCollectionPage(container, list);
   } else if (state.gallery.photoView === "collections") {
     renderPagedImageLibrarySearchSummary(container, list);
-    appendPhotoContinueShelf(container);
     renderPagedPhotoCollectionsShelf(container, list);
   } else if (state.gallery.photoView === "people") {
     renderPagedImageLibrarySearchSummary(container, list);
     renderPagedPhotoPeopleShelf(container, list);
   } else {
     renderPagedImageLibrarySearchSummary(container, list);
-    appendPhotoContinueShelf(container);
     renderPagedPhotoShelf(container, list);
   }
-}
-
-function appendPhotoContinueShelf(container) {
-  const { category, subCategory, query, person, photoSite, photoDate } = state.gallery;
-  if (category !== "all" || subCategory && subCategory !== "all" || query || person && person !== "all"
-    || photoSite || photoDate && photoDate !== "all") return;
-  const positions = photoReadingPositions.recent().slice(0, 6);
-  if (!positions.length) return;
-  const section = document.createElement("section");
-  section.className = "gallery-photo-continue";
-  const title = document.createElement("h2");
-  title.textContent = "继续阅读";
-  const items = document.createElement("ul");
-  for (const position of positions) {
-    const li = document.createElement("li");
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.photoListCard = `resume:${position.id}`;
-    const name = document.createElement("strong");
-    name.textContent = position.title;
-    const page = document.createElement("span");
-    page.textContent = `第 ${formatNumber(position.page)} 张`;
-    button.append(name, page);
-    button.addEventListener("click", async (event) => {
-      if (!button.isConnected || button.disabled) return;
-      capturePhotoListDeparture(event);
-      const listReturn = { albumId: position.id, top: button.getBoundingClientRect().top, restoreFocus: false };
-      button.disabled = true;
-      try {
-        const album = await getGalleryPage().openPhotoSet(position.id, { listReturn });
-        if (!album || state.gallery.album !== album) return;
-        const resume = els.workGrid.querySelector(".gallery-photo-resume-button");
-        if (resume) {
-          if (document.activeElement === document.body) resume.focus({ preventScroll: true });
-          resume.click();
-        }
-      } finally { button.disabled = false; }
-    });
-    li.append(button);
-    items.append(li);
-  }
-  section.append(title, items);
-  container.append(section);
 }
 
 function refreshGallerySummaryContent(options) {
@@ -4410,7 +4363,7 @@ function readerToolbar(title, meta, onBack, options = {}) {
   const navigation = options.albumId ? createPhotoReaderNavigation(options.albumId) : null;
   if (navigation) actions.append(navigation.group);
   if (options.markAlbum) actions.append(createPhotoAlbumMarkButton(options.markAlbum));
-  if (options.albumId && ["local", "lan"].includes(state.accessMode)) actions.append(createPhotoRevealButton(options.albumId));
+  if (options.albumId && canManageWebLibrary(["local", "lan"].includes(state.accessMode))) actions.append(createPhotoRevealButton(options.albumId));
   const setFitWidth = (fitWidth) => {
     if (!bar.isConnected || state.activeView !== "gallery" || state.gallery.fitWidth === fitWidth) return;
     const viewer = bar.parentElement?.querySelector(".gallery-reader-images");
@@ -5605,7 +5558,7 @@ function photoReaderOptions(album) {
     sourceKey: albumId ? `photo:${albumId}` : "", previewUrl: album.coverUrl, fullImages: () => fullPhotoReaderImages({ id: albumId }),
     rememberPosition: photoPositionRecorder(album),
     refreshArchive: album.imageRevision ? (isCurrent, beforeReplace) => getGalleryPage().refreshPhotoReaderArchive(albumId, album.imageRevision, isCurrent, beforeReplace) : null,
-    saveCover: album.coverEditable && ["local", "lan"].includes(state.accessMode) ? (image, signal) => savePhotoReaderCover(albumId, image, signal) : null };
+    saveCover: album.coverEditable && canManageWebLibrary(["local", "lan"].includes(state.accessMode)) ? (image, signal) => savePhotoReaderCover(albumId, image, signal) : null };
 }
 
 function photoPositionRecorder(album) {
@@ -6177,7 +6130,7 @@ function createMovieInfoPanel(media, metadata = null, onBack = null) {
     doubanLink.textContent = "豆瓣";
     actions.append(doubanLink);
   }
-  if (!isTv && state.accessMode === "local" && openAdminScript) {
+  if (!isTv && canManageWebLibrary(state.accessMode === "local") && openAdminScript) {
     const calibrate = document.createElement("button");
     calibrate.type = "button";
     calibrate.className = "text-button";

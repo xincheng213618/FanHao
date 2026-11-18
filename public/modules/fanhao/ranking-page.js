@@ -1,5 +1,6 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 import { resolveWorkPage } from "./features/works/work-page-state.js";
+import { canManageWebLibrary } from "../../platform/accounts/session-context.js";
 
 const RANKING_DESKTOP_PAGE_SIZE = 64;
 const RANKING_MOBILE_PAGE_SIZE = 48;
@@ -267,7 +268,7 @@ export function createRankingPage(deps) {
     panel.title.textContent = data.label || "TOP250";
     panel.meta.textContent = data.updatedAt ? `更新于 ${formatDate(data.updatedAt) || data.updatedAt}` : "未缓存";
     panel.sourceLink.hidden = !state.rankingPageUrl;
-    panel.refreshButton.hidden = state.accessMode !== "local";
+    panel.refreshButton.hidden = !canManageWebLibrary(state.accessMode === "local");
     if (state.rankingPageUrl) panel.sourceLink.href = state.rankingPageUrl;
     else panel.sourceLink.removeAttribute("href");
   }

@@ -4,6 +4,7 @@
 // 所有业务逻辑、HTTP、audio 控制都在其它模块，这里不再重复实现。
 
 import { ensureMusicState } from "./state.js?v=20261113-music-track-sleep-01";
+import { canManageWebLibrary } from "../../platform/accounts/session-context.js";
 import { createMusicApi } from "./api.js?v=20261113-music-batch-remove-01";
 import { createMusicPlayer } from "./player/engine.js?v=20261113-music-track-sleep-01";
 import { createMusicActions } from "./actions.js?v=20261113-music-track-sleep-01";
@@ -763,7 +764,7 @@ export function createMusicPage(deps) {
     close.textContent = "×";
     close.setAttribute("aria-label", "关闭音乐资料库");
     close.addEventListener("click", closeLibraryDrawer);
-    drawerActions.append(scan);
+    if (canManageWebLibrary(true)) drawerActions.append(scan);
     if (!embedded) drawerActions.append(close);
     drawerHeader.append(drawerTitle, drawerActions);
     const libraryList = document.createElement("div");
@@ -794,7 +795,7 @@ export function createMusicPage(deps) {
     importPlaylistButton.className = "music-create-playlist";
     importPlaylistButton.textContent = "导入 M3U";
     importPlaylistButton.addEventListener("click", () => actions.importPlaylistM3uFromPrompt().catch(showError));
-    playlists.append(importPlaylistButton);
+    if (canManageWebLibrary(true)) playlists.append(importPlaylistButton);
 
     const languageList = document.createElement("div");
     languageList.className = "music-artist-list music-language-list";
@@ -959,6 +960,7 @@ export function createMusicPage(deps) {
       state.music.artistId,
       state.music.albumId,
       state.music.rescanning,
+      canManageWebLibrary(true),
       Number(totals.tracks || state.music.data?.total || 0),
       Number(totals.artists || 0),
       Number(totals.albums || 0),

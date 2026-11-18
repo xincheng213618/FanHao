@@ -1,8 +1,8 @@
-import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-06c1d7f13464";
-import { captureMediaTrail, mediaBackTarget } from "../../js/media-navigation-state.js?v=assets-06c1d7f13464";
-import { fetchJson } from "../../js/api.js?v=assets-06c1d7f13464";
+import { createChannelViews } from "../../platform/content-index/channel-views.js?v=assets-78764ed05056";
+import { captureMediaTrail, mediaBackTarget } from "../../js/media-navigation-state.js?v=assets-78764ed05056";
+import { fetchJson } from "../../js/api.js?v=assets-78764ed05056";
 import { isAccountOwnerCurrent } from "../../js/account-owner.js";
-import { createContinueShelf } from "./continue-shelf.js?v=assets-06c1d7f13464";
+import { createContinueShelf } from "./continue-shelf.js?v=assets-78764ed05056";
 import { createMediaWatchlist } from "./watchlist.js";
 
 export function createAndroidModule({ host }) {

@@ -45,6 +45,7 @@ try {
       await verifyShortVideoControls(browser);
       await verifyShortVideoSearchHints(browser);
       await verifyShortVideoSearchOverlap(browser);
+      await verifyShortVideoSearchRetry(browser);
       await verifyShortVideoControlsNegative(browser);
     } else if (process.argv.includes("--short-video-search-hints")) {
       assert(!suppliedBaseUrl, "short-video search checks require their own private fixture server");
@@ -66,6 +67,7 @@ try {
     } else if (process.argv.includes("--short-video-search")) {
       await verifyShortVideoControls(browser);
       await verifyShortVideoSearchHints(browser);
+      if (!suppliedBaseUrl) await verifyShortVideoSearchRetry(browser);
       await verifyAndroidRestartActionConvergence(browser);
     } else if (process.argv.includes("--fanhao-search-suggestions")) {
       await verifyFanhaoSearchSuggestions(browser);
@@ -617,6 +619,51 @@ async function verifyShortVideoFeedControl(browser, options = {}) {
   } finally { await fixture.close(); }
 }
 
+async function verifyShortVideoSearchRetry(browser) {
+  const fixture = await shortControlFixture(browser), { page, reads } = fixture;
+  const matches = (query) => (url) => url.pathname === '/api/short-videos' && url.searchParams.get('q') === query;
+  try {
+    await page.goto(`${baseUrl}/short-videos`, { waitUntil: 'domcontentloaded' });
+    const card = page.locator('.short-video-card').first();
+    await card.waitFor();
+    const oldCard = await card.elementHandle();
+    const input = page.locator(shortVideoSearchInput);
+    const submit = page.getByRole('button', { name: '搜索', exact: true });
+    const status = page.locator('.short-video-home-total');
+    const failure = fixture.hold(matches('claude'), 'private search failed');
+    await input.fill('claude');
+    await submit.click();
+    await shortControlRequest(failure);
+    assert.equal(await status.textContent(), '正在搜索…');
+    assert(await oldCard.evaluate(node => node.isConnected), 'the search must keep the former cards mounted while waiting');
+    await input.press('Enter');
+    await shortControlFrames(page);
+    assert.equal(reads.filter(({ url }) => matches('claude')(url)).length, 1, 'resubmitting a pending search must not issue a duplicate read');
+
+    failure.release();
+    await status.filter({ hasText: '搜索失败，请重试' }).waitFor();
+    assert(await oldCard.evaluate(node => node.isConnected), 'a failed search must leave the former cards available');
+    await submit.click();
+    await page.locator('.short-video-search-section-head.is-works').filter({ hasText: '条匹配作品' }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('q'), 'claude');
+    const searches = reads.filter(({ url }) => matches('claude')(url));
+    assert.equal(searches.length, 2, 'retrying the same keyword after a failure must issue a fresh request');
+    assert(searches.every(({ url }) => url.searchParams.get('source') === 'liked'));
+
+    await page.clock.install();
+    const stalled = fixture.hold(matches('stalled'));
+    await input.fill('stalled');
+    await input.press('Enter');
+    await shortControlRequest(stalled);
+    await page.clock.fastForward(12_100);
+    await status.filter({ hasText: '搜索失败，请重试' }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('q'), 'claude', 'a stalled request must not replace the accepted route');
+    stalled.release();
+    await fixture.clean();
+    console.log('short-video-search: pending status, same-keyword retry and stalled-read timeout passed');
+  } finally { await fixture.close(); }
+}
+
 async function verifyShortVideoAuthorControl(browser) {
   const fixture = await shortControlFixture(browser), { page, reads } = fixture;
   const selector = 'select[aria-label="作者作品状态筛选"]';
@@ -955,6 +1002,8 @@ async function verifyFanhaoRequestLifecycle(browser) {
           const pending = delayedPrefixIndex; delayedPrefixIndex = null; pending.arrived(); await pending.wait;
         }
         payload = { prefixes: [{ prefix: "ABC", localCount: 128 }], localWorkCount: 128 };
+      } else if (url.pathname === "/api/code-prefixes/FC2") {
+        payload = { codePrefix: { prefix: "FC2", localCount: 1 }, total: 1, works: [{ id: "fixture-fc2", title: "FC2 fixture", videoCount: 1 }] };
       } else if (url.pathname === "/api/code-prefixes/ABC") {
         const offset = Number(url.searchParams.get("offset") || 0);
         if (offset && delayedPrefixAppend) {
@@ -1073,14 +1122,16 @@ async function verifyFanhaoRequestLifecycle(browser) {
     assert.equal(await page.locator('.work-card[data-work-id^="obsolete-"]').count(), 0, "late pagination must not contaminate the changed filter");
 
     const index = delayed(); delayedPrefixIndex = index;
-    const codesTab = page.locator('[data-view="codes"]:not([data-code-prefix])');
-    await codesTab.click(); await index.requested;
+    const fc2Tab = page.locator('[data-view="codes"][data-code-prefix="FC2"]');
+    const prefixIndexButton = page.getByRole("button", { name: "返回番号索引" });
+    assert.equal(await page.locator('#fanhaoNavigation a[href="/fanhao/codes"]').count(), 0);
+    await fc2Tab.click(); await prefixIndexButton.click(); await index.requested;
     await page.locator('[data-view="favorites"]').click();
     await page.locator("#currentTitle", { hasText: "收藏" }).waitFor();
     const favoriteUrl = page.url(); index.release(); await page.waitForTimeout(50);
     assert.equal(page.url(), favoriteUrl, "a late prefix index must preserve the newer favorites URL");
     assert.equal(await page.locator("#currentTitle").textContent(), "收藏");
-    await codesTab.click();
+    await fc2Tab.click(); await prefixIndexButton.click();
     await page.locator(".code-prefix-row", { hasText: "ABC" }).click();
     await page.locator('.work-card[data-work-id="code-obsolete-0"]').waitFor();
     const prefixAppend = delayed(); delayedPrefixAppend = prefixAppend;
@@ -1261,7 +1312,8 @@ async function verifyFanhaoRequestLifecycle(browser) {
         recoveryScenario("recovery-new-query", [{ data: recoveryResults("current-new-query") }]);
         await submitRecoverySearch("recovery-new-query"); await page.locator('.work-card[data-work-id="current-new-query"]').waitFor();
       } else if (destination === "new view") {
-        await page.locator("#fanhaoNavigationButton").click(); await page.locator('[data-view="codes"]:not([data-code-prefix])').click(); await page.locator(".code-prefix-row", { hasText: "ABC" }).waitFor();
+        await page.locator("#fanhaoNavigationButton").click(); await fc2Tab.click();
+        await prefixIndexButton.click(); await page.locator(".code-prefix-row", { hasText: "ABC" }).waitFor();
       } else {
         await submitRecoverySearch(query); await panel.getByRole("alert").filter({ hasText: "合成当前同词新导航失败" }).waitFor();
       }
@@ -1292,14 +1344,17 @@ async function verifyFanhaoRequestLifecycle(browser) {
     assert(pending.isRequested(), `${pagingScenario.kind}: scrolling must request the next server page`);
   }
   async function openPagingView(kind) {
+    if (kind === "codes") {
+      await page.goto(`${baseUrl}/fanhao/codes?prefix=ABC`, { waitUntil: "domcontentloaded" });
+      return;
+    }
     await page.goto(`${baseUrl}/fanhao`, { waitUntil: "domcontentloaded" });
     await page.locator(".person-index-card", { hasText: people[0].name }).waitFor();
     if (kind === "people") await page.locator(".person-index-card", { hasText: people[0].name }).click();
     else {
-      const tab = page.locator(`[data-view="${kind}"]${kind === "codes" ? ":not([data-code-prefix])" : ""}`);
+      const tab = page.locator(`[data-view="${kind}"]`);
       if (!await tab.isVisible()) await page.locator("#fanhaoNavigationButton").click();
       await tab.click();
-      if (kind === "codes") await page.locator(".code-prefix-row", { hasText: "ABC" }).click();
       if (kind === "studios") await page.locator(".studio-card", { hasText: "请求测试片商" }).click();
     }
   }
@@ -4532,12 +4587,6 @@ async function verifyStandaloneStyles(browser) {
       required: ["/css/foundation.css", "/css/shell.css", "/modules/music/styles/foundation.css", "/modules/music/styles/library.css", "/modules/music/styles/player.css", "/modules/music/styles/responsive.css"],
       forbidden: ["/styles.css", "/modules/content-index/", "/modules/fanhao/", "/modules/tools/", "/modules/short-videos/", "/modules/novels/"],
       selector: ".music-layout"
-    },
-    {
-      path: "/tools",
-      required: ["/css/foundation.css", "/css/shell.css", "/modules/tools/styles.css"],
-      forbidden: ["/styles.css", "/modules/content-index/", "/modules/fanhao/", "/modules/short-videos/", "/modules/music/", "/modules/novels/"],
-      selector: ".game-library"
     }
   ];
 

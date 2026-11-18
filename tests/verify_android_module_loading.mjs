@@ -295,15 +295,23 @@ function errorSpecs() {
 }
 
 function verifyCatalogs(before, selected) {
-  assert.deepEqual(selected.androidModuleFallbackCatalog(), before.androidModuleFallbackCatalog());
+  const beforeCatalog = before.androidModuleFallbackCatalog();
+  const expectedCatalog = beforeCatalog.map(module => {
+    if (module.id !== "tools") return module;
+    const { title, ...android } = module.client.android;
+    return { ...module, title, client: { android } };
+  });
+  assert.deepEqual(selected.androidModuleFallbackCatalog(), expectedCatalog);
   const first = selected.androidModuleFallbackCatalog();
   assert.equal(first.length, 7);
   first[0].title = "changed"; first[0].client.android.entry = "./modules/changed.mjs";
-  assert.deepEqual(selected.androidModuleFallbackCatalog(), before.androidModuleFallbackCatalog(), "catalog copies isolate callers");
+  assert.deepEqual(selected.androidModuleFallbackCatalog(), expectedCatalog, "catalog copies isolate callers");
   for (const remote of [undefined, null, [], [{ id: "music", title: "Remote music", order: 5, client: { android: { bottomKey: "remote" } } },
     { id: "extension", order: 11, client: { android: { entry: "./modules/extension.mjs" } } },
     { id: "not-android", client: { web: { entry: "./elsewhere" } } }]]) {
-    assert.deepEqual(selected.mergeAndroidModuleCatalog(remote), before.mergeAndroidModuleCatalog(remote));
+    const expected = before.mergeAndroidModuleCatalog(remote).map(module => module.id === "tools"
+      ? expectedCatalog.find(item => item.id === "tools") : module);
+    assert.deepEqual(selected.mergeAndroidModuleCatalog(remote), expected);
     comparisons++;
   }
 }

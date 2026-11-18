@@ -1,19 +1,15 @@
-import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
 import { workCodeKey } from "../../../../../lib/code-parser.js";
 import { deriveWorkTraits } from "../../../../../lib/work-traits.js";
 import { intakeCode } from "../workflows/intake-catalog.js";
 import { assertFinished, inside, pathKey, VIDEO } from "../workflows/intake-files.js";
+import { ltxSyncError, importLtxSnapshot } from "./ltx-snapshot-import.js";
 
 const ED2K = /^ed2k:\/\/\|file\|([^|]+)\|(\d+)\|[a-f0-9]{32}\|/i;
 const MAGNET = /^magnet:\?/i;
 const SIDECAR_SUFFIX = /\.(?:(zh(?:-(?:cn|tw|hans|hant))?|en|ja|und)\.)?(?:srt|ass|ssa|vtt)$/i;
 const SKIP_DIRECTORY = /^(?:[.$]|CVTest$|Organized$|Recovery$|System Volume Information$)/i;
-const SYNC_SCRIPT = fileURLToPath(new URL("../../../../../tools/sync_ltx_catalog.ps1", import.meta.url));
-const execFileAsync = promisify(execFile);
 const HIDDEN_GENRES = new Set(["c7=28", "c7=348", "c7=83", "c7=390"]);
 
 function catalogLink(value, type) {
@@ -108,6 +104,23 @@ function catalogDetails(db, keys) {
     details.set(key, details.has(key) && details.get(key) !== detail ? "" : detail);
   }
   return details;
+}
+
+function catalogCovers(db, keys, resolveCovers) {
+  if (!db || !resolveCovers || !keys.size) return new Map();
+  const rows = db.prepare(`
+    SELECT wanted.value AS key, w.id
+    FROM json_each(?) wanted
+    CROSS JOIN works w ON w.code_search = wanted.value
+    ORDER BY w.id
+  `).all(JSON.stringify([...keys]));
+  const covers = resolveCovers(rows.map(({ id }) => id));
+  const byCode = new Map();
+  for (const { key, id } of rows) {
+    if (!byCode.has(key)) byCode.set(key, []);
+    byCode.get(key).push(...(covers.get(String(id)) || []));
+  }
+  return byCode;
 }
 
 function ratingPrior(items) {
@@ -236,22 +249,15 @@ async function collectDownloads(files, keys, incomingRoots, libraryRoots) {
   return complete;
 }
 
-function runCatalogSync(snapshotPath) {
-  const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  return execFileAsync(shell, ["-NoProfile", "-NonInteractive", "-File", SYNC_SCRIPT, "-Refresh", "-CachePath", snapshotPath], {
-    timeout: 60_000,
-    windowsHide: true
-  });
-}
-
-export function createLtxCatalogService({ snapshotPath, getDb, incomingRoots, libraryRoots, coverUrl,
-  videoProbeService, refreshSnapshot = runCatalogSync }) {
+export function createLtxCatalogService({ snapshotPath, getDb, incomingRoots, libraryRoots, coverUrl, resolveCovers,
+  videoProbeService }) {
   let cached;
   let loading;
   let syncing;
+  const shutdown = new AbortController();
 
-  async function syncSnapshot() {
-    await refreshSnapshot(snapshotPath);
+  async function syncSnapshot(catalog) {
+    await importLtxSnapshot(snapshotPath, catalog, { signal: shutdown.signal });
     // An earlier read may still be scanning local files against the old snapshot.
     cached = null;
     loading = null;
@@ -287,6 +293,7 @@ export function createLtxCatalogService({ snapshotPath, getDb, incomingRoots, li
     const files = new Map();
     const db = getDb();
     const details = catalogDetails(db, keys);
+    const covers = catalogCovers(db, keys, resolveCovers);
     const libraryChecked = await collectLibrary(files, keys, db);
     const downloadsChecked = await collectDownloads(files, keys, incomingRoots, libraryRoots);
     const payload = {
@@ -297,11 +304,16 @@ export function createLtxCatalogService({ snapshotPath, getDb, incomingRoots, li
       items: items.map(({ key, links, cover, ...item }) => {
         const copies = [...(files.get(key)?.values() || [])];
         const sizes = new Set(copies.map((file) => file.size));
+        const libraryCovers = covers.get(key) || [];
+        const embedded = libraryCovers.filter((url) => !url.startsWith("/media/remote-image?"));
+        const originals = libraryCovers.filter((url) => url.startsWith("/media/remote-image?"));
+        const [primaryCover = "", ...coverFallbacks] = [...new Set([...embedded, coverUrl(cover), ...originals].filter(Boolean))];
         return {
           ...item,
           detailUrl: item.detailUrl || details.get(key) || "",
           score: item.rawScore === null ? null : (item.votes * item.rawScore + prior.votes * prior.score) / (item.votes + prior.votes),
-          coverUrl: coverUrl(cover),
+          coverUrl: primaryCover,
+          ...(coverFallbacks.length ? { coverFallbacks } : {}),
           local: {
             library: copies.filter((file) => file.source === "library").length,
             downloads: copies.filter((file) => file.source === "download").length,
@@ -373,10 +385,14 @@ export function createLtxCatalogService({ snapshotPath, getDb, incomingRoots, li
       return { code: item.code, title: item.originalTitle || item.title, actors: item.actors, date: item.date,
         maker: item.maker, rating: item.rawScore, imageUrl: item.cover, subtitleUrl: item.subtitleUrl, matchesFile };
     },
-    sync() {
-      syncing ??= syncSnapshot().finally(() => { syncing = null; });
+    sync(catalog) {
+      shutdown.signal.throwIfAborted();
+      if (syncing) throw ltxSyncError("正在导入另一份目录，请稍后重试。", 409);
+      syncing = syncSnapshot(catalog).finally(() => { syncing = null; });
       return syncing;
     },
+    beginStop() { shutdown.abort(ltxSyncError("FanHao 正在停止，目录同步已取消。")); },
+    async stop() { await syncing?.catch(() => {}); },
     readLocalMedia,
     async read(options) { return (await readCatalog(options)).payload; }
   };

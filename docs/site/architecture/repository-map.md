@@ -58,7 +58,6 @@ sources:
 | 小说采集与阅读 | `src/modules/novels/server/runtime.js` | `store.js`、`collection-service.js`、客户端小说模块 |
 | 短视频列表、写入、删除 | `src/modules/short-videos/server/runtime.js` | 路由、worker client、存储或删除作业服务 |
 | 音乐扫描与播放 | `src/modules/music/server/runtime.js` | `scan-service.js`、worker、查询和状态存储 |
-| 行情数据 | `src/modules/market-dashboard/server/runtime.js` | `quote-service.js` 和对应 Web 页面 |
 | 采集器与下载任务 | `src/modules/short-videos/download-manager/` | 其独立 README、`manager_core/` 与自身配置 |
 
 完整模块状态见[模块清单](./modules.md)，服务端链路见[架构总览](./overview.md)。
@@ -76,7 +75,7 @@ Android 宿主是 `android-client/www/app.js`，模块装载入口是 `android-c
 | 产物 | 权威来源 | 更新方式 |
 | --- | --- | --- |
 | `public/short-video-app.min.js` | `public/short-video-app.js` 及其导入 | `tools/build_short_video_web.mjs` 构建并同步 HTML 中的内容哈希 |
-| Android 同步游戏资源 | `public/games/` | `android-client/scripts/sync-shared-assets.mjs` 按声明同步 |
+| Android 账号表单 | `public/platform/accounts/` | `android-client/scripts/sync-shared-assets.mjs` 同步 |
 | Android APK | WebView 资源与原生工程 | 使用 Android 构建脚本，不手工改 APK |
 | 索引、缩略图和播放缓存 | 模块存储与工具 | 使用对应重建或失效机制，不把缓存当源文件 |
 

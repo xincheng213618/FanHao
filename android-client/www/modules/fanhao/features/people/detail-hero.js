@@ -1,5 +1,5 @@
 import { formatNumber } from "../../../../js/format.js";
-import { absoluteUrl, createFallbackCover, loadPreviewImage, portraitUrlForPerson } from "../../../../js/image.js?v=assets-06c1d7f13464";
+import { absoluteUrl, createFallbackCover, loadPreviewImage, portraitUrlForPerson } from "../../../../js/image.js?v=assets-78764ed05056";
 
 export function createPersonDetailHero(person, options = {}) {
   const activeUrl = options.activeUrl || "";

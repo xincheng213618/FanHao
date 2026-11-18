@@ -192,7 +192,7 @@ assert(standaloneHost.includes("const startupRoute = normalizeRoute(routeFromUrl
 assert(!standaloneHost.includes("window.requestAnimationFrame(resolve)"), "standalone startup must not reveal an intermediate loading DOM after one animation frame");
 assert(standaloneHost.includes('["gallery", "manga", "music", "novels"].includes(state.activeView)') && standaloneHost.includes("? applyRouteNow(next, owner)") && standaloneHost.includes("routeWork.catch(() => {}).then(() => applyRouteNow(next, owner))"), "reader history restores must supersede obsolete I/O while other routes remain serialized");
 assert(standaloneHost.includes("routeOwner?.supersede()") && standaloneHost.includes("Promise.race([applied, superseded])") && standaloneHost.includes("if (routeOwner !== owner) return"), "superseded route work must release startup waits and retain its stale owner guard");
-for (const modulePath of ["content-index/gallery-page", "content-index/gallery-renderer", "music/music-page", "novels/novel-page", "tools/tools-page"]) {
+for (const modulePath of ["content-index/gallery-page", "content-index/gallery-renderer", "music/music-page", "novels/novel-page"]) {
   assert(standaloneHost.includes(`modules/${modulePath}.js`), `standalone host must route ${modulePath}`);
   assert(!webApp.includes(`modules/${modulePath}`), `FanHao runtime must not load ${modulePath}`);
 }
@@ -230,7 +230,7 @@ assert(playerHtmlSource.includes('await import("/js/player-page.js?v=') && playe
 assert(playerPageSource.lastIndexOf("await load();") > playerPageSource.indexOf("async function load()"), "the standalone player must await its initial payload after all module declarations are initialized");
 assert(playerPageSource.includes("setVideoSourceAt(resumePosition, { autoPlay: options.autoPlay !== false });"), "standalone player startup must begin playback without a second user action");
 assert(playerPageSource.includes('name === "NotAllowedError" && options.allowMutedFallback'), "standalone player must keep autoplay running when the browser initially blocks sound");
-assert(playerPageSource.includes("capturePlaybackSnapshot()") && playerPageSource.includes("await delay(LOCAL_MARKER_RELEASE_DELAY_MS);") && playerPageSource.includes("await restorePlaybackSnapshot(playbackSnapshot);"), "standalone player marker changes must release the media handle and resume the same playback");
+assert(playerPageSource.includes("const snapshot = capturePlaybackSnapshot();") && playerPageSource.includes("await delay(LOCAL_MARKER_RELEASE_DELAY_MS);") && playerPageSource.includes("await restorePlaybackSnapshot(owner.playback);"), "standalone player marker changes must release the media handle and resume the same playback");
 assert(playerPageSource.includes('createMoveField("搜索人物", existingInput)') && playerPageSource.includes("searchMovePeople(movePeople, query)") && playerPageSource.includes("submit.disabled = !selectedExistingPerson"), "standalone player migration must select existing people by name rather than requiring an id");
 assert(workActionsSource.includes("captureFavoriteSnapshot") && workActionsSource.includes("restoreFavoriteSnapshot"), "optimistic favorite feedback must roll back cleanly after API failures");
 assert(peoplePageSource.includes("const personIndexRecords = new WeakMap()") && peoplePageSource.includes("bindPeopleIndexInteractions();"), "person cards must keep navigation records behind one persistent interaction surface");
@@ -371,7 +371,7 @@ assert(videoProbeSource.includes("const prewarmQueue = []"), "visible playback p
 assert(videoProbeSource.includes("prewarmActive < prewarmConcurrency"), "background playback probes must keep concurrency bounded");
 assert(videoProbeSource.includes("const resolvedProbeByFile = new Map()"), "prepared playback probes must avoid repeated slow file-stat calls");
 assert(videoProbeSource.includes("if (options.replaceQueued)"), "newly visible playback probes must be able to discard stale queued work");
-for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage", "createToolsPage"]) {
+for (const factoryName of ["createGalleryPage", "createGalleryRenderer", "createNovelPage", "createMusicPage"]) {
   assert(!webApp.includes(factoryName), `FanHao runtime must not compose ${factoryName}`);
 }
 const staticFiles = read("src/platform/server/static-files.js");
@@ -861,7 +861,8 @@ assert(androidBaseStyles.includes("--mobile-accent: #2f80ed") && androidFanhaoSt
 assert(/\.work-cover-frame > \.work-thumb,[\s\S]*?\.work-cover-frame > img\s*\{[\s\S]*?object-fit: cover;[\s\S]*?object-position: right center;/.test(androidListStyles), "Android FanHao work-grid covers must crop from the right so composite back-front artwork keeps the portrait front cover visible");
 assert(androidClientVersion && androidIndexHtml.includes(`app.js?v=${androidClientVersion}`) && androidApp.includes(`config.js?v=${androidClientVersion}`) && androidApp.includes(`cache.js?v=${androidClientVersion}`) && androidApp.includes(`dom.js?v=${androidClientVersion}`) && androidCacheSource.includes(`config.js?v=${androidClientVersion}`), "Android behavior must refresh the complete application and response-cache identity chain");
 assert(androidToolModule.includes(`tool-views.js?v=${androidClientVersion}`) && androidToolModule.includes("openSettings: host.ui.openSettings"), "Android My page must load the current native grouped view and receive the shared settings action");
-assert(androidToolViews.includes('header.className = "tools-profile-header"') && androidToolViews.includes('list.className = "tools-native-list"') && androidToolViews.includes('title.textContent = "小游戏"') && androidToolViews.includes('meta.textContent = "离线可用"'), "Android My page must use a native header and one-level grouped rows for settings, tools, and games");
+assert(androidToolViews.includes('header.className = "tools-profile-header"') && androidToolViews.includes('list.className = "tools-native-list"') && androidToolViews.includes('summary.textContent = "本机工具与实验"'), "Android My page must use a native header and grouped rows for settings and local tools");
+assert(![androidIndexHtml, androidApp, androidToolViews].some(source => /小游戏|\/games\//u.test(source)), "Android My page must no longer advertise or link to games");
 assert(!androidToolViews.includes("createTextWorkspace") && !androidToolViews.includes("文本整理") && !androidToolViews.includes("/api/tools/txt-format") && !androidToolStyles.includes("txt-native"), "Android My page must remove the complete text-formatting surface instead of only hiding its file picker");
 assert(androidToolViews.includes('openSettings({ section: "storage", trigger })') && androidToolStyles.includes(".tool-native-row + .tool-native-row::before") && !androidToolStyles.includes(".tool-launch-card"), "Android My page must expose direct settings and storage rows without nested launch cards");
 assert(androidIndexHtml.includes('id="appUpdateButton"') && !androidIndexHtml.includes('id="checkAppUpdateButton"') && !androidIndexHtml.includes('id="installAppUpdateButton"'), "Android settings must expose exactly one application-update button");
@@ -1369,7 +1370,7 @@ const fanhaoStyles = read("public/modules/fanhao/styles.css");
 const rootStyles = read("public/styles.css");
 const personCardStyles = /\.person-index-card\s*\{([\s\S]*?)\n\}/.exec(fanhaoStyles)?.[1] || "";
 assert(!personCardStyles.includes("content-visibility"), "people cards must not flash in while scrolling");
-assert(rootStyles.includes('modules/fanhao/styles.css?v=20261113-ranking-coverage-01'), "FanHao style changes must use a fresh browser cache key");
+assert(rootStyles.includes('modules/fanhao/styles.css?v=20261114-person-search-01'), "FanHao style changes must use a fresh browser cache key");
 assert(webRankingPage.includes("limit: String(rankingPageSize())"), "Web rankings must request a bounded first page");
 assert(webRankingPage.includes("const RANKING_DESKTOP_PAGE_SIZE = 64"), "Web rankings must keep the desktop first page compact");
 assert(webRankingPage.includes("const RANKING_MOBILE_PAGE_SIZE = 48"), "Web rankings must use a smaller mobile first page");
@@ -1483,7 +1484,7 @@ const workSearchIndexServiceSource = read("src/modules/fanhao/server/works/work-
 assert(workInfoServiceSource.includes("prewarmDetailRows(workIds"), "work-info details must support page-level batch hydration");
 assert(workQueryServiceSource.includes('normalizeWorkCategory(url.searchParams.get("category"))') && workQueryServiceSource.includes("categorySummaryItems(stamp)"), "work list responses must carry the selected category and all four category counts");
 assert(workQueryServiceSource.includes("categorySummaryForWorks") && workQueryServiceSource.includes("summarizeWorkCategories(works"), "actor filmographies must reuse the authoritative work category classifier");
-assert(workQueryServiceSource.includes("const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset])") && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages must preserve field boundaries and source partitions must use versioned bounded caches");
+assert(workQueryServiceSource.includes("const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset, excludeWestern])") && workQueryServiceSource.includes("categorySourcesCache?.stamp === stamp"), "category work pages must preserve field boundaries and source partitions must use versioned bounded caches");
 assert(workQueryServiceSource.includes('const matchesWestern = workMatcher("western")')
   && workQueryServiceSource.includes("classifyWorkCategory(work, { isWestern: matchesWestern(work) })"), "western-root membership must feed the shared work category classifier");
 assert(workQueryServiceSource.includes("peopleScopeService.workMatchesDirect?.(work, \"western\")") && peopleScopeServiceSource.includes("function workMatchesDirect(work, scope)"), "small result category summaries must avoid building the full scope index");
@@ -1524,7 +1525,7 @@ assert(workQueryServiceSource.includes("prewarmPersonMerge();"), "person merge m
 assert(workQueryServiceSource.includes("const searchSourceCache = new Map()"), "search paging and return navigation must reuse matched work sources");
 assert(workQueryServiceSource.includes("const source = cachedSearchSource(rawQuery"), "search responses must use the versioned matched-work cache");
 assert(workQueryServiceSource.includes("source.facetsStamp !== stamp") && workQueryServiceSource.includes("source.facetsByCategory.clear()"), "search category facets must only refresh after user state changes");
-assert(workQueryServiceSource.includes("cachedSearchCategory(source, category)") && workQueryServiceSource.includes("source.categories ??= categorySummaryForWorks(source.works)") && workQueryServiceSource.includes("[rawQuery, category, filter, sort, limit, offset]"), "search responses must filter and cache by the selected work category while reusing all category counts from the matched source");
+assert(workQueryServiceSource.includes("cachedSearchCategory(source, category)") && workQueryServiceSource.includes("source.categories ??= categorySummaryForWorks(source.works)") && workQueryServiceSource.includes("[rawQuery, category, filter, sort, limit, offset, excludeWestern]"), "search responses must filter and cache by the selected work category while reusing all category counts from the matched source");
 assert(workQueryServiceSource.includes("const exactPersonSearch ="), "exact person searches must bypass the full local text scan");
 assert(workCodeIndexServiceSource.includes("return { stamp, keys, rows, searchRows, prefixRows }")
   && workCodeIndexServiceSource.includes("if (result.cacheable !== false) localWorkCodeIndexCache = result.value"),

@@ -29,7 +29,7 @@ import { createLatestRequestGate } from "./modules/fanhao/latest-request.js?v=20
 import { adminUrl } from "./js/admin-navigation.js?v=20260727-admin-merge-01";
 import { createLazyPersonProfile } from "./modules/fanhao/lazy-person-profile.js?v=20260717-fanhao-lazy-person-01";
 import { PEOPLE_SCOPE_NAMES, URL_VIEW_NAMES, normalizeFanhaoSearchSort, normalizeRoute, routeFromUrl, routeUrl } from "./js/router.js?v=20261113-search-route-01";
-import { captureWebAccount } from "./platform/accounts/session-context.js";
+import { canManageWebLibrary, captureWebAccount } from "./platform/accounts/session-context.js";
 
 const browseTextCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -208,7 +208,7 @@ const codePrefixPage = createCodePrefixPage({
 const personProfilePage = createLazyPersonProfile({
   els,
   loadPersonProfile: async () => {
-    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261113-people-shortcuts-01");
+    const { createPersonProfile } = await import("./modules/fanhao/person-profile.js?v=20261114-person-search-01");
     return createPersonProfile({
       api,
       coverUrl,
@@ -855,7 +855,7 @@ async function applyRoute(route, options = {}) {
   const navigationIntent = beginNavigation();
   const isCurrent = () => navigationIntent === navigationSequence;
   const next = normalizeRoute(route);
-  if (["gallery", "novels", "music", "tools", "shortVideos"].includes(next.view)) {
+  if (["gallery", "novels", "music", "shortVideos"].includes(next.view)) {
     window.location.replace(routeUrl(next, { initialParams }));
     return;
   }
@@ -1033,7 +1033,7 @@ async function loadLibrary(options = {}) {
     state.accessMode = data.access?.mode || "local";
     state.accessHints = data.access?.hints || {};
     state.uiConfig = normalizeUiConfig(data.uiConfig || state.uiConfig);
-    if (els.topAdminLink) els.topAdminLink.hidden = state.accessMode !== "local";
+    if (els.topAdminLink) els.topAdminLink.hidden = !canManageWebLibrary();
     if (els.missingLocalToggle) els.missingLocalToggle.checked = showMissingLocalForCurrentView();
     if (els.collectionToggle) els.collectionToggle.checked = showCompilationsForCurrentView();
     const defaultWorkPageSize = WORK_PAGE_SIZE_BY_ACCESS[state.accessMode] || WORK_PAGE_SIZE_BY_ACCESS.remote;
@@ -1239,7 +1239,7 @@ function syncNavigationState(view = state.activeView) {
 function setActiveView(view, options = {}) {
   options = { ...options, navigationIntent: beginNavigation(options) };
   view = URL_VIEW_NAMES.has(view) ? view : "people";
-  if (["gallery", "novels", "music", "tools", "shortVideos"].includes(view)) {
+  if (["gallery", "novels", "music", "shortVideos"].includes(view)) {
     window.location.assign(routeUrl({ view }, { initialParams }));
     return;
   }
@@ -1677,62 +1677,86 @@ function renderPersonWorkSearch({ loading = false, error = false } = {}) {
   if (state.activeView !== "people" || !personId) return;
   const scope = state.peopleScope || "main";
   let controls = personWorkSearchControls;
-  if (controls?.form.parentNode !== els.statsRow || controls.personId !== personId || controls.scope !== scope) {
+  if (controls?.form.parentNode !== els.personProfile || controls.personId !== personId || controls.scope !== scope) {
     controls?.form.remove();
     const form = document.createElement("form");
     form.className = "person-work-search-form";
     form.setAttribute("role", "search");
     form.setAttribute("aria-label", "当前人物作品查找");
+    const field = document.createElement("div");
+    field.className = "search-box work-search-field person-work-search-field";
+    const icon = document.createElement("span");
+    icon.className = "work-search-icon";
+    icon.setAttribute("aria-hidden", "true");
     const input = document.createElement("input");
     input.type = "search";
     input.maxLength = 120;
+    input.autocomplete = "off";
+    input.enterKeyHint = "search";
     input.placeholder = "查找当前人物的番号或标题";
     input.setAttribute("aria-label", "当前人物的番号或标题");
-    const submit = document.createElement("button");
-    submit.type = "submit";
-    submit.className = "stat-filter-chip";
-    submit.textContent = "查找";
     const clear = document.createElement("button");
     clear.type = "button";
-    clear.className = "stat-filter-chip";
-    clear.textContent = "清除搜索";
+    clear.className = "person-work-search-clear";
+    clear.setAttribute("aria-label", "清除搜索");
+    clear.textContent = "×";
+    clear.hidden = true;
     const status = document.createElement("span");
     status.className = "person-work-search-status";
     status.setAttribute("role", "status");
-    controls = { form, input, clear, status, personId, scope, committed: null };
+    controls = { form, input, clear, status, personId, scope, committed: null, navigationIntent: null };
     personWorkSearchControls = controls;
     let composing = false;
-    input.addEventListener("compositionstart", () => { composing = true; });
-    input.addEventListener("compositionend", () => { composing = false; });
-    function submitQuery(value) {
+    let timer;
+    function submitQuery() {
+      window.clearTimeout(timer);
       if (state.activeView !== "people" || state.selectedPersonId !== personId
-        || (state.peopleScope || "main") !== scope || form.parentNode !== els.statsRow) return;
-      const query = String(value || "").trim().slice(0, 120).toWellFormed();
-      if (query === state.personWorkQuery) {
-        input.value = query;
-        return;
-      }
+        || (state.peopleScope || "main") !== scope || form.parentNode !== els.personProfile) return;
+      const query = input.value.trim().slice(0, 120).toWellFormed();
+      if (query === state.personWorkQuery) return;
       const navigationIntent = beginNavigation();
       pushRoute({ personWorkQuery: query });
       const options = { navigationIntent, resetFilter: false, personWorkQuery: query, skipRoute: true };
       void readPersonWorksForSearch(personId, options);
     }
+    function queueQuery() {
+      clear.hidden = !input.value;
+      window.clearTimeout(timer);
+      if (composing) return;
+      const owner = navigationSequence;
+      timer = window.setTimeout(() => {
+        if (owner === navigationSequence) submitQuery();
+      }, 300);
+    }
+    input.addEventListener("input", queueQuery);
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+      window.clearTimeout(timer);
+    });
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      queueQuery();
+    });
     form.addEventListener("submit", event => {
       event.preventDefault();
-      if (!composing) submitQuery(input.value);
+      if (!composing) submitQuery();
     });
     clear.addEventListener("click", () => {
-      if (document.activeElement === clear) input.focus({ preventScroll: true });
-      submitQuery("");
+      input.value = "";
+      input.focus({ preventScroll: true });
+      clear.hidden = true;
+      submitQuery();
     });
-    form.append(input, submit, clear, status);
-    els.statsRow.prepend(form);
+    field.append(icon, input, clear);
+    form.append(field, status);
+    els.personProfile.append(form);
   }
   const query = state.personWorkQuery || "";
-  if (controls.committed !== query) {
+  if (controls.committed !== query || controls.navigationIntent !== navigationSequence) {
     controls.committed = query;
-    controls.input.value = query;
-    controls.clear.hidden = !query;
+    controls.navigationIntent = navigationSequence;
+    if (controls.input.value.trim() !== query) controls.input.value = query;
+    controls.clear.hidden = !controls.input.value;
   }
   const statusText = query && !error ? loading ? "正在查找" : `${formatNumber(state.personWorksTotal)} 部匹配` : "";
   if (controls.status.textContent !== statusText) controls.status.textContent = statusText;
@@ -1801,8 +1825,7 @@ function renderWorkStatsContent(content, works) {
   let controls = els.statsRow.querySelector(":scope > .work-browse-controls");
   if (controls?.dataset.workStatsContext !== workStatsContext()) controls = null;
   const search = state.activeView === "favorites" ? els.statsRow.querySelector(":scope > .favorite-search-form")
-    : state.activeView === "history" ? els.statsRow.querySelector(":scope > .history-search-form")
-    : state.activeView === "people" && state.selectedPersonId ? els.statsRow.querySelector(":scope > .person-work-search-form") : null;
+    : state.activeView === "history" ? els.statsRow.querySelector(":scope > .history-search-form") : null;
   // Removing the sort group's ancestor would close a native picker and blur it.
   for (const child of [...els.statsRow.children]) if (child !== controls && child !== search && !content.includes(child)) child.remove();
   for (const node of content) if (node.parentElement !== els.statsRow) els.statsRow.insertBefore(node, controls || search);
@@ -1883,7 +1906,7 @@ function appendAdvancedWorkFilters(wrap, sort, existing, traits, paneId) {
 }
 
 function isPersonBulkDeleteAvailable() {
-  return state.activeView === "people" && Boolean(state.selectedPersonId) && isTrustedNetworkFeatureAvailable();
+  return state.activeView === "people" && Boolean(state.selectedPersonId) && canManageWebLibrary(isTrustedNetworkFeatureAvailable());
 }
 
 function isPersonBulkDeleteActive() {
@@ -3099,7 +3122,7 @@ function createWorkCard(work, index = 0) {
     magnet.title = "资料来源标记有磁链，未验证当前下载可用性。中字磁链仅表示资源资料线索，不代表本地文件有字幕。";
     coverBottom.append(magnet);
   }
-  if (work.missingLocal && state.accessMode === "local") {
+  if (work.missingLocal && canManageWebLibrary(state.accessMode === "local")) {
     const compilationButton = document.createElement("button");
     compilationButton.type = "button";
     compilationButton.className = "cover-badge inline-rule-button";

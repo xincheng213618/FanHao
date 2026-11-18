@@ -1,5 +1,6 @@
 import { decodeShortVideoDetailSegment, SHORT_VIDEO_RESERVED_DETAIL_SEGMENTS } from "./reserved-routes.js";
 import { sendShortVideoPublicError } from "./public-errors.js";
+import { shortVideoCommentOwner } from "./comments-repository.js";
 
 export async function routeShortVideoApi(req, res, url, deps) {
   const { listVideos, notFound, onMutation, onWatch, onWatchMutation, readJsonBody, recordWatch, refreshLikeDistribution, requestSignal, requireLocalAdmin, sendJson, shortVideoStore } = deps;
@@ -336,7 +337,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   const commentsMatch = /^\/api\/short-videos\/([^/]+)\/comments$/.exec(url.pathname);
   if (commentsMatch && req.method === "GET") {
     try {
-      const data = shortVideoStore.localComments(decodeURIComponent(commentsMatch[1]));
+      const data = shortVideoStore.localComments(decodeURIComponent(commentsMatch[1]), shortVideoCommentOwner(req.authenticatedUser));
       if (!data) {
         notFound(res);
         return true;
@@ -351,7 +352,7 @@ export async function routeShortVideoApi(req, res, url, deps) {
   if (commentsMatch && req.method === "POST") {
     try {
       const body = await readJsonBody(req);
-      sendJson(res, 201, shortVideoStore.createLocalComment(decodeURIComponent(commentsMatch[1]), body || {}));
+      sendJson(res, 201, shortVideoStore.createLocalComment(decodeURIComponent(commentsMatch[1]), body || {}, shortVideoCommentOwner(req.authenticatedUser)));
     } catch (error) {
       sendShortVideoPublicError(res, sendJson, error, "本地评论保存失败");
     }
@@ -363,7 +364,8 @@ export async function routeShortVideoApi(req, res, url, deps) {
     try {
       sendJson(res, 200, shortVideoStore.deleteLocalComment(
         decodeURIComponent(commentMatch[1]),
-        decodeURIComponent(commentMatch[2])
+        decodeURIComponent(commentMatch[2]),
+        shortVideoCommentOwner(req.authenticatedUser)
       ));
     } catch (error) {
       sendShortVideoPublicError(res, sendJson, error, "本地评论删除失败");

@@ -66,7 +66,6 @@ sources:
   - src/modules/music/server/facets.js
   - src/modules/music/server/constants.js
   - src/modules/music/server/scan.js
-  - src/modules/market-dashboard/server/quote-service.js
   - src/platform/server/library-path-safety.js
   - src/platform/server/media-stream-service.js
   - src/platform/server/file-server.js
@@ -162,7 +161,6 @@ module-registry.js：依次调用模块 API 路由
 | 下载队列与下载记录 | 下载管理器自身的 `data/douyin_downloads.sqlite` | 独立下载管理器 |
 | 番号收藏、播放等状态 | 访客 `data/user-state.json`；登录账号 `data/account-user-state.sqlite` | 对应用户状态服务 |
 | 本地媒体内容 | 配置的库根目录 | 文件系统；数据库保存索引与映射 |
-| 行情 | 外部行情来源与服务内缓存 | 行情服务，不是本地媒体数据库 |
 
 不能把这些位置概括为“一个数据库”。复制主库不能代替完整备份，也不能推断外部媒体、下载记录、图片库或凭据已经随之迁移。
 

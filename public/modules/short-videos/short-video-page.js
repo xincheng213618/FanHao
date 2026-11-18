@@ -1,4 +1,5 @@
 import { createShortVideoSearchModule } from "./search/index.js?v=20260710-short-video-search-01";
+import { canManageWebLibrary } from "../../platform/accounts/session-context.js";
 import { createShortVideoActionsController } from "./actions-controller.js?v=20261027-interaction-state-01";
 import { createShortVideoPanelLoadingController } from "./panel-loading-controller.js?v=20261027-panel-loading-01";
 import { createShortVideoFullscreenController } from "./fullscreen-controller.js?v=20261027-fullscreen-01";
@@ -187,6 +188,7 @@ export function createShortVideoPage(deps) {
   let shortVideoListRequestId = 0;
   let acceptedAuthorScope = null;
   let failedAuthorScope = null;
+  let failedVideoSearchScope = null;
   let searchUsersRequest = null;
   let shortVideoOpenRequestId = 0;
   let shortVideoOpenReadController = null;
@@ -668,6 +670,7 @@ export function createShortVideoPage(deps) {
   function invalidateShortVideoListWork() {
     collectionsController.cancelReads?.();
     shortVideoListRequestId += 1;
+    failedVideoSearchScope = null;
     cancelSearchUsers();
     shortVideoOpenRequestId += 1;
     shortVideoOpeningId = "";
@@ -706,9 +709,10 @@ export function createShortVideoPage(deps) {
     return SHORT_VIDEO_LOAD_STALE;
   }
 
-  function handleShortVideoListFailure(error, owner) {
+  function handleShortVideoListFailure(error, owner, search = false) {
     if (!ownsShortVideoListOwner(owner)) return staleShortVideoListResult(owner);
     if (owner.authorIndex && !owner.append && needsAuthorFirstPageRetry()) failedAuthorScope = owner.scope;
+    if (search && !owner.append && !owner.authorIndex) failedVideoSearchScope = owner.scope;
     state.shortVideo.loading = false;
     state.shortVideo.loadingMore = false;
     state.shortVideo.authorLoadingMore = false;
@@ -729,7 +733,10 @@ export function createShortVideoPage(deps) {
       shortVideoOpeningId = "";
       shortVideoOpenError = "";
     }
-    if (!append) cancelSearchUsers();
+    if (!append) {
+      failedVideoSearchScope = null;
+      cancelSearchUsers();
+    }
     const preserveHomeDuringLoad = preserveShortVideoHomeDuringLoad(append);
     if (!append && !shortVideoListCards) {
       ensureShortVideoListCards().catch((error) => console.warn(error));
@@ -815,7 +822,7 @@ export function createShortVideoPage(deps) {
       }
       return;
     }
-    if (append && (state.shortVideo.loading || state.shortVideo.loadingMore || !state.shortVideo.data?.hasMore)) return;
+    if (append && (state.shortVideo.loading || state.shortVideo.loadingMore || failedVideoSearchScope !== null || !state.shortVideo.data?.hasMore)) return;
     const requestId = ++shortVideoListRequestId;
     const owner = captureShortVideoListOwner(requestId, append);
     const captureListPerformance = document.documentElement.dataset.shortVideoPerfCapture === "1";
@@ -875,12 +882,16 @@ export function createShortVideoPage(deps) {
         if (!shortVideoListHasViewer()) renderView();
       }).catch(() => {});
     }
-    const videosRead = api(`/api/short-videos?${params}`);
+    const search = !append && (options.search || Boolean(state.shortVideo.query));
+    const videosUrl = `/api/short-videos?${params}`;
+    const videosRead = search
+      ? runShortVideoRead(signal => api(videosUrl, { signal }), { timeoutMessage: "搜索超时，请重试" })
+      : api(videosUrl);
     const usersRead = !append && state.shortVideo.query && !isShortVideoAuthorDetailPage()
       ? startSearchUsers(state.shortVideo.query) : null;
     const data = await settleShortVideoLoad(videosRead, currentRequest).catch(error => {
       cancelSearchUsers(usersRead);
-      return handleShortVideoListFailure(error, owner);
+      return handleShortVideoListFailure(error, owner, search);
     });
     if (data === SHORT_VIDEO_LOAD_STALE) {
       cancelSearchUsers(usersRead);
@@ -1013,7 +1024,7 @@ export function createShortVideoPage(deps) {
   function startSearchUsers(query) {
     const controller = new AbortController();
     const params = new URLSearchParams({ q: query, limit: "6", offset: "0" });
-    const result = api(`/api/short-videos/authors?${params}`, { signal: controller.signal })
+    const result = runShortVideoRead(signal => api(`/api/short-videos/authors?${params}`, { signal }), { signal: controller.signal })
       .then(result => ({
         users: result.authors || [],
         usersTotal: Number(result.total || 0),
@@ -1407,7 +1418,7 @@ export function createShortVideoPage(deps) {
     if (!home) return false;
     home.setAttribute("aria-busy", "true");
     releaseUnusedShortVideoPreloads();
-    syncShortVideoHomeToolbar(home.querySelector(".short-video-home-toolbar"));
+    syncShortVideoHomeToolbar(home.querySelector(".short-video-home-toolbar"), undefined, true);
     return true;
   }
 
@@ -1881,14 +1892,16 @@ export function createShortVideoPage(deps) {
       state.shortVideo.media = "all";
       state.shortVideo.quality = "all";
     }
-    if (!globalScopeChanged && query === (state.shortVideo.query || "") && !state.shortVideo.topic && !state.shortVideo.sound && state.shortVideo.data) return;
+    const sameSearch = !globalScopeChanged && query === (state.shortVideo.query || "") && !state.shortVideo.topic && !state.shortVideo.sound;
+    if (sameSearch && (state.shortVideo.loading || (state.shortVideo.data
+      && failedVideoSearchScope !== shortVideoListScope() && failedAuthorScope !== shortVideoListScope()))) return;
     state.shortVideo.query = query;
     state.shortVideo.topic = "";
     state.shortVideo.sound = "";
     state.shortVideo.soundInfo = null;
     state.shortVideo.current = null;
     clearShortVideoDeleteSelection();
-    loadVideos({ replaceRoute: !options.pushRoute }).catch(showError);
+    loadVideos({ replaceRoute: !options.pushRoute, search: true }).catch(showError);
   }
 
   function commitShortVideoTopic(value) {
@@ -2103,12 +2116,13 @@ export function createShortVideoPage(deps) {
           : renderDeleteSelectionActions(data);
     const total = document.createElement("div");
     total.className = "short-video-home-total";
+    total.setAttribute("role", "status");
     toolbar.append(tabs, actions, total);
     syncShortVideoHomeToolbar(toolbar, data);
     return toolbar;
   }
 
-  function syncShortVideoHomeToolbar(toolbar, data = state.shortVideo.data || {}) {
+  function syncShortVideoHomeToolbar(toolbar, data = state.shortVideo.data || {}, loading = state.shortVideo.loading) {
     if (!toolbar) return;
     const activeSource = isShortVideoAuthorDetailPage() ? state.shortVideo.authorIndexSource : (state.shortVideo.source || "liked");
     for (const button of toolbar.querySelectorAll(".short-video-source-tab")) {
@@ -2124,13 +2138,13 @@ export function createShortVideoPage(deps) {
       if (state.shortVideo.source === "following") {
         const scopeTotal = state.shortVideo.authorScopeTotal || authorTotal;
         const unlikedTotal = state.shortVideo.authorUnlikedTotal;
-        total.textContent = state.shortVideo.loading
+        total.textContent = loading
           ? "正在读取关注账号"
           : `关注 ${formatNumber(scopeTotal)} · 未点赞 ${formatNumber(unlikedTotal)}${state.shortVideo.authorHasMore ? ` · 已显示 ${formatNumber(loadedCount)}` : ""}`;
       } else {
         const bannedOnly = state.shortVideo.authorAccountStatus === "banned";
         const scopeTotal = state.shortVideo.authorScopeTotal || authorTotal;
-        total.textContent = state.shortVideo.loading
+        total.textContent = loading
           ? "正在读取作者"
           : bannedOnly
             ? `已封禁 ${formatNumber(authorTotal)} / 全部 ${formatNumber(scopeTotal)} 位作者`
@@ -2138,6 +2152,10 @@ export function createShortVideoPage(deps) {
             ? `已显示 ${formatNumber(loadedCount)} / ${formatNumber(authorTotal)} 位作者`
             : `${formatNumber(authorTotal || loadedCount)} 位作者`;
       }
+    } else if (loading) {
+      total.textContent = state.shortVideo.query ? "正在搜索…" : "正在读取短视频…";
+    } else if (failedVideoSearchScope !== null && failedVideoSearchScope === shortVideoListScope()) {
+      total.textContent = "搜索失败，请重试";
     } else if (isShortVideoAuthorDetailPage()) {
       total.textContent = `${formatNumber(data.total || 0)} 条作品`;
     } else if (
@@ -2154,6 +2172,10 @@ export function createShortVideoPage(deps) {
     const wrap = document.createElement("div");
     wrap.className = "short-video-delete-actions";
     if (isShortVideoAuthorIndexPage()) return wrap;
+    if (!canManageWebLibrary(true)) {
+      wrap.append(renderShortVideoSortControl());
+      return wrap;
+    }
     if (isShortVideoAuthorDetailPage()) wrap.append(renderShortVideoDeletedControl(data));
     wrap.append(renderShortVideoSortControl());
     const selection = shortVideoDeleteSelection();
@@ -7987,6 +8009,7 @@ export function createShortVideoPage(deps) {
     const preservedHome = els.workGrid?.querySelector?.('.short-video-home[aria-busy="true"]');
     if (preservedHome) {
       preservedHome.removeAttribute("aria-busy");
+      syncShortVideoHomeToolbar(preservedHome.querySelector(".short-video-home-toolbar"));
       showBrowserToast(state.shortVideo.status);
       if (needsAuthorFirstPageRetry() && failedAuthorScope === shortVideoListScope()) renderView();
       return;

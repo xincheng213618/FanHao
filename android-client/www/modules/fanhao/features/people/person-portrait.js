@@ -1,4 +1,4 @@
-import { portraitUrlForPerson } from "../../../../js/image.js?v=assets-06c1d7f13464";
+import { portraitUrlForPerson } from "../../../../js/image.js?v=assets-78764ed05056";
 
 export function mergePersonIdentity(indexedPerson, detailPerson) {
   const indexed = indexedPerson && typeof indexedPerson === "object" ? indexedPerson : null;

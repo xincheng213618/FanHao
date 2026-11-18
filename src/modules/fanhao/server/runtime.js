@@ -4,19 +4,15 @@ import { createLibraryRuntime } from "./library/runtime.js";
 import { createFanhaoSettingsProvider } from "./settings/index.js";
 import { createUserStateRuntime } from "./user-state/runtime.js";
 import { createWorksRuntime } from "./works/runtime.js";
-import { createFileWorkflowService } from "./workflows/file-workflow-service.js";
 import { createMediaIntakeService } from "./workflows/media-intake-service.js";
-import { routeFileWorkflows } from "./workflows/routes.js";
-import { createTasteRuntime } from "./taste/runtime.js";
+import { routeFileWorkflows, routeVideoMarkers } from "./workflows/routes.js";
 import { createSubtitleRuntime } from "./playback/subtitle-runtime.js";
 import { createDuplicateRuntime } from "./duplicates/runtime.js";
 
 export function createFanhaoRuntime(deps) {
-  const workflows = deps.workflows ? createFileWorkflowService(deps.workflows) : null;
   const catalog = createCatalogRuntime(deps.catalog);
   const intake = deps.workflows?.intake
     ? createMediaIntakeService({ ...deps.workflows.intake, findLocalMetadata: catalog.findIntakeMetadata }) : null;
-  const taste = deps.taste ? createTasteRuntime(deps.taste) : null;
   const subtitles = deps.subtitles ? createSubtitleRuntime(deps.subtitles) : null;
   const duplicates = deps.duplicates ? createDuplicateRuntime(deps.duplicates) : null;
   const diskUsage = createDiskUsageRuntime(deps.diskUsage);
@@ -28,8 +24,8 @@ export function createFanhaoRuntime(deps) {
   async function routeApi(req, res, url) {
     if (duplicates && await duplicates.routeApi(req, res, url)) return true;
     if (subtitles && await subtitles.routeApi(req, res, url)) return true;
-    if (taste && await taste.routeApi(req, res, url)) return true;
-    if (workflows && await routeFileWorkflows(req, res, url, { ...deps.workflows, service: workflows, intake })) return true;
+    if (intake && await routeVideoMarkers(req, res, url, { ...deps.workflows, intake })) return true;
+    if (intake && await routeFileWorkflows(req, res, url, { ...deps.workflows, intake })) return true;
     if (await diskUsage.routeApi(req, res, url)) return true;
     if (await library.routeReadApi(req, res, url)) return true;
     if (await catalog.routeApi(req, res, url)) return true;
@@ -60,17 +56,16 @@ export function createFanhaoRuntime(deps) {
   }
 
   function beginStop() {
+    catalog.beginStop();
     duplicates?.beginStop();
     subtitles?.beginStop();
-    taste?.beginStop();
-    workflows?.beginStop();
     intake?.beginStop();
     diskUsage.beginStop();
   }
 
   async function stop() {
     const results = await Promise.allSettled([
-      () => duplicates?.stop(), () => subtitles?.stop(), () => taste?.stop(), () => workflows?.close(), () => intake?.close(), () => diskUsage.stop()
+      () => catalog.stop(), () => duplicates?.stop(), () => subtitles?.stop(), () => intake?.close(), () => diskUsage.stop()
     ].map((close) => Promise.resolve().then(close)));
     const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
     if (errors.length) throw new AggregateError(errors, "FanHao 服务未能完全停止");

@@ -7,7 +7,7 @@ export function createFanhaoProcessAdapter(config) {
   return ({ command, args }) => {
     const script = args.find((value) => /\.(?:py|mjs|js)$/i.test(value));
     const name = path.basename(script || "");
-    if (!scripts.has(name)) throw Object.assign(new Error("此旧脚本尚未绑定独立产品的数据目录，请使用整理与迁移界面或综合应用中的脚本入口"), { statusCode: 409 });
+    if (!scripts.has(name)) throw Object.assign(new Error("此旧脚本尚未绑定独立产品的数据目录，请使用综合应用中的脚本入口"), { statusCode: 409 });
     const result = [...args];
     const set = (flag, value) => {
       for (let i = result.length - 1; i >= 0; i--) if (result[i] === flag) result.splice(i, 2);

@@ -1,19 +1,7 @@
-const FC2_PPV_PATTERN = /^FC2[-_\s]?PPV[-_\s]?\d+/i;
-const FC2_PATTERN = /^FC2[-_\s]?\d+/i;
+import { matchWorkCodePrefix } from "../../../../../public/modules/fanhao/work-code-prefix.js";
 
 export function workCodePrefix(value) {
-  const code = normalizeCodeText(value);
-  if (!code) return "";
-  if (FC2_PPV_PATTERN.test(code)) return "FC2-PPV";
-  if (FC2_PATTERN.test(code)) return "FC2";
-
-  const separated = code.match(/^([A-Z0-9]+(?:[-_][A-Z]+)*)[-_\s]+(?=\d)/);
-  if (separated?.[1] && /[A-Z]/.test(separated[1])) {
-    return separated[1].replaceAll("_", "-");
-  }
-
-  const compact = code.match(/^([A-Z]+)(?=\d{2,})/);
-  return compact?.[1] || "";
+  return matchWorkCodePrefix(value)?.prefix || "";
 }
 
 export function workCodePrefixForWork(work) {
@@ -48,12 +36,4 @@ export function codePrefixMatches(value, requestedPrefix, family = false) {
   return family
     ? candidate === prefix || candidate.startsWith(`${prefix}-`)
     : candidate === prefix;
-}
-
-function normalizeCodeText(value) {
-  return String(value || "")
-    .trim()
-    .toUpperCase()
-    .replace(/^(?:\[[^\]]+\][.\s_-]*)+/g, "")
-    .replace(/[‐‑‒–—―]/g, "-");
 }

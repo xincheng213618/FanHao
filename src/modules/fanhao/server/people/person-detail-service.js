@@ -287,7 +287,8 @@ export function createPersonDetailService({
       library,
       person,
       relatedWorkIds,
-      workMatches: peopleScopeService.workMatcher?.(scope) || ((work) => peopleScopeService.workMatches(work, scope))
+      workMatches: peopleScopeService.personWorkMatcher?.(scope)
+        || peopleScopeService.workMatcher?.(scope) || ((work) => peopleScopeService.workMatches(work, scope))
     });
     const personSource = personRecordWithRelatedLocalWorks(person, rawLocalWorks);
     const localWorks = enrichLocalWorksWithActorMovieInfo(rawLocalWorks, actorRows);

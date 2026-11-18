@@ -27,7 +27,7 @@ npm run sync
 npm run open
 ```
 
-`npm run sync` 会先把仓库根目录 `public\games` 同步到 `www\games`，自动同步缓存版本，再执行 Capacitor 同步。`www\games` 是生成目录，不直接维护；小游戏只修改 `public\games` 中的源文件。
+`npm run sync` 会同步 Web 与 Android 共用的账号表单，更新缓存版本，再执行 Capacitor 同步。
 
 `CLIENT_VERSION` 和已有本地 JS/CSS 静态引用中的 `?v=` 由 `www` 源码内容自动生成，无需手工改日期或补哈希。构建和相关验证会自动同步；也可在此目录运行 `npm run sync:cache`，或用只读的 `npm run verify:cache` 检查一致性。首次在仓库根目录运行 `npm run setup:android-verification` 准备验证依赖，日常检查不再重装依赖。
 

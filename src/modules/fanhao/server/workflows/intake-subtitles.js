@@ -10,6 +10,10 @@ export function isChineseSubtitleLanguage(language) {
   return language === "zh-CN" || language === "zh-TW";
 }
 
+export function intakeSubtitleLanguage(name) {
+  return /(?:^|[-_. ])(?:zh[-_. ]?(?:tw|hant)|cht|繁[體体中])(?=[-_. ()]|$)/i.test(name) ? "zh-TW" : "zh-CN";
+}
+
 export function importedIntakeSubtitle({ name, contentBase64 }) {
   if (typeof name !== "string" || name.length > 260 || /[\\/\x00-\x1f]/.test(name) || !/\.srt$/i.test(name)) {
     throw intakeError("请选择 SRT 字幕文件", 400);
@@ -18,11 +22,10 @@ export function importedIntakeSubtitle({ name, contentBase64 }) {
     || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(contentBase64)) {
     throw intakeError("字幕文件编码无效或超过 2 MiB", 400);
   }
-  const language = /(?:^|[-_. ])(?:zh[-_. ]?(?:tw|hant)|cht|繁[體体中])(?=[-_. ()]|$)/i.test(name) ? "zh-TW" : "zh-CN";
-  return { name, language, bytes: Buffer.from(contentBase64, "base64") };
+  return { name, language: intakeSubtitleLanguage(name), bytes: Buffer.from(contentBase64, "base64") };
 }
 
-export function validateIntakeSubtitle({ name, bytes, language }, { code, videoName, duration }) {
+export function validateIntakeSubtitle({ name, bytes, language }, { code, confirmed, videoName, duration }) {
   if (typeof name !== "string" || !/\.srt$/i.test(name) || !isChineseSubtitleLanguage(language)
     || !(bytes instanceof Uint8Array) || !bytes.length || bytes.length > MAX_INTAKE_SUBTITLE_BYTES) {
     throw intakeError("请选择可下载且不超过 2 MiB 的中文字幕 SRT", 400);
@@ -33,7 +36,7 @@ export function validateIntakeSubtitle({ name, bytes, language }, { code, videoN
   const subtitle = normalizeSubtitleBatchPart({ name: subtitleName });
   const video = normalizeSubtitleBatchPart({ name: extractWorkCodes(videoWithCode).length ? videoWithCode : `${code} ${videoWithCode}` });
   if (names.length && (names.length !== 1 || names[0] !== workCodeKey(code)
-    || matchSubtitleCandidates(video, [video], [subtitle])[0]?.match === "manual")
+    || matchSubtitleCandidates(video, [video], [subtitle], { confirmedVideoCode: confirmed ? code : undefined })[0]?.match === "manual")
     || subtitleEditionConflict(videoName, name)) {
     throw intakeError("字幕文件名中的番号、分段或版本与所选视频不一致", 422);
   }

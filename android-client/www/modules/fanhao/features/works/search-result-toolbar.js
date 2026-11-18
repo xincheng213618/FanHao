@@ -1,5 +1,5 @@
 import { formatNumber } from "../../../../js/format.js";
-import { openFanhaoSheet } from "../../sheet.js?v=assets-06c1d7f13464";
+import { openFanhaoSheet } from "../../sheet.js?v=assets-78764ed05056";
 
 export function mountSearchResultToolbar(options = {}) {
   const data = options.data || {};

@@ -1,6 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 
+export function assertWorkTagCorrectionIdle(db, workId) {
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_intake_jobs'").get();
+  if (!table) return;
+  const job = db.prepare(`SELECT 1 FROM media_intake_jobs
+    WHERE state IN ('working','committed') AND json_extract(plan_json,'$.workId')=?
+      AND json_extract(plan_json,'$.correction.videoId') IS NOT NULL LIMIT 1`).get(Number(workId));
+  if (!job) return;
+  const error = new Error("该作品的视频标签仍在订正，请等任务结束后再修改 A 标记");
+  error.statusCode = 409;
+  throw error;
+}
+
 export function createWorkLocalMutationService({
   ensureLibraryDirectoryPath,
   getCoreDb,
@@ -166,6 +178,7 @@ export function createWorkLocalMutationService({
         throw error;
       }
       assertLocalPathsNotReserved(db, [lockedRow]);
+      assertWorkTagCorrectionIdle(db, work.id);
       try {
         fs.renameSync(oldDir, newDir);
       } catch (error) {

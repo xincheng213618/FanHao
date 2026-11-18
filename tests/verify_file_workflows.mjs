@@ -8,7 +8,6 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { createFileWorkflowService } from "../src/modules/fanhao/server/workflows/file-workflow-service.js";
-import { routeFileWorkflows } from "../src/modules/fanhao/server/workflows/routes.js";
 import { createVerifiedTempDir } from "./verified-temp-cleanup.mjs";
 
 const temporary = createVerifiedTempDir("fanhao-file-workflows-");
@@ -63,23 +62,13 @@ try {
   assert(restored.list().length >= 3);
   await restored.close();
 
-  let forbidden = false, status = 0;
-  await routeFileWorkflows({ method: "POST" }, {}, new URL("http://fixture/api/fanhao/file-workflows/preview"), {
-    service: { preview() { throw new Error("must not be called"); } },
-    requireLocalAdmin() { forbidden = true; return false; }, readJsonBody() { throw new Error("must not read body"); }, sendJson() {}
-  });
-  assert(forbidden, "all workflow routes require local administration");
-  await routeFileWorkflows({ method: "DELETE" }, {}, new URL(`http://fixture/api/fanhao/file-workflows/${preview.id}`), {
-    service, requireLocalAdmin: () => true, sendJson(_res, code) { status = code; }
-  });
-  assert.equal(status, 405);
   await assert.rejects(service.preview({ kind: "migrate", source: {}, target }), /完整路径/);
   for (const phase of ["copying", "copied", "published", "source-removed", "done"]) await verifyRecovery(phase);
   await verifyStopAndLocks();
   for (const phase of ["stat", "scan", "stat-error"]) await verifyPreviewShutdown(phase);
   await verifyLinkedPaths();
   verifyCliIndexedGuard();
-  console.log("file-workflows: preview, verified move, conflict, drift, indexed guard, authorization, crash recovery, pause/resume, lock exclusion and preview shutdown passed");
+  console.log("file-workflows CLI: preview, verified move, conflict, drift, indexed guard, crash recovery, pause/resume, lock exclusion and preview shutdown passed");
 } finally {
   await service.close();
   temporary.cleanup();

@@ -85,15 +85,9 @@ sources:
   - tests/verify_gallery_search_focus.mjs
   - tests/verify_gallery_search_input.mjs
   - tests/verify_gallery_image_retry.mjs
-  - tests/verify_tools_gomoku_lifecycle.mjs
-  - public/games/2048/main.js
-  - public/games/2048/worker.js
-  - tests/verify_tools_2048_lifecycle.mjs
   - tests/verify_web_player_lifecycle.mjs
   - tests/verify_web_player_plyr.mjs
   - tests/verify_subtitles_browser.mjs
-  - tests/verify_tools_txt_browser.mjs
-  - public/modules/tools/txt-format-tool.js
   - tests/verify_music_playback_recovery.mjs
   - tests/verify_person_profile_lifecycle.mjs
   - tests/verify_manga_image_retry.mjs
@@ -183,9 +177,6 @@ sources:
   - tests/verify_short_video_delete_jobs.mjs
   - tests/verify_work_move_jobs.mjs
   - tests/verify_file_workflows.mjs
-  - tests/verify_file_workflows_ui.mjs
-  - tests/verify_taste.mjs
-  - tests/verify_taste_browser.mjs
   - tests/verify_duplicate_model.mjs
   - tests/verify_duplicates.mjs
   - tests/verify_duplicate_identity.mjs
@@ -403,8 +394,8 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 
 独立下载管理器的源码与验证工具选择 `verify:douyin-manager` 和导入检查，不连带执行主服务短视频与 Android 门禁。共享媒体响应、文件服务和媒体 Worker 的改动会额外选择图库、视频播放、音乐和封面行为检查。
 
-主资料库网页核心检查使用 `npm run verify:web-core`，可加 `-- --plan` 先查看 20 个入口、24 条去重命令；覆盖共同启动恢复、列表、播放器、图库、漫画、小说、音乐、工具和人物资料的私有 fixture。需要 Chrome/Edge 与 TXT 检查所需的 Python，过程中不启动正式服务或运行 Android 界面/构建门禁；完整应用检查继续使用 `verify:full`。
-网页搜索、阅读、播放器和工具的交互专项见[网页交互验证](web-verification.md)，包含各浏览器 fixture 的适用范围与用例边界。
+主资料库网页核心检查使用 `npm run verify:web-core`，可加 `-- --plan` 先查看 23 个入口、28 条去重命令；覆盖共同启动恢复、列表、播放器、图库、漫画、小说、音乐和人物资料的私有 fixture。需要 Chrome/Edge，过程中不启动正式服务或运行 Android 界面/构建门禁；完整应用检查继续使用 `verify:full`。
+网页搜索、阅读和播放器的交互专项见[网页交互验证](web-verification.md)，包含各浏览器 fixture 的适用范围与用例边界。
 
 | 命令 | 检查内容 | 执行边界 |
 | --- | --- | --- |
@@ -412,7 +403,6 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:auth` | 来源识别、登录与会话等鉴权规则。 | 使用临时鉴权状态文件，并清理临时目录。 |
 | `npm run verify:mutation-auth`、`npm run verify:json-responses` | 写接口权限与 API 错误边界；JSON 编码权重、明文拒绝、Vary 合并、压缩失败回退和断开后回调。 | 前者调用 mutation 与 error-boundary 检查；后者使用动态 loopback HTTP、实际压缩/解压及门控压缩故障，不启动正式服务。 |
 | `npm run verify:settings` | 模块和应用设置契约。 | 会生成并清理临时模块 fixture。 |
-| `npm run verify:tools-2048-browser` | 2048 单步与自动走子的回执归属，停止、手动换盘、撤销和离页后的迟到保护。 | 需要 Chrome/Edge；实际游戏页面与私有合成盘面，不修改真实存档；详见[网页交互验证](web-verification.md)。 |
 | `npm run verify:web-bootstrap-browser` | 共同入口及依赖失败、完整 URL 原生重载、迟到归属、样式降级和短视频提前导入。 | 需要 Chrome/Edge；实际共同 HTML、私有服务器与合成错误，不启动正式服务；详见[网页交互验证](web-verification.md)。 |
 | `npm run verify:gallery-summary-recovery-browser` | 首次图库概览错误、只读重试、重复激活、输入与阅读器归属，以及恢复后首列表重试。 | 需要 Chrome/Edge；私有宿主及合成 API/图片，重试仅 GET；详见[网页交互验证](web-verification.md)。 |
 | `npm run verify:manga-fit-position-browser` | 漫画阅读中段切换显示宽度的页码/比例、未解码占位和迟到位置校正归属。 | 需要 Chrome/Edge；实际漫画宿主与合成章节/SVG，不使用真实漫画；详见[网页交互验证](web-verification.md)。 |
@@ -432,8 +422,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:short-video-store`、`npm run verify:short-video-collections` | 导入、列表与状态契约；计数省去无关视图关联、相邻播放/预取排序。清单游标、详情及快照；`verify:short-video-collection-projection` 另核对仅缩窄普通视频元数据、保留封面和图集/旧值、重复JSON键、转义、异常、schema变化及恢复。 | 临时合成媒体、SQLite与真实mapper；唯一64KiB元数据的十页及详情比较完整旧响应和SQL到JS/JSON.parse字节，关闭投影负控应超预算；业务查询与额外schema探测分计，计时仅诊断，不代表磁盘读取字节或真实服务延迟；同步fixture使用下载器Python安装增量日志。 |
 | `npm run verify:short-video-sync` | 增量日志、分页初始化、无变化与单条更新的查询和逻辑 I/O 预算、删除与改名、回滚、并发提交、重启游标和来源代际变化。 | 临时 SQLite 和合成媒体；Python 运行实际迁移。Windows 用进程读取计数比较逻辑 I/O，不代表物理磁盘吞吐；不启动正式服务。下载器初始化另用 `tests.test_manager_library_sync` 和 `tests.test_manager_database_lifecycle` 验证。 |
 | `npm run verify:work-move-jobs`、`npm run verify:person-organization` | 作品移动作业与 UI；人物整理另查预览、分段、冲突、路径同步、目录发布日期、重试、使用已有资料与封面地址、无备份替换、旧封面与遗留文件清理、权限和焦点。 | 临时合成文件及 SQLite、Worker/任务子进程、可控图片下载和动态 HTTP/无头浏览器；不整理真实媒体，不访问外部封面站点。 |
-| `npm run verify:file-workflows`、`npm run verify:file-workflows-ui` | 后端预览、校验后移动、路径与已入库保护、冲突、源文件变化、权限、恢复、暂停/继续及互斥；浏览器预览、取消/确认执行、持久历史与窄屏布局，另查切换计划、轮询/重试、停止响应、页面离开及连续写入的归属。 | 当前服务、路由与 CLI，临时合成文件及 SQLite；UI 另用动态 loopback HTTP 与无头 Chrome/Edge，实际复制、移动临时文件，竞态使用门控 API/计时器，并在 `.codex-artifacts/` 保存截图，不操作真实媒体。 |
-| `npm run verify:taste` | 按番号去重、目录标记、收藏人物归属、资料覆盖分母、小样本平滑、匹配理由、只读查询、Worker 缓存与停止、权限；页面切换、样本链接、导出、窄屏布局和失败重试。 | 临时 SQLite、独立 Worker、动态 loopback HTTP 与无头 Chrome/Edge；合成馆藏样本，不读取真实媒体或浏览器历史。 |
+| `npm run verify:file-workflows`、`npm run verify:file-workflows-ui` | CLI 计划、校验后移动、已入库保护及中断恢复，以及视频洗版接口、任务和字幕操作。 | 使用临时合成文件和 SQLite 验证实际移动及恢复。 |
 | `npm run verify:duplicates` | 番号与分卷候选、只读列表及候选路径可用性、完整 SHA256、网络文件身份碰撞、别名变化、子集比较、取消与停机、权限、搜索分页、播放与文件夹入口、保留和忽略、手动删除后的文件复核、失效索引事务清理与重启、收藏和观看记录保留、离线及链接保护、移动预留冲突与回滚、清理失败重试和窄屏布局。 | 临时 SQLite、合成文件、虚拟网络文件系统、独立 Worker、动态 loopback HTTP 与无头 Chrome/Edge；仅清理临时索引，不读取真实媒体，不执行媒体删除或打开真实文件夹。 |
 | `npm run verify:music-rescan-worker` | 音乐扫描 Worker、锁竞争与停止流程。 | 临时音乐文件、数据库、假探测器与子进程。 |
 | `npm run verify:browser-behavior` | 浏览器中的页面行为、导航与异步状态。 | 默认本机临时 HTTP fixture，并启动无头 Chrome/Edge。 |
@@ -495,7 +484,7 @@ npm run verify:changed -- --files src/modules/novels/server/store.js public/modu
 | `npm run verify:novel-write-worker` | 小说写入锁竞争、六类 API、提交/回滚异常、回执恢复/清理、换库与来源、排队容量和停机。 | 临时 SQLite、真实/受控 Worker、HTTP doubles 和仅扫描合成 TXT 的 Python；不访问真实资料库。 |
 | `npm run verify:novel-credentials-async` | 登录凭据检测的主线程响应、取消、超时、输出限制、来源变化与停机。 | 临时假凭据、受控子进程及本机 Node 子进程/动态 HTTP；不启动 Python 检测器或访问外站。 |
 | `npm run verify:novel-collection-worker` | 小说采集后台的锁等待、RPC 容量、子进程所有权、入库标识持久化、不确定任务的重试/历史清理保护与停机。 | 临时 SQLite、真实/受控 Worker、本机受控子进程和动态 HTTP；不运行真实采集或访问外站。 |
-| `npm run verify:novel-reimport-async` | 本地 TXT 只读解析与统一写入、解码和元数据兼容、章节与进度、回执恢复、来源冲突、取消和停机。 | 合成 TXT、实际 Python 和临时 SQLite、真实/受控 Worker 与子进程；不会导入实际资料或操作正式服务。 |
+| `npm run verify:novel-reimport-async` | TXT 格式化、只读解析与统一写入、解码和元数据兼容、章节与进度、回执恢复、来源冲突、取消和停机。 | 合成 TXT、实际 Python 和临时 SQLite、真实/受控 Worker 与子进程；不会导入实际资料或操作正式服务。 |
 | `npm run verify:douyin-manager` | 下载队列停止、数据库连接释放、作者汇总/分页/刷新候选的一致快照、游标分页、已加载行更新、请求竞态与深页索引；共享播放器清单及邻居排序的精确部分索引、完整响应和初始化幂等。 | 临时 SQLite、独立子进程、动态 HTTP fixture 与无头浏览器；播放查询专项使用完整 Python 工厂与空占位媒体，记录排序计划、索引空间和写入代价。不启动或停止正式 8765 服务。 |
 
 下载链接游标以首屏 ID 水位和已下载时间排序边界限制后续页，每次请求使用短 WAL 快照；它不会冻结整个翻页过程。新增链接或移到已消费边界之前的记录在主动刷新后出现，后台按已加载 ID 更新状态。fixture 分别验证这一边界、旧 offset 接口兼容，以及已下载深页使用表达式索引而不做临时排序。

@@ -30,7 +30,7 @@ FanHao 的账号、注册策略和会话由后台统一管理，网页和 Androi
 - Android「我的 → 用户中心」或「设置 → 用户中心」。账号跟随内容服务地址，不同 origin 的会话分别保存。
 - 所有用户可编辑昵称、修改密码、管理自己的登录设备。管理员额外看到用户管理、邀请码、注册与访问设置和操作记录，可协助用户重置密码。
 
-用户名为 3–32 位字母、数字、下划线、点或短横线，首位只能是字母或数字，统一转为小写。密码为 10–128 位；昵称为 1–40 字，注册时可省略并使用用户名。
+用户名为 3–32 位字母、数字、下划线、点或短横线，首位只能是字母或数字，统一转为小写。注册和管理员初始化密码为 10–128 字符。已登录的管理员在本机或局域网更改自己的密码时下限为 8 字符。昵称为 1–40 字，注册时可省略并使用用户名。
 
 公开注册始终创建普通用户，不能通过提交角色字段提权。首个管理员在服务所在电脑通过 localhost 访问 `/account` 初始化，要求 TCP 来源和 Host 都为本机，且请求不含 Forwarded / X-Forwarded-For。初始化后，现有管理员可提升其他账号。
 
@@ -87,7 +87,7 @@ FanHao 的账号、注册策略和会话由后台统一管理，网页和 Androi
 
 网页使用 HttpOnly / SameSite=Lax Cookie，直连 TLS 时设置 Secure。Android 使用已有原生认证桥按 origin 保存 token，API、图片和原生媒体请求共用该会话，不保存密码。修改密码撤销所有会话，普通退出登录只撤销当前会话。
 
-默认兼容本机/局域网免访问密码机制和原远程访问密码；开启账号访问要求后，这些访问方式需再登录用户账号。普通用户不能使用 `requireLocalAdmin` / `requireTrustedFileMutation` 管理入口；管理员仍受这些入口的原本机/局域网限制。用户及邀请码管理独立要求管理员账号，不能只凭局域网位置获得权限。失效用户 token 不回退为局域网可信登录。
+默认情况下，本机浏览器直连服务可免登录浏览和管理资料库。可信局域网可访客浏览，资料库管理需要管理员会话。远程访问使用普通用户账号。用户、邀请码及访问策略管理始终要求登录管理员账号，以记录操作人。失效会话需要重新登录。适用条件见[账号访问策略](account-access.md)。
 
 访问要求控制服务入口，与个人记录的归属分开。账号登录后即可使用个人番号收藏及历史，无须开启强制登录；其他内容模块及自助邮件找回尚未纳入这一改动。
 
@@ -116,7 +116,7 @@ FanHao 的账号、注册策略和会话由后台统一管理，网页和 Androi
 | `PATCH /admin/settings` | 管理员；registrationEnabled、invitationRequired、accountLoginRequired 中至少一个 boolean；未提交字段保留 |
 | `GET /admin/invites` | 管理员；search、status、offset；不返回完整码 |
 | `GET /admin/invites/:id` | 管理员；search（使用者用户名/昵称）、offset；返回邀请码及使用记录 |
-| `POST /admin/invites` | 管理员；count 默认 1、maxUses 默认 1、expiresInDays 默认 7，可选 note |
+| `POST /admin/invites` | 管理员；count 默认 1、maxUses 默认 1、expiresInDays 默认 7，可选 note。创建一个邀请码时可提交自定义 code，支持 6–100 位字母、数字或短横线 |
 | `POST /admin/invites/:id/revoke` | 管理员；正文 `{}` |
 
 登录、注册或初始化成功返回 `{ ok: true, user }` 及 Cookie；`client: android` 请求额外返回 token、expiresIn。`GET /sessions` 返回 sessions 数组，每项含 id、clientType、deviceLabel、createdAt、lastSeenAt、expiresAt、current；时间字段为 Unix 毫秒。

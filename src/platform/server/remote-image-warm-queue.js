@@ -4,24 +4,30 @@ export function createRemoteImageWarmQueue({ run, concurrency = 6, capacity = 12
   const drainMs = finiteLimit(stopWaitMs, 2000, 1, 30000);
   const queued = [];
   const active = new Set();
-  const keys = new Set();
+  const pending = new Map();
   let accepting = true;
   let generation = 0;
   let stopPromise = null;
 
   function enqueue(key) {
-    if (!accepting || keys.has(key) || keys.size >= maxTasks) return false;
-    keys.add(key);
-    queued.push(key);
+    if (!accepting || pending.has(key) || pending.size >= maxTasks) return false;
+    let resolve;
+    const result = new Promise((settle) => { resolve = settle; });
+    const entry = { key, resolve, result };
+    pending.set(key, entry);
+    queued.push(entry);
     drain();
     return true;
   }
   function replaceQueued() {
-    for (const key of queued.splice(0)) keys.delete(key);
+    for (const { key, resolve } of queued.splice(0)) {
+      pending.delete(key);
+      resolve(null);
+    }
   }
   function drain() {
     while (accepting && active.size < maxActive && queued.length) {
-      const key = queued.shift();
+      const { key, resolve } = queued.shift();
       const epoch = generation;
       const controller = new AbortController();
       const task = { key, controller, promise: null };
@@ -29,11 +35,12 @@ export function createRemoteImageWarmQueue({ run, concurrency = 6, capacity = 12
       task.promise = Promise.resolve().then(() => run(key, {
         signal: controller.signal,
         current: () => accepting && generation === epoch && !controller.signal.aborted
-      })).catch((error) => {
+      })).then(resolve).catch((error) => {
+        resolve(null);
         if (!controller.signal.aborted) warn(error);
       }).finally(() => {
         active.delete(task);
-        keys.delete(key);
+        pending.delete(key);
         drain();
       });
     }
@@ -61,7 +68,7 @@ export function createRemoteImageWarmQueue({ run, concurrency = 6, capacity = 12
     accepting = true;
     drain();
   }
-  return { enqueue, replaceQueued, beginStop, stop, start,
+  return { enqueue, result: (key) => pending.get(key)?.result, replaceQueued, beginStop, stop, start,
     diagnostics: () => ({ active: active.size, queued: queued.length, capacity: maxTasks, concurrency: maxActive, accepting }) };
 }
 

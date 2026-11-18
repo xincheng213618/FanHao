@@ -39,7 +39,6 @@ sources:
 | 改音乐扫描与分页 | `src/modules/music/server/` | `npm run verify:music-rescan-worker`、`npm run verify:music-scale` |
 | 改小说存储或采集 | `src/modules/novels/server/` | `npm run verify:novels` |
 | 改 Android WebView 或原生桥 | `android-client/www/`、`android-client/android/app/src/main/java/` | 首次准备运行 `npm run setup:android-verification`；用 `npm run verify:changed -- --plan` 按小说、音乐、媒体、图片或短视频域选择回归，共享壳或原生桥变更再运行 `npm run verify:android-full` |
-| 改行情页面或服务 | `src/modules/market-dashboard/server/`、`public/modules/market-dashboard/` | `npm run verify:market-dashboard` |
 | 改下载管理器集成 | `src/modules/short-videos/download-manager/` | `npm run verify:douyin-manager` |
 | 改文档、导航或 AI 导出 | `docs/site/`、`docs/.vitepress/` | `npm --prefix docs test`、`npm --prefix docs run build` |
 

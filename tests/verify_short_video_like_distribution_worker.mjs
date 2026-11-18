@@ -380,6 +380,14 @@ async function verifyRuntimeRouteAndInvalidation(fixture) {
     assert.equal(afterDelete.data.total, afterCatalog.data.total - 1, "delete mutation invalidation must expose the new catalog total");
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionDispatches, 7);
 
+    // The journal cursor commits with the catalog rows. A legacy stamp write
+    // after that commit used to prevent the runtime from publishing the change.
+    const catalog = new DatabaseSync(fixture.dbPath);
+    try {
+      catalog.exec(`CREATE TRIGGER reject_legacy_manager_sync_stamp BEFORE INSERT ON short_video_meta
+        WHEN NEW.key = 'download_manager_source_state_key_v2_account_status'
+        BEGIN SELECT RAISE(ABORT, 'obsolete downloader sync stamp'); END;`);
+    } finally { catalog.close(); }
     const imported = await runtime.syncCatalog({ force: true });
     assert(imported && imported.catalogChanged === true && imported.imported >= 1, "the real download-manager import must report a catalog change");
     assert.equal(runtime.catalogWorkerDiagnostics().likeDistributionCacheEntries, 0, "the download-manager import callback must reset the distribution cache");

@@ -7,7 +7,7 @@ const FALLBACK_MODULES = Object.freeze([
   fallback("novels", "小说", 40, "novels", "novels", { order: 50 }),
   fallback("short-videos", "短视频", 50, "shortVideos", "shortVideos", { order: 40 }),
   fallback("music", "音乐", 60, "music", "novels"),
-  fallback("tools", "小工具", 70, "tools", "tools", { title: "我的" })
+  fallback("tools", "我的", 70, "tools", "tools")
 ]);
 
 export function androidModuleFallbackCatalog() {

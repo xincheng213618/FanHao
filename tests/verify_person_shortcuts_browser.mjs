@@ -64,12 +64,14 @@ try {
     Object.defineProperty(navigator, "connection", { configurable: true, value: { saveData: true } });
   });
   await page.goto(`${origin}/blank`);
+  const mainKey = `${prefix}${encodeURIComponent(initialOwner)}:main`;
   await page.evaluate((key) => {
-    localStorage.setItem(key, JSON.stringify({ pinned: ["retired"], recent: ["hidden"] }));
-  }, `${prefix}${encodeURIComponent(initialOwner)}:main`);
+    localStorage.setItem(key, JSON.stringify({ pinned: ["retired"], recent: ["B", "hidden"] }));
+  }, mainKey);
   const navigation = page.getByRole("navigation", { name: "人物快捷入口" });
   const pinned = navigation.getByRole("group", { name: "已固定" });
-  const recent = navigation.getByRole("group", { name: "最近浏览" });
+  const recentRow = page.locator('[aria-label="最近浏览"], .person-shortcuts-clear');
+  const history = () => page.evaluate((key) => JSON.parse(localStorage.getItem(key)).recent, mainKey);
   const card = (scope, id) => page.locator(".person-index-card").filter({ hasText: makePerson(scope, id).name });
   const pin = page.getByRole("button", { name: "固定人物", exact: true });
   const unpin = page.getByRole("button", { name: "取消固定", exact: true });
@@ -82,13 +84,14 @@ try {
     await card(scope, "A").waitFor();
   }
   await index("/fanhao", "main");
-  assert.equal(await navigation.count(), 0, "removed or hidden people must not produce shortcuts");
+  assert.equal(await navigation.count(), 0, "visits and invalid pins must not produce shortcuts");
+  assert.deepEqual(await history(), ["B", "hidden"]);
   await card("main", "A").click();
   await pin.click();
   assert.equal(await unpin.getAttribute("aria-pressed"), "true");
   await back("main");
   await pinned.getByRole("button", { name: "普通样本人物 A" }).waitFor();
-  assert.equal(await recent.count(), 0, "a fixed person must not duplicate the recent list");
+  assert.equal(await recentRow.count(), 0);
 
   await card("main", "B").click();
   await pin.waitFor();
@@ -96,15 +99,12 @@ try {
   await card("main", "C").click();
   await pin.waitFor();
   await back("main");
-  assert.deepEqual(await recent.locator(".person-shortcut").allTextContents(), ["普通样本人物 C", "普通样本人物 B"]);
-  const beforeShortcut = reads.filter(({ path }) => path === "/api/people/B").length;
-  await recent.getByRole("button", { name: "普通样本人物 B" }).click();
-  await pin.waitFor();
-  assert.equal(reads.filter(({ path }) => path === "/api/people/B").length, beforeShortcut + 1);
-  await back("main");
-  assert.deepEqual(await recent.locator(".person-shortcut").allTextContents(), ["普通样本人物 B", "普通样本人物 C"]);
+  assert.equal(await recentRow.count(), 0);
+  assert.deepEqual(await history(), ["C", "B", "A", "hidden"]);
   await page.reload();
-  await recent.getByRole("button", { name: "普通样本人物 B" }).waitFor();
+  await pinned.getByRole("button", { name: "普通样本人物 A" }).waitFor();
+  assert.equal(await recentRow.count(), 0);
+  assert.deepEqual(await history(), ["C", "B", "A", "hidden"]);
 
   await index("/western", "western");
   assert.equal(await navigation.count(), 0, "even matching IDs must be isolated by people scope");
@@ -122,17 +122,14 @@ try {
   await index("/fanhao", "main");
   const fixed = pinned.getByRole("button", { name: "普通样本人物 A" });
   await fixed.waitFor();
-  await recent.getByRole("button", { name: "清除最近浏览人物" }).click();
-  assert.equal(await recent.count(), 0);
-  assert.equal(await fixed.evaluate((button) => document.activeElement === button), true);
   const bounds = await navigation.boundingBox();
   assert.ok(bounds.x >= 0 && bounds.x + bounds.width <= 390);
   await fixed.click();
   await unpin.click();
   await pin.waitFor();
   await back("main");
-  assert.equal(await pinned.count(), 0);
-  await recent.getByRole("button", { name: "普通样本人物 A" }).waitFor();
+  assert.equal(await navigation.count(), 0);
+  assert.deepEqual(await history(), ["A", "C", "B", "hidden"]);
   assert.ok(reads.every(({ method }) => method === "GET"));
   assert.deepEqual(errors, []);
   console.log("Person shortcuts browser verification passed.");

@@ -1,24 +1,24 @@
-import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-06c1d7f13464";
-import { fetchJson } from "./js/api.js?v=assets-06c1d7f13464";
+import { CLIENT_VERSION, DEFAULT_UPDATE_URLS, DEFAULT_URL, LAST_VIEW_STORAGE_KEY, SEARCH_HISTORY_STORAGE_KEY, STORAGE_KEY, THEME_STORAGE_KEY } from "./js/config.js?v=assets-78764ed05056";
+import { fetchJson } from "./js/api.js?v=assets-78764ed05056";
 import { installServerAuthentication, loginToServer, registerServerAuthentication } from "./js/server-auth.js";
 import { createAccountSettings } from "./js/account-settings.js";
 import { accountLoginMessage, isServerAuthenticationError, requiresUserAccount } from "./js/account-access.js";
-import { cacheAgeText, captureCachedJsonFence, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-06c1d7f13464";
-import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-06c1d7f13464";
-import { getElements } from "./js/dom.js?v=assets-06c1d7f13464";
-import { installBottomLayout } from "./js/bottom-layout.js?v=assets-06c1d7f13464";
-import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-06c1d7f13464";
+import { cacheAgeText, captureCachedJsonFence, clearCachedData, clearCachedImages, clearCachedResponses, getCacheStats, isCachedJsonFenceCurrent, readCachedJson, writeCachedJson } from "./js/cache.js?v=assets-78764ed05056";
+import { androidModuleFallbackCatalog, loadAndroidModules, mergeAndroidModuleCatalog, prepareAndroidModuleImports } from "./js/android-module-registry.js?v=assets-78764ed05056";
+import { getElements } from "./js/dom.js?v=assets-78764ed05056";
+import { installBottomLayout } from "./js/bottom-layout.js?v=assets-78764ed05056";
+import { createSettingsDialogFocus } from "./js/settings-dialog-focus.js?v=assets-78764ed05056";
 import { accountPayloadOwner, captureAccountOwner, isAccountOwnerCurrent, prepareAccountOwner } from "./js/account-owner.js";
 import { formatBytes, formatCompact, formatNumber, normalizeUrl } from "./js/format.js";
-import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-06c1d7f13464";
-import { createMediaViewer } from "./js/media-viewer.js?v=assets-06c1d7f13464";
-import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-06c1d7f13464";
-import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-06c1d7f13464";
+import { absoluteUrl, loadPreviewImage } from "./js/image.js?v=assets-78764ed05056";
+import { createMediaViewer } from "./js/media-viewer.js?v=assets-78764ed05056";
+import { loadModuleCatalog, renderAndroidModuleNavigation } from "./js/module-navigation.js?v=assets-78764ed05056";
+import { clearRecentContent, readRecentContent, recordRecentContent } from "./js/recent-content.js?v=assets-78764ed05056";
 import { createSearchHistory } from "./js/search-history.js";
-import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-06c1d7f13464";
-import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-06c1d7f13464";
-import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-06c1d7f13464";
-import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { canonicalShortVideoViewParams } from "./js/short-video-route-contract.js?v=assets-78764ed05056";
+import { normalizeMediaTrail } from "./js/media-navigation-state.js?v=assets-78764ed05056";
+import { createChannelHistoryState } from "./js/channel-history-state.js?v=assets-78764ed05056";
+import { closeMobileActionSheet } from "./js/mobile-action-sheet.js?v=assets-78764ed05056";
 
 const els = getElements();
 const bottomLayout = installBottomLayout({ nav: els.bottomNavBar });
@@ -1008,10 +1008,9 @@ function omniChannels(summary = {}) {
       mode: "media"
     },
     {
-      label: "小工具",
-      value: "4",
-      unit: "工具",
-      detail: "开源小游戏 / TXT 排版",
+      label: "个人中心",
+      value: "我的",
+      detail: "账户、设置与本机工具",
       view: "tools"
     }
   ];

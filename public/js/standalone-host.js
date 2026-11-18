@@ -3,8 +3,7 @@ import { adminUrl } from "./admin-navigation.js?v=20260727-admin-merge-01";
 import { installAndroidClientReturn, isLocalHostName, prepareClientShell } from "./client-shell.js?v=20260712-project-refactor-03";
 import { normalizeRoute, routeFromUrl, routeUrl } from "./router.js?v=20261113-novel-reading-filter-01";
 
-const MODULE_VIEWS = new Set(["gallery", "manga", "novels", "music", "tools"]);
-const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
+const MODULE_VIEWS = new Set(["gallery", "manga", "novels", "music"]);
 const formatter = new Intl.NumberFormat("zh-CN");
 
 export async function bootStandaloneApp() {
@@ -58,16 +57,14 @@ function beginPhotoOverview(api) {
 
 async function loadCurrentModule(view) {
   if (view === "gallery") {
-    const [pageModule, rendererModule, continueModule, watchlistModule] = await Promise.all([
+    const [pageModule, rendererModule, watchlistModule] = await Promise.all([
       import("../modules/content-index/gallery-page.js?v=20261113-photo-preview-01"),
       import("../modules/content-index/gallery-renderer.js?v=20261113-photo-slideshow-01"),
-      import("../modules/media/continue-watching.js?v=20261113-media-continue-hide-01"),
       import("../modules/media/watchlist.js?v=20261113-media-watchlist-01")
     ]);
     return {
       createPage: pageModule.createGalleryPage,
       createRenderer: rendererModule.createGalleryRenderer,
-      createContinueWatching: continueModule.createContinueWatching,
       createMediaWatchlist: watchlistModule.createMediaWatchlist,
       view
     };
@@ -84,8 +81,6 @@ async function loadCurrentModule(view) {
     const module = await import("../modules/music/music-page.js?v=20261113-music-track-sleep-01");
     return { createPage: module.createMusicPage, view };
   }
-  const module = await import("../modules/tools/tools-page.js?v=20261113-txt-append-01");
-  return { createPage: module.createToolsPage, view };
 }
 
 function createHost({ api, els, initialParams, pages, state, startupOverview }) {
@@ -106,7 +101,6 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     formatBytes,
     formatDateTime,
     formatNumber,
-    galleryListRoute: () => routeUrl(currentRouteSnapshot({ galleryMediaId: "" }), { initialParams }),
     hidePersonProfile,
     openAdminScript,
     pushRoute,
@@ -121,7 +115,6 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
   if (pages.view === "gallery") {
     galleryRenderer = pages.createRenderer({
       ...shared,
-      createContinueWatching: pages.createContinueWatching,
       createMediaWatchlist: pages.createMediaWatchlist,
       getGalleryPage: () => page,
       goBackToPhotoList,
@@ -142,12 +135,6 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
       normalizeUiConfig,
       renderGalleryStats: galleryRenderer.renderStats,
       renderGalleryView: galleryRenderer.renderView
-    });
-  } else if (pages.view === "tools") {
-    page = pages.createPage({
-      ...shared,
-      toastInline,
-      txtToolMaxFileBytes: TXT_TOOL_MAX_FILE_BYTES
     });
   } else {
     page = pages.createPage(shared);
@@ -178,6 +165,7 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
       });
     } else if (state.activeView === "manga") {
       Object.assign(route, {
+        mangaUser: state.manga.userPage,
         mangaComicId: state.manga.chapter?.comicId || state.manga.comic?.id || "",
         mangaChapterIndex: String(state.manga.chapter?.index || ""),
         mangaQuery: state.manga.query || "",
@@ -345,11 +333,6 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
         page.applyRouteState(next);
         page.enter({ skipRoute: true, deferInitialLoad: true });
         await page.openRouteTarget(next);
-      } else {
-        hidePersonProfile();
-        setMainHeader("小工具", "离线游戏与 TXT 整理");
-        page.renderStats();
-        page.renderView();
       }
     } finally {
       if (routeOwner === owner) {
@@ -390,7 +373,6 @@ function createHost({ api, els, initialParams, pages, state, startupOverview }) 
     document.body.classList.toggle("novel-view", view === "novels");
     document.body.classList.toggle("novel-reader-active", view === "novels" && Boolean(state.novel?.chapter));
     document.body.classList.toggle("music-view", view === "music");
-    document.body.classList.toggle("tools-view", view === "tools");
   }
 
   function openAdminScript(scriptId = "", options = {}) {
@@ -528,15 +510,6 @@ function formatDateTime(value) {
 
 function includesText(value, query) {
   return String(value || "").toLowerCase().includes(String(query || "").trim().toLowerCase());
-}
-
-function toastInline(button, message, restoreText = "") {
-  if (!button) return;
-  const original = restoreText || button.textContent;
-  button.textContent = message;
-  window.setTimeout(() => {
-    if (button.isConnected) button.textContent = original;
-  }, 1500);
 }
 
 function readStoredFlag(key, fallback = false) {

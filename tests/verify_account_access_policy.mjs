@@ -24,15 +24,17 @@ const serverSource = fs.readFileSync(new URL("../server.js", import.meta.url), "
 const helperStart = serverSource.indexOf("function requireTrustedNetworkPage(");
 const helperEnd = serverSource.indexOf("async function routeApi(", helperStart);
 assert(helperStart >= 0 && helperEnd > helperStart, "locate the production admin and file mutation helpers");
-const gates = new Function("requestAuthState", "requestAccess", "isTrustedNetworkAccess", "isSameTrustedNetworkOrigin", "sendJson",
-  `${serverSource.slice(helperStart, helperEnd)}; return {requireLocalAdmin, requireTrustedFileMutation};`)(
-  auth.requestAuthState, auth.requestAccess, auth.isTrustedNetworkAccess, auth.isSameTrustedNetworkOrigin, sendJson);
+const loadGates = new Function("requestAuthState", "requestAccess", "isTrustedNetworkAccess", "isSameTrustedNetworkOrigin", "sendJson",
+  `${serverSource.slice(helperStart, helperEnd)}; return {requireLocalAdmin, requireTrustedFileMutation};`);
+const createGates = (services) => loadGates(services.requestAuthState, services.requestAccess,
+  services.isTrustedNetworkAccess, services.isSameTrustedNetworkOrigin, sendJson);
+const gates = createGates(auth);
 let mediaReads = 0;
-const app = createRequestHandler({ ...auth, attachAccessAnalytics() {}, attachAccessLogger() {},
+const createApp = (services, fixtureGates) => createRequestHandler({ ...services, attachAccessAnalytics() {}, attachAccessLogger() {},
   routeApi(req, res, url) {
     if (url.pathname === "/api/protected") { sendJson(res, 200, { ok: true }); return true; }
     if (url.pathname === "/api/admin/fixture" || url.pathname === "/api/delete/fixture") {
-      const gate = url.pathname.includes("/admin/") ? gates.requireLocalAdmin : gates.requireTrustedFileMutation;
+      const gate = url.pathname.includes("/admin/") ? fixtureGates.requireLocalAdmin : fixtureGates.requireTrustedFileMutation;
       if (gate(req, res)) sendJson(res, 200, { ok: true });
       return true;
     }
@@ -52,13 +54,13 @@ const app = createRequestHandler({ ...auth, attachAccessAnalytics() {}, attachAc
   renderAndroidUpdatePage() { return "<!doctype html><title>Public Android update fixture</title>"; },
   serveStatic(_req, res, pathname) { sendText(res, 200, `protected static ${pathname}`); },
   sendJson, sendHtml, sendText });
-const server = http.createServer(app);
+const server = http.createServer(createApp(auth, gates));
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-async function api(route, { token, cookie, body, method = body ? "POST" : "GET", headers = {} } = {}) {
+async function api(route, { token, cookie, body, method = body ? "POST" : "GET", headers = {} } = {}, origin = base) {
   return new Promise((resolve, reject) => {
-    const request = http.request(base + route, { method, headers: { Accept: "application/json",
+    const request = http.request(origin + route, { method, headers: { Accept: "application/json",
       ...(body ? { "Content-Type": "application/json" } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(cookie ? { Cookie: cookie } : {}), ...headers } }, (response) => {
       let text = ""; response.setEncoding("utf8"); response.on("data", (part) => { text += part; });
@@ -80,7 +82,7 @@ const gateResult = (gate, options) => {
   const allowed = gate(fake(options), { writeHead(value) { status = value; }, end() {} });
   return { allowed, status };
 };
-const knownFiles = ["accounts.sqlite", "accounts.sqlite-wal", "accounts.sqlite-shm", "auth-secret.txt",
+const knownFiles = ["accounts.sqlite", "accounts.sqlite-wal", "accounts.sqlite-shm", "auth-secret.txt", "legacy-disabled-auth-secret.txt",
   "migration.sqlite", "migration.sqlite-wal", "migration.sqlite-shm"];
 let sideStore;
 try {
@@ -162,6 +164,8 @@ try {
   assert.equal((await api("/media/private-fixture.mp4", { token: reader, headers: { Range: "bytes=0-3" } })).status, 206);
   await verifyAppProxyBoundary(admin, reader, "strict mode");
   for (const route of ["/api/admin/fixture", "/api/delete/fixture"]) {
+    assert.equal((await api(route, { body: {}, headers: { Origin: base } })).status, 401,
+      "strict mode requires a session even for direct localhost administration");
     assert.equal((await api(route, { token: reader, method: "POST", body: {} })).status, 403);
     assert.equal((await api(route, { token: admin, method: "POST", body: {} })).status, 200);
   }
@@ -213,7 +217,12 @@ try {
   assert.equal((await api("/auth/login", { body: { password: legacyPassword } })).status, 200);
   assert.equal((await api("/api/protected", { token: revoked })).status, 401, "turning compatibility back on does not revive revoked accounts");
   assert.equal(state({}).allowed, true); assert.equal(state({}).accountLoginRequired, false);
-  for (const gate of [gates.requireLocalAdmin, gates.requireTrustedFileMutation]) assert.equal(gateResult(gate).allowed, true);
+  for (const gate of [gates.requireLocalAdmin, gates.requireTrustedFileMutation]) {
+    assert.equal(gateResult(gate).allowed, false, "guest access to the library does not grant administration");
+    assert.equal(gateResult(gate, { token: admin }).allowed, true);
+  }
+  await verifyLocalAdministrator({ admin, ordinaryUser: newUser.body.token, revokedUser: revoked, expiredUser: reader, legacyToken });
+  await verifyRetiredLegacyCookie({ legacyCookie, legacyToken, ordinaryUser: newUser.body.token, expiredUser: reader });
   await verifyAppProxyBoundary(admin, newUser.body.token, "compatibility mode");
 
   // Cross-process store reads observe the committed switch, and a reopen preserves it.
@@ -231,13 +240,106 @@ try {
   assert.equal(raced.status, 403); assert.equal(JSON.parse(raced.text).reason, "account-required");
   assert.equal(raced.headers["set-cookie"], undefined);
   verifyMigration();
-  console.log("account-access-policy: ok (HTTP access/media/public routes, LAN/admin helpers, legacy login race, partial settings, audit rollback and v3 migration)");
+  console.log("account-access-policy: ok (HTTP access/media/public routes, localhost and LAN/admin helpers, legacy login race, partial settings, audit rollback and v3 migration)");
 } finally {
   sideStore?.close();
   server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
   auth.closeAccounts();
   for (const name of knownFiles) { const file = path.join(root, name); if (fs.existsSync(file)) fs.unlinkSync(file); }
   fs.rmdirSync(root);
+}
+
+async function verifyLocalAdministrator({ admin, ordinaryUser, revokedUser, expiredUser, legacyToken }) {
+  const localRequest = {
+    remote: "127.0.0.1", host: "localhost:29998",
+    headers: { origin: "http://localhost:29998", referer: "http://localhost:29998/short-videos", "sec-fetch-site": "same-origin" }
+  };
+  const localState = state(localRequest);
+  assert.equal(localState.localAdministrator, true);
+  assert.equal(localState.user ?? null, null, "localhost privilege does not create an account identity");
+  const localIpv6 = { remote: "::1", host: "[::1]:29998", headers: { origin: "http://[::1]:29998" } };
+  assert.equal(state(localIpv6).localAdministrator, true);
+
+  const rejected = [
+    ["LAN peer with a loopback Host", { ...localRequest, remote: "192.168.1.50" }],
+    ["loopback peer with a LAN Host", { ...localRequest, host: "192.168.1.20:29998", headers: { origin: "http://192.168.1.20:29998" } }],
+    ["public reverse proxy Host", { ...localRequest, host: "public.example", headers: { origin: "http://public.example" } }],
+    ["cross-origin port", { ...localRequest, headers: { origin: "http://localhost:29999" } }],
+    ["cross-origin scheme", { ...localRequest, headers: { origin: "https://localhost:29998" } }],
+    ["cross-origin Referer", { ...localRequest, headers: { ...localRequest.headers, referer: "https://public.example/" } }],
+    ["missing Origin on a mutation", { ...localRequest, headers: { "sec-fetch-site": "same-origin" } }],
+    ["cross-site fetch metadata", { ...localRequest, headers: { ...localRequest.headers, "sec-fetch-site": "cross-site" } }],
+    ["same-site fetch metadata", { ...localRequest, headers: { ...localRequest.headers, "sec-fetch-site": "same-site" } }],
+    ["Android client marker", { ...localRequest, headers: { ...localRequest.headers, "x-fanhao-client": "android" } }],
+    ["explicit ordinary account", { ...localRequest, token: ordinaryUser }],
+    ["explicit revoked account", { ...localRequest, token: revokedUser }],
+    ["expired account cookie", { ...localRequest, cookie: `fanhao_web_auth=${expiredUser}` }],
+    ["explicit legacy credential", { ...localRequest, token: legacyToken }],
+    ["legacy cookie while legacy authentication is configured", { ...localRequest, cookie: `fanhao_web_auth=${legacyToken}` }],
+    ["malformed credential", { ...localRequest, headers: { ...localRequest.headers, authorization: "invalid" } }]
+  ];
+  for (const header of ["forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto"]) {
+    rejected.push([header, { ...localRequest, headers: { ...localRequest.headers, [header]: "127.0.0.1" } }]);
+  }
+  for (const [name, request] of rejected) {
+    assert.notEqual(state(request).localAdministrator, true, `${name} cannot acquire localhost administration`);
+  }
+  for (const gate of [gates.requireLocalAdmin, gates.requireTrustedFileMutation]) {
+    assert.equal(gateResult(gate, localRequest).allowed, true);
+    assert.equal(gateResult(gate, localIpv6).allowed, true);
+    for (const [name, request] of rejected) {
+      assert.deepEqual(gateResult(gate, request), { allowed: false, status: 403 }, `${name} fails the administration gate`);
+    }
+  }
+
+  const local = await api("/api/protected");
+  assert.equal(local.status, 200);
+  assert.equal(local.headers.get("x-fanhao-library-admin"), "1");
+  assert.equal(local.headers.get("x-fanhao-account-owner"), "guest");
+  assert.equal(local.headers.get("x-fanhao-account-role"), "guest");
+  const proxied = await api("/api/protected", { headers: { "X-Forwarded-Host": "public.example" } });
+  assert.equal(proxied.status, 200);
+  assert.equal(proxied.headers.get("x-fanhao-library-admin"), "0");
+  const user = await api("/api/protected", { token: ordinaryUser });
+  assert.equal(user.status, 200);
+  assert.equal(user.headers.get("x-fanhao-library-admin"), "0");
+  assert.equal((await api("/api/protected", { token: admin })).headers.get("x-fanhao-library-admin"), "1");
+  for (const route of ["/api/admin/fixture", "/api/delete/fixture"]) {
+    assert.equal((await api(route, { body: {} })).status, 403, "a localhost mutation requires Origin");
+    assert.equal((await api(route, { body: {}, headers: { Origin: base, "X-FanHao-Account-Owner": "guest" } })).status, 200);
+  }
+  assert.equal((await api("/api/accounts/admin/settings")).status, 401, "user administration still requires a real admin account");
+}
+
+async function verifyRetiredLegacyCookie({ legacyCookie, legacyToken, ordinaryUser, expiredUser }) {
+  const services = createAuthServices({ authSecretPath: path.join(root, "legacy-disabled-auth-secret.txt"), accountsDbPath: dbPath,
+    ensureDataDir() {}, readBodyText, sendJson, sendHtml, redirect, now: () => time });
+  const listener = http.createServer(createApp(services, createGates(services)));
+  try {
+    await new Promise((resolve, reject) => listener.once("error", reject).listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${listener.address().port}`;
+    const headers = { Origin: origin, Referer: `${origin}/short-videos`, "Sec-Fetch-Site": "same-origin" };
+    const post = (route, options = {}) => api(route, { cookie: legacyCookie, body: {}, headers, ...options }, origin);
+    for (const route of ["/api/admin/fixture", "/api/delete/fixture"]) {
+      const accepted = await post(route);
+      assert.equal(accepted.status, 200, "the retired web cookie does not block direct local administration");
+      assert.equal(accepted.headers.get("x-fanhao-library-admin"), "1");
+      assert.equal(accepted.headers.get("x-fanhao-account-owner"), "guest");
+      assert.equal(accepted.headers.get("x-fanhao-account-role"), "guest");
+      assert.equal((await post(route, { token: legacyToken })).status, 403, "a retired bearer credential still blocks the fallback");
+      assert.equal((await post(route, { headers: { ...headers, Authorization: "invalid" } })).status, 403);
+      assert.equal((await post(route, { headers: { ...headers, "X-Forwarded-Host": "public.example" } })).status, 403);
+      assert.equal((await post(route, { cookie: `fanhao_web_auth=${ordinaryUser}` })).status, 403);
+      assert.equal((await post(route, { cookie: `fanhao_web_auth=${expiredUser}` })).status, 401);
+    }
+    assert.equal((await api("/api/accounts/admin/settings", { cookie: legacyCookie }, origin)).status, 401);
+  } finally {
+    if (listener.listening) {
+      listener.closeAllConnections();
+      await new Promise((resolve) => listener.close(resolve));
+    }
+    services.closeAccounts();
+  }
 }
 
 async function startDelayedLegacyLogin() {
@@ -271,7 +373,7 @@ async function verifyAppProxyBoundary(admin, reader, mode) {
   }
   const headers = { Host: "public.example", Origin: appHeaders.origin, "X-FanHao-Client": "android" };
   for (const route of ["/api/admin/fixture", "/api/delete/fixture"]) {
-    assert.equal((await api(route, { token: admin, method: "POST", body: {}, headers })).status, 403,
+    assert.equal((await api(route, { token: admin, method: "POST", body: {}, headers })).status, 401,
       `${mode}: real HTTP rejects public-host Android administration`);
   }
   const login = await api("/api/accounts/login", { body: account("strict-new-user"), headers });

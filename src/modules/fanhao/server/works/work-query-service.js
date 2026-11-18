@@ -529,22 +529,24 @@ export function createWorkQueryService({
 
   function loadListPayload(url) {
     const scope = peopleScopeService.normalize(url.searchParams.get("scope"));
+    const excludeWestern = url.searchParams.get("excludeWestern") === "1";
     const category = normalizeWorkCategory(url.searchParams.get("category"));
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset]);
+    const pageCacheKey = JSON.stringify([scope, category, filter, sort, limit, offset, excludeWestern]);
     const cachedPage = readListPage(pageCacheKey);
     if (cachedPage) return cachedPage;
 
     const stamp = currentStamp();
-    const source = cachedListSourceResult(scope, filter, stamp, category);
+    const source = cachedListSourceResult(scope, filter, stamp, category, excludeWestern);
     const filtered = source.works;
     const works = sortWorkList(filtered, sort);
     const payload = pagedWorksPayload(works, url, {
       category,
-      categories: category === "all" ? undefined : categorySummaryItems(stamp),
+      categories: category === "all" ? undefined : categorySummaryItems(stamp).map(option =>
+        excludeWestern && option.value === "western" ? { ...option, count: 0 } : option),
       filter,
       facets: workFacets(filtered)
     });
@@ -595,27 +597,28 @@ export function createWorkQueryService({
     return cachedListSourceResult(scope, filter, stamp, requestedCategory).works;
   }
 
-  function cachedListSourceResult(scope, filter, stamp = currentStamp(), requestedCategory = "all") {
-    return scopedWorkInfoResult(() => loadListSourceResult(scope, filter, stamp, requestedCategory));
+  function cachedListSourceResult(scope, filter, stamp = currentStamp(), requestedCategory = "all", excludeWestern = false) {
+    return scopedWorkInfoResult(() => loadListSourceResult(scope, filter, stamp, requestedCategory, excludeWestern));
   }
 
-  function loadListSourceResult(scope, filter, stamp, requestedCategory) {
+  function loadListSourceResult(scope, filter, stamp, requestedCategory, excludeWestern) {
     ensureDerivedCacheStamp();
     const category = normalizeWorkCategory(requestedCategory);
     const filters = requestedFilters(filter);
     const filterKey = filters.length ? filters.join(",") : "all";
-    const cacheKey = `${scope}:${category}:${filterKey}`;
+    const scopeKey = excludeWestern ? `${scope}:nonWestern` : scope;
+    const cacheKey = `${scopeKey}:${category}:${filterKey}`;
     const cached = readFilterCache(listSourceCache, cacheKey);
     const filterStamp = filters.some((item) => userStateFilters.has(item)) ? `${stamp}:${userStateStamp()}` : stamp;
     let filtered = cached?.stamp === filterStamp ? cached.works : null;
     let cacheable = true;
 
     if (!filtered) {
-      const scopedCacheKey = `${scope}:${category}:all`;
+      const scopedCacheKey = `${scopeKey}:${category}:all`;
       const scopedCached = readFilterCache(listSourceCache, scopedCacheKey);
       const scoped = scopedCached?.stamp === stamp
         ? { works: scopedCached.works, cacheable: true }
-        : worksForScopeAndCategoryResult(scope, category, stamp);
+        : worksForScopeAndCategoryResult(scope, category, stamp, excludeWestern);
       const scopedWorks = scoped.works;
       cacheable = scoped.cacheable !== false;
       if (cacheable && workInfoReadCacheable()) writeFilterCache(listSourceCache, scopedCacheKey, { stamp, works: scopedWorks });
@@ -629,7 +632,8 @@ export function createWorkQueryService({
     return { works: filtered, cacheable };
   }
 
-  function worksForScopeAndCategoryResult(scope, category, stamp) {
+  function worksForScopeAndCategoryResult(scope, category, stamp, excludeWestern) {
+    if (excludeWestern && (scope === "western" || category === "western")) return { works: [], cacheable: true };
     if (scope === "main" && category !== "all") {
       const loaded = categorySourcesResult(stamp);
       return { works: loaded.sources.get(category) || [], cacheable: loaded.cacheable };
@@ -642,7 +646,8 @@ export function createWorkQueryService({
     const matchesScope = workMatcher(scope);
     const matchesWestern = workMatcher("western");
     return { works: loaded.works.filter((work) =>
-      matchesScope(work) && (category === "all" || workCategory(work, matchesWestern) === category)), cacheable: loaded.cacheable };
+      matchesScope(work) && (!excludeWestern || !matchesWestern(work))
+        && (category === "all" || workCategory(work, matchesWestern) === category)), cacheable: loaded.cacheable };
   }
 
   function categorySources(stamp = currentStamp()) {
@@ -672,6 +677,11 @@ export function createWorkQueryService({
 
   function workMatcher(scope) {
     return peopleScopeService.workMatcher?.(scope) || ((work) => peopleScopeService.workMatches(work, scope));
+  }
+
+  function withoutWesternWorks(works) {
+    const matchesWestern = workMatcher("western");
+    return works.filter(work => !matchesWestern(work));
   }
 
   function workCategory(work, matchesWestern) {
@@ -771,19 +781,20 @@ export function createWorkQueryService({
       timings[name] = Math.round(performance.now() - startedAt);
     };
     const rawQuery = (url.searchParams.get("q") || "").trim();
+    const excludeWestern = url.searchParams.get("excludeWestern") === "1";
     const category = normalizeWorkCategory(url.searchParams.get("category"));
     const filter = url.searchParams.get("filter") || "all";
     const sort = url.searchParams.get("sort") || "releaseDesc";
     const limit = clampInteger(url.searchParams.get("limit"), defaultWorkLimit, 1, maxWorkLimit);
     const offset = clampInteger(url.searchParams.get("offset"), 0, 0, Number.MAX_SAFE_INTEGER);
-    const pageCacheKey = JSON.stringify([rawQuery, category, filter, sort, limit, offset]);
+    const pageCacheKey = JSON.stringify([rawQuery, category, filter, sort, limit, offset, excludeWestern]);
     const cachedPage = readSearchPage(pageCacheKey);
     mark("pageCache");
     if (cachedPage) {
       timings.pageCacheHit = true;
       return searchPayloadWithTimings(cachedPage, url, rawQuery, timings, mark);
     }
-    const source = cachedSearchSource(rawQuery, timings, mark);
+    const source = cachedSearchSource(rawQuery, timings, mark, excludeWestern);
     mark("source");
     const categoryWorks = cachedSearchCategory(source, category);
     mark("category");
@@ -834,11 +845,11 @@ export function createWorkQueryService({
     searchPageCache = new Map();
   }
 
-  function cachedSearchSource(rawQuery, timings = {}, mark = () => {}) {
-    return withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => loadSearchSource(rawQuery, timings, mark)).value).value;
+  function cachedSearchSource(rawQuery, timings = {}, mark = () => {}, excludeWestern = false) {
+    return withWorkSearchReadStatus(() => withWorkInfoReadStatus(() => loadSearchSource(rawQuery, timings, mark, excludeWestern)).value).value;
   }
 
-  function loadSearchSource(rawQuery, timings, mark) {
+  function loadSearchSource(rawQuery, timings, mark, excludeWestern) {
     ensureDerivedCacheStamp();
     const workStamp = currentStamp();
     const stamp = `${workStamp}:${peoplePayloadStamp()}`;
@@ -848,7 +859,7 @@ export function createWorkQueryService({
       derivedBudget.clear(searchSourceCache);
     }
 
-    const cacheKey = String(rawQuery || "").toLowerCase();
+    const cacheKey = JSON.stringify([String(rawQuery || "").toLowerCase(), excludeWestern]);
     if (searchSourceCache.has(cacheKey)) {
       const cached = derivedBudget.read(searchSourceCache, cacheKey);
       timings.sourceCacheHit = true;
@@ -859,9 +870,10 @@ export function createWorkQueryService({
     if (classification) {
       const nextClassification = mediaClassificationSearch(classification.query, { nested: true });
       const base = classification.query && !nextClassification
-        ? loadSearchSource(classification.query, timings, mark) : null;
+        ? loadSearchSource(classification.query, timings, mark, true) : null;
       const matchesMain = workMatcher("main");
-      const works = (base?.works || allWorks()).filter((work) => !work.missingLocal
+      const candidates = base?.works || withoutWesternWorks(allWorks());
+      const works = candidates.filter((work) => !work.missingLocal
         && matchesMain(work)
         && (classification.key === "all" || matchesWorkTraitFilter(traitsForWork(work, workStamp), classification.key))
         && (!nextClassification || nextClassification.key === "all" || matchesWorkTraitFilter(traitsForWork(work, workStamp), nextClassification.key)));
@@ -906,7 +918,7 @@ export function createWorkQueryService({
     mark("actorEnrich");
     const matchesExactPerson = (work) => exactPersonIds.has(work.personId)
       || exactPersonLocalWorkIds.has(String(work.id || ""));
-    const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey) : null;
+    const exactLocalWork = exactCodeKey ? findExactLocalWork(exactCodeKey, excludeWestern) : null;
     const rankingResult = localMarkerQuery || exactLocalWork || codePrefixQuery || exactPersonSearch
       ? { works: [], cacheable: true }
       : rankingMissingSearchResult ? rankingMissingSearchResult() : { works: rankingMissingSearchWorks(), cacheable: true };
@@ -949,12 +961,13 @@ export function createWorkQueryService({
           ? storedWorkCodeKey(work.infoSummary?.code || work.directoryName || work.title) === exactCodeKey
           : matchesQuery(work));
     mark("workMatches");
-    const matchedWorks = dedupeWorksForDisplay([
+    const candidates = [
       ...localMatches,
       ...(fastMissingMatches || []),
       ...rankingMissingMatches,
       ...actorMissingMatches
-    ]).filter(workMatcher("main"));
+    ];
+    const matchedWorks = dedupeWorksForDisplay(excludeWestern ? withoutWesternWorks(candidates) : candidates).filter(workMatcher("main"));
     mark("dedupe");
     // Person chips open the full person endpoint on selection.
     const { readProfile } = peopleSearch;
@@ -964,7 +977,8 @@ export function createWorkQueryService({
       peopleScopeService.personMatcher?.(scope)
         || ((person) => peopleScopeService.personMatches?.(person, scope) ?? (scope === "main"))
     ]);
-    const people = peopleSearch.people.map(person => ({
+    const searchPeopleInScope = excludeWestern ? peopleSearch.people.filter(personScopes[0][1]) : peopleSearch.people;
+    const people = searchPeopleInScope.map(person => ({
       ...presentPerson(person, { skipFallbackAvatar: true }),
       searchScopes: personScopes.filter(([, matches]) => matches(person)).map(([scope]) => scope)
     }));
@@ -1087,8 +1101,14 @@ export function createWorkQueryService({
     return row;
   }
 
-  function findExactLocalWork(codeKey) {
-    return localSearchWorkByCodeKey().get(codeKey) || null;
+  function findExactLocalWork(codeKey, excludeWestern) {
+    const first = localSearchWorkByCodeKey().get(codeKey);
+    if (!first || !excludeWestern) return first || null;
+    const matchesWestern = workMatcher("western");
+    if (!matchesWestern(first)) return first;
+    return findLocalWorksByCodePrefix(codeKey).find(work =>
+      !matchesWestern(work) && [work.infoSummary?.code, work.directoryName, work.title]
+        .some(value => storedWorkCodeKey(value || "") === codeKey)) || null;
   }
 
   function findLocalWorksByCodePrefix(codePrefix) {

@@ -39,7 +39,23 @@ export function checkWebAccountResponse(response, snapshot, explicitOwner = "") 
   // transition. Explicit cross-tab identity switches still reload via revision.
   if (owner && context.owner && owner !== context.owner && !(explicitOwner === "guest" && !response.headers?.get?.("X-FanHao-Account-Owner"))) { invalidate(); throw changedError(); }
   if (snapshot.revision !== context.revision) throw changedError();
-  if (owner) context.owner = owner;
+  if (!owner) return;
+  if (owner !== context.owner) {
+    context.owner = owner;
+    context.libraryAdmin = undefined;
+  }
+  const libraryAdmin = response.headers?.get?.("X-FanHao-Library-Admin");
+  if (libraryAdmin === "1" || libraryAdmin === "0") {
+    context.libraryAdmin = libraryAdmin === "1";
+  } else {
+    const role = response.headers?.get?.("X-FanHao-Account-Role");
+    if (["admin", "user", "guest"].includes(role)) context.libraryAdmin = role === "admin";
+  }
+}
+
+export function canManageWebLibrary(fallback = false) {
+  captureWebAccount();
+  return context.libraryAdmin ?? fallback;
 }
 
 export function publishWebAccountChange(owner = "") {
@@ -47,6 +63,7 @@ export function publishWebAccountChange(owner = "") {
   try { globalThis.localStorage?.setItem(STORAGE_KEY, revision); } catch {}
   context.revision = readRevision();
   context.owner = owner;
+  context.libraryAdmin = undefined;
 }
 
 export function invalidateWebAccount() { invalidate(); }

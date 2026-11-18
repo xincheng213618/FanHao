@@ -1,6 +1,6 @@
-import { fetchJson } from "../../js/api.js?v=assets-06c1d7f13464";
-import { captureAccountOwner } from "../../js/account-owner.js?v=assets-06c1d7f13464";
-import { musicProgressBody } from "./progress-session.js?v=assets-06c1d7f13464";
+import { fetchJson } from "../../js/api.js?v=assets-78764ed05056";
+import { captureAccountOwner } from "../../js/account-owner.js?v=assets-78764ed05056";
+import { musicProgressBody } from "./progress-session.js?v=assets-78764ed05056";
 
 export function captureMusicProgressOwner(activeUrl) {
   const scope = captureAccountOwner(activeUrl);

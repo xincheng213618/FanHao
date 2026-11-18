@@ -33,7 +33,7 @@ async function save(page) { await page.getByRole("button", { name: "保存设置
 try {
   await api("/setup", { username: "access-owner", password });
   const guest = await pageAt("/login");
-  assert.equal(await guest.getByText("使用原访问密码", { exact: true }).count(), 1);
+  assert.equal(await guest.getByText("使用原访问密码", { exact: true }).count(), 0);
   await guest.goto(base + "/account-protected-fixture"); await guest.getByRole("heading", { name: "资料库测试页面" }).waitFor();
   const owner = await pageAt("/account"); await signIn(owner, "access-owner"); await settings(owner);
   assert.equal(await owner.getByLabel("访问资料库必须登录账号", { exact: true }).isChecked(), false);
@@ -73,7 +73,8 @@ try {
   await android.getByLabel("访问资料库必须登录账号", { exact: true }).uncheck(); await save(android);
   assert.equal((await api("/status")).accountLoginRequired, false);
   await guest.goto(base + target); await guest.getByRole("heading", { name: "资料库测试页面" }).waitFor();
-  await guest.goto(base + "/account"); await guest.getByText("使用原访问密码", { exact: true }).waitFor();
+  await guest.goto(base + "/account"); await guest.getByLabel("用户名", { exact: true }).waitFor();
+  assert.equal(await guest.getByText("使用原访问密码", { exact: true }).count(), 0);
   await owner.getByRole("button", { name: "操作记录", exact: true }).click(); await owner.getByLabel("搜索操作记录").waitFor(); await ready(owner);
   assert.equal(await owner.getByText("调整访问设置", { exact: true }).count(), 2);
   assert.deepEqual(errors, []);

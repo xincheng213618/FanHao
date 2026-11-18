@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { discoverFanHaoModuleDefinitions } from "../src/fanhao/module-registry.js";
 import { staticCacheControl } from "../src/platform/server/static-files.js";
 import { createVerificationAdvisories } from "./verification_advisories.mjs";
+import { mergeAndroidModuleCatalog } from "../android-client/www/js/android-module-registry.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const bootstrapDir = path.join(root, "src", "bootstrap");
@@ -16,7 +17,7 @@ const androidModulesDir = path.join(androidClientDir, "modules");
 const androidPlatformDir = path.join(androidClientDir, "platform");
 const definitions = await discoverFanHaoModuleDefinitions({ modulesDir });
 const byId = new Map(definitions.map((definition) => [definition.id, definition]));
-const requiredModules = ["fanhao", "photos", "media", "novels", "short-videos", "music", "tools"];
+const requiredModules = ["fanhao", "photos", "media", "novels", "short-videos", "music"];
 const advisories = createVerificationAdvisories("module-structure");
 
 for (const id of requiredModules) {
@@ -167,14 +168,13 @@ assert(
 );
 assert(!androidAppSource.includes("FANHAO_TOP_TABS"), "Android shell must not keep FanHao chrome definitions");
 assert(!androidAppSource.includes("setTopSecondaryTabs"), "Android shell must not implement module secondary tabs");
-const androidNavigationOrder = requiredModules
-  .map((id) => byId.get(id))
+const androidNavigationOrder = mergeAndroidModuleCatalog(requiredModules.map((id) => byId.get(id)))
   .sort((a, b) => Number(a.client.android.order ?? a.order) - Number(b.client.android.order ?? b.order))
   .map((definition) => definition.id);
 assert.deepEqual(
   androidNavigationOrder,
   ["fanhao", "photos", "media", "short-videos", "novels", "music", "tools"],
-  "short videos must stay in the center of the seven-item Android navigation"
+  "Android must retain the local My tab with a catalog containing only server modules"
 );
 const androidMusicEntry = fs.readFileSync(path.join(androidModulesDir, "music", "android-module.js"), "utf8");
 const androidMusicViews = fs.readFileSync(path.join(androidModulesDir, "music", "music-views.js"), "utf8");
@@ -239,7 +239,6 @@ const webStylePaths = [
   "css/shell.css",
   "modules/fanhao/styles.css",
   "modules/content-index/styles.css",
-  "modules/tools/styles.css",
   "modules/fanhao/work-cards.css",
   "modules/system/admin.css",
   "css/player.css",

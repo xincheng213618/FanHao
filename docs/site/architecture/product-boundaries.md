@@ -16,13 +16,7 @@ sources:
   - tools/fanhao_file_workflows.mjs
   - tests/verify_product_boundaries.mjs
   - tests/verify_file_workflows.mjs
-  - tests/verify_file_workflows_ui.mjs
-  - src/modules/fanhao/server/taste/source.js
-  - src/modules/fanhao/server/taste/profile.js
-  - src/modules/fanhao/server/taste/service.js
-  - public/modules/fanhao/taste/app.js
-  - tests/verify_taste.mjs
-  - tests/verify_taste_browser.mjs
+  - tests/verify_media_intake.mjs
 ---
 
 # 独立产品与文件工作流
@@ -69,10 +63,6 @@ $env:FANHAO_CORE_DB = Join-Path $env:FANHAO_DATA_DIR 'fanhao-core-v2.sqlite'
 $env:FANHAO_CORE_IMAGE_DB = Join-Path $env:FANHAO_DATA_DIR 'fanhao-core-images.sqlite'
 $env:LIBRARY_ROOTS = (Resolve-Path '.\deploy\fanhao\library').Path
 $env:FANHAO_WESTERN_ROOTS = (Resolve-Path '.\deploy\fanhao\western').Path
-$env:FANHAO_WORKFLOW_ROOTS = @(
-  (Resolve-Path '.\deploy\fanhao\incoming').Path
-  (Resolve-Path '.\deploy\fanhao\organized').Path
-) -join ';'
 npm run start:fanhao
 ```
 
@@ -92,32 +82,11 @@ npm run start:short-videos
 
 短视频数据库旁的 `short-video-settings.json`、`short-video-cache/` 由短视频产品管理。未保存新设置时兼容读取原 `app-config.json` 的转码并发数；后续短视频设置写入自己的配置。旧共享缓存不会自动搬迁或删除。
 
-## 整理与迁移界面
+## 媒体工作台与维护
 
-聚合应用和独立番号均提供 `/fanhao/file-workflows`，可从番号侧栏或后台进入。所有任务接口要求本机或局域网同源管理员权限。
+聚合应用和独立番号均提供 `/fanhao/file-workflows/intake` 的视频洗版工作台。追加 `?mode=subtitle` 可进入字幕工作台。已入库作品可从作品详情发起“作品迁移”，由 `work_move_jobs` 同步数据库关系与文件路径。
 
-1. 115 完成本地下载后，填入源目录与目标目录。两者需已存在，位于 `FANHAO_WORKFLOW_ROOTS`，且不能相同或互相包含。未设置时沿用番号资料根目录。
-2. 选择“按番号整理”或“保持结构迁移”。整理从源目录第一层名称识别唯一番号，在目标目录下创建番号目录，保留原文件名、分段与相对层级；不做在线元数据补全或演员归类。
-3. 生成预览，逐项检查源文件、目标路径、大小与保留原因。预览只保存任务记录，不改动媒体文件。
-4. 确认后执行。按文件显示进度；可在当前文件结束后停止，并从历史记录继续。服务重启不会自动执行旧计划。
-
-任务保存在产品数据目录的 `file-workflows/`。执行采用复制、SHA-256 校验、无覆盖发布、持久化回执后移除源文件；不删除空目录。目标文件系统需要支持硬链接以实现无覆盖发布，不支持时任务停止并保留源文件。跨卷移动通过复制完成，需要足够的目标空间。
-
-同名冲突、下载未完成、目录链接以及已入库文件会保留原位。已入库检查直接查询 `local_files`，不依赖页面是否加载过资料库；预览后再次执行会重新检查。不要对同一目录同时运行下载、扫描入库或其他文件整理程序。
-
-已入库作品从作品详情发起原有“作品迁移”，由 `work_move_jobs` 流程同步数据库关系与路径；新的通用文件迁移不替代这项业务操作。原 `tools/fanhao.py`、`tools/movefile.py` 没有直接暴露到网页执行。
-
-CLI `tools/fanhao_file_workflows.mjs` 与网页使用同一个计划协议。必须显式传入 `--data-dir`、`--root` 和 `--core-db`，核心库只读打开以保护已入库文件；`--help` 显示预览与按计划 ID 执行的参数。独立番号的旧作业入口仅保留已绑定本产品数据库和根目录的脚本。
-
-## 馆藏口味分析
-
-番号侧栏的“口味分析”打开 `/fanhao/taste`。`GET /api/fanhao/taste` 沿用本机或局域网同源管理权限，响应禁止缓存到共享代理。分析由独立 Worker 只读打开本产品核心库；请求合并、短期缓存、超时和停机纳入模块生命周期。不扫描真实磁盘，不采集浏览器历史，不写入馆藏评分。
-
-统计只包含已登记本地视频的作品，按规范番号去重。作品目录前缀 `[A]` 表示特别喜欢，其他馆藏提供基础偏好；祖先存储目录的同名标记不等同于作品评分。人物按收藏目录身份或唯一同名目录归属分析，作品的全部出演名单不直接当作收藏人物。内容标签、厂牌、系列、番号前缀各自统计，资源状态和技术标签不参与内容偏好。
-
-每个维度显示馆藏和 `[A]` 的资料覆盖率，仅用有该类资料的作品计算基准。突出偏好至少要求同一特征有三部 `[A]` 样本，并以二十个基准样本平滑小样本。页面可切换突出程度和标记次数，查看样本、导出当前 JSON，并探索符合已有偏好的未标记馆藏。排序不表示喜欢概率，资料缺失与特征共现的影响保留在页面说明中。
-
-命令行 `tools/analyze_taste.mjs --db <数据库> --output <新建的 JSON 文件>` 使用相同分析入口，数据库只读打开，输出拒绝覆盖已有文件。真实馆藏分析结果属于私有数据，不加入公开文档站。
+通用文件整理与迁移可通过 CLI `tools/fanhao_file_workflows.mjs` 运行。必须显式传入 `--data-dir`、`--root` 和 `--core-db`。CLI 以只读方式查询核心库，保护已入库文件。运行 `--help` 可查看预览和按计划 ID 执行的参数。
 
 ## 验证与下一步
 
@@ -126,9 +95,8 @@ npm run verify:products
 node tests/verify_product_boundaries.mjs --browser
 npm run verify:file-workflows
 npm run verify:file-workflows-ui
-npm run verify:taste
 ```
 
-产品验证在临时源码副本、临时 SQLite 和随机端口测试独立启动、聚合启动、模块隔离与停机。文件任务验证覆盖冲突、源文件变化、已入库拦截、中断恢复和锁；浏览器验证使用合成小文件，涵盖预览、取消、确认、记录恢复及窄屏布局。它们不代表真实媒体、大文件、NAS 文件系统或远程部署验收。
+产品验证在临时源码副本、临时 SQLite 和随机端口测试独立启动、聚合启动、模块隔离与停机。文件任务和媒体洗版验证使用合成小文件，覆盖路径校验、冲突、源文件变化与中断恢复。
 
 后续迭代可依次完成：下载器文件同步的 API 化、115 下载适配器、番号装配入口继续内聚、按产品打包发布和独立 Android 客户端。每一步保留聚合装配方式，不引入共享业务库。

@@ -8,6 +8,7 @@ export function createSystemRuntime(deps) {
   const admin = createAdminRuntime(deps.admin);
   const androidUpdate = createAndroidUpdateRuntime(deps.androidUpdate);
   const computerControl = createComputerControlRuntime({
+    canUseLanGuestSleep: deps.canUseLanGuestSleep,
     readJsonBody: deps.admin.readJsonBody,
     requireLocalAdmin: deps.admin.requireLocalAdmin,
     sendJson: deps.admin.sendJson

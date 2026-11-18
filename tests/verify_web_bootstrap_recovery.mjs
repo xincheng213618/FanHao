@@ -25,8 +25,11 @@ export async function runWebBootstrapFixture({ casePattern = "", sourceOverrides
       if (gate) { gate.used = true; gate.requestedResolve(); await gate.promise; }
       if (pathname === failurePath) { send(res, "Synthetic startup module unavailable", "text/plain", 503); return; }
       if (pathname === "/api/modules") { send(res, JSON.stringify({ product: { id: "suite" }, modules: [] }), "application/json"); return; }
+      if (pathname === "/api/music/tracks") { send(res, JSON.stringify({ tracks: [], total: 0 }), "application/json"); return; }
+      if (pathname === "/api/music/playlists") { send(res, JSON.stringify({ playlists: [] }), "application/json"); return; }
+      if (pathname === "/api/music/smart-playlists") { send(res, JSON.stringify({ smartPlaylists: [] }), "application/json"); return; }
       if (pathname.startsWith("/api/")) { unexpected.push(`${req.method} ${pathname}`); throw new Error(`unmodelled private API ${req.method} ${pathname}`); }
-      const asset = /^\/(?:music|tools|photo|short-videos|fanhao)(?:\/|$)/.test(pathname) ? "/index.html" : pathname;
+      const asset = /^\/(?:music|photo|short-videos|fanhao)(?:\/|$)/.test(pathname) ? "/index.html" : pathname;
       const target = path.resolve(publicRoot, asset.replace(/^\/+/, ""));
       assert(target.startsWith(publicRoot + path.sep));
       const body = overrides.has(asset) ? overrides.get(asset) : await fs.promises.readFile(target);
@@ -73,13 +76,13 @@ export async function runWebBootstrapFixture({ casePattern = "", sourceOverrides
     await run("bootstrap native reload is single flight and preserves the complete URL", async () => {
       for (const key of ["Enter", "Space"]) {
         failurePath = "/standalone-app.js"; const page = await newPage();
-        let route = "/tools?client=android&source=synthetic%20link#keep-position";
+        let route = "/music?mode=library&client=android&source=synthetic%20link#keep-position";
         let reload;
         try {
           await page.setViewportSize({ width: 320, height: 740 });
           await page.goto(base + route, { waitUntil: "load" }); await settled(page);
           if (key === "Space") {
-            route = "/tools?client=android&source=new%20current#new-position";
+            route = "/music?mode=library&client=android&source=new%20current#new-position";
             await page.evaluate(route => history.replaceState(null, "", route), route);
           }
           const button = page.locator("#appStartupReload");
@@ -89,15 +92,15 @@ export async function runWebBootstrapFixture({ casePattern = "", sourceOverrides
             hit: button.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) }; });
           assert(hit.left >= -1 && hit.right <= 321 && hit.height >= 44 && hit.hit, "320px startup reload must be fully visible with a native 44px hit target");
           const before = documentReads(route); failurePath = "";
-          reload = hold(url => url.pathname === "/tools");
+          reload = hold(url => url.pathname === "/music");
           const navigated = page.waitForNavigation({ waitUntil: "load" });
           navigated.catch(() => {});
           await page.keyboard.press(key); await requested(reload);
-          assert.equal(requests.filter(request => request.url.startsWith('/tools')).at(-1).url, route.split('#')[0], 'startup reload must request the current query rather than the originally captured startup URL');
+          assert.equal(requests.filter(request => request.url.startsWith('/music')).at(-1).url, route.split('#')[0], 'startup reload must request the current query rather than the originally captured startup URL');
           await page.keyboard.press("Enter"); await page.keyboard.press("Space");
           assert.equal(documentReads(route), before + 1, "repeated native activation must start only one document reload");
           reload.release(); await navigated; await settled(page);
-          await page.locator(".game-library").waitFor();
+          await page.locator(".music-layout").waitFor();
           assert.equal(documentReads(route), before + 1, "a busy recovery control must not schedule another reload after document arrival");
           assert.equal(await page.evaluate(() => window.__startupInitialHref), base + route, "reloading startup must preserve the current exact path, query, and fragment before ordinary host canonicalization");
           assert.equal(await page.locator("#appStartupNotice").count(), 0);
@@ -115,11 +118,11 @@ export async function runWebBootstrapFixture({ casePattern = "", sourceOverrides
           await page.goto(`${base}/music?mode=library`, { waitUntil: pending ? "commit" : "load" });
           if (pending) { await requested(gate); await page.waitForFunction(() => document.readyState !== "loading"); }
           else { await settled(page); await page.locator("#appStartupReload").evaluate(button => { window.retiredStartupReload = button; }); }
-          const beforeDocuments = requests.filter(request => /^\/(?:music|tools)\?/.test(request.url)).length;
+          const beforeDocuments = requests.filter(request => /^\/(?:music|photo)\?/.test(request.url)).length;
           // Lifecycle double: an independently accepted same-document route/UI
           // replaces a bootstrap which has not obtained the current host yet.
           await page.evaluate(accepted => {
-            history.replaceState(null, "", "/tools?accepted=new#current");
+            history.replaceState(null, "", "/photo?accepted=new#current");
             if (!accepted) return;
             document.documentElement.classList.remove("app-module-loading", "app-styles-loading");
             document.body.innerHTML = '<main id="new-bootstrap-owner"><h1>Accepted current view</h1><input aria-label="Current edit" value="new raw draft"></main>';
@@ -135,19 +138,18 @@ export async function runWebBootstrapFixture({ casePattern = "", sourceOverrides
             assert.equal(await page.locator("#appStartupReload").count(), 1);
             assert.equal(await page.evaluate(() => document.activeElement === document.body), true, "startup failure recovery must not automatically steal focus");
           }
-          assert.equal(page.url(), `${base}/tools?accepted=new#current`);
-          assert.equal(requests.filter(request => /^\/(?:music|tools)\?/.test(request.url)).length, beforeDocuments, "a retired bootstrap reload must not reload a newer route");
+          assert.equal(page.url(), `${base}/photo?accepted=new#current`);
+          assert.equal(requests.filter(request => /^\/(?:music|photo)\?/.test(request.url)).length, beforeDocuments, "a retired bootstrap reload must not reload a newer route");
           assert.deepEqual(page.startupErrors, []);
         } finally { gate?.release(); await page.close(); pages.delete(page); failurePath = ""; }
       }
     });
-    await run("bootstrap normal tools startup remains usable with failed optional styles", async () => {
+    await run("bootstrap normal music startup remains usable with failed optional styles", async () => {
       for (const styleFailure of [false, true]) {
         failurePath = styleFailure ? "/css/foundation.css" : "";
         const page = await newPage();
         try {
-          await page.goto(`${base}/tools`, { waitUntil: "load" }); await settled(page); await page.locator(".game-library").waitFor();
-          assert.equal(await page.locator(".game-library-card").count(), 4);
+          await page.goto(`${base}/music?mode=library`, { waitUntil: "load" }); await settled(page); await page.locator(".music-layout").waitFor();
           assert.equal(await page.locator('#appStartupNotice[role="alert"]').count(), 0, "an optional stylesheet failure must not become a fatal module failure");
           assert.equal(await page.locator("#appStartupNotice").count(), Number(styleFailure), "only an actual stylesheet failure should show a nonfatal startup notice");
           if (styleFailure) assert.equal(await page.locator("#appStartupNotice").getAttribute("role"), "status");

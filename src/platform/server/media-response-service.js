@@ -671,15 +671,25 @@ export function createMediaResponseService({
 
   async function downloadRemoteImage(remoteUrl, context) {
     const signal = AbortSignal.any([context.signal, AbortSignal.timeout(15000)]);
-    const response = await fetchRemoteImage(remoteUrl, {
-      signal,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
-        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        Referer: "https://javdb.com/"
-      }
-    });
+    let target = new URL(remoteUrl);
+    let response;
+    for (let redirect = 0; ; redirect++) {
+      response = await fetchRemoteImage(target.href, {
+        signal, redirect: "manual",
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36",
+          Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+          Referer: target.hostname === "pics.dmm.co.jp" ? "https://pics.dmm.co.jp/" : "https://javdb.com/"
+        }
+      });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      await response.body?.cancel().catch(() => {});
+      const location = response.headers.get("location");
+      if (!location || redirect >= 3) throw new Error("远程图片重定向无效");
+      target = new URL(location, target);
+      if (!isAllowedRemoteImageUrl(target)) throw new Error("远程图片重定向到未登记来源");
+    }
 
     if (!response.ok) {
       await response.body?.cancel().catch(() => {});
@@ -690,11 +700,16 @@ export function createMediaResponseService({
 
     const limit = Number.isFinite(Number(maxRemoteImageBytes)) && Number(maxRemoteImageBytes) > 0
       ? Math.trunc(Number(maxRemoteImageBytes)) : 20 * 1024 * 1024;
+    const contentType = response.headers.get("content-type");
+    if (contentType && !/^image\//i.test(contentType)) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error("远程地址未返回图片");
+    }
     const buffer = await readRemoteImageBody(response, limit, signal);
 
     return {
       buffer,
-      contentType: normalizeRemoteImageMime(response.headers.get("content-type"), remoteUrl)
+      contentType: normalizeRemoteImageMime(contentType, remoteUrl)
     };
   }
 
@@ -713,7 +728,6 @@ export function createMediaResponseService({
       byte_length: downloaded.buffer.length,
       updated_at: now
     };
-    rememberMediaBlobRow(`remote:${remoteUrl}`, row);
     await blobStore.upsertRemote({
       url: remoteUrl,
       urlHash: remoteImageCacheKey(remoteUrl),
@@ -722,6 +736,9 @@ export function createMediaResponseService({
       byteLength: downloaded.buffer.length,
       updatedAt: now
     });
+    if (!context.current()) return;
+    rememberMediaBlobRow(`remote:${remoteUrl}`, row);
+    return row;
   }
 
   async function serveCachedRemoteImage(req, res, url) {
@@ -761,6 +778,22 @@ export function createMediaResponseService({
     }
 
     enqueueRemoteImageWarm(remoteUrl);
+    if (url.searchParams.get("wait") === "1") {
+      const pending = remoteImageWarmer.result(remoteUrl);
+      let row;
+      if (pending) {
+        let timer;
+        const timeout = new Promise((resolve) => { timer = setTimeout(resolve, 15000); });
+        row = await Promise.race([pending, timeout]);
+        clearTimeout(timer);
+      }
+      if (res.destroyed || res.writableEnded || req.aborted) return;
+      if (!accepting || generation !== mediaGeneration) throw mediaImageStoppedError();
+      if (serveRemoteImageRow(res, row)) return;
+      res.writeHead(pending ? 502 : 503, { "Cache-Control": "no-store" });
+      res.end();
+      return;
+    }
     res.writeHead(302, {
       Location: remoteUrl,
       "Cache-Control": "no-store"

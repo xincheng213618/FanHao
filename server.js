@@ -180,13 +180,7 @@ const {
   PUBLIC_DIR,
   PYTHON_PATH,
   RECENT_WATCHED_DAYS,
-  REMOTE_WEB_PASSWORD,
   SHORT_VIDEO_ROOTS,
-  TOOL_DOWNLOAD_DIR,
-  TOOL_DOWNLOAD_TTL_MS,
-  TXT_TOOL_MAX_BODY_BYTES,
-  TXT_TOOL_MAX_FILE_BYTES,
-  TXT_TOOL_PREVIEW_BYTES,
   USER_STATE_PATH,
   VIDEO_EXTS,
   VIDEO_PROBE_CACHE_LIMIT,
@@ -1066,6 +1060,7 @@ const moduleRegistry = await discoverFanHaoModules({
   context: {
     moduleDeps: {
       system: {
+        canUseLanGuestSleep,
         admin: {
           accessAnalyticsService,
           adminActorAvatarService,
@@ -1118,14 +1113,15 @@ const moduleRegistry = await discoverFanHaoModules({
           libraryRoots: LIBRARY_ROOTS,
           videoProbeService,
           requireLocalAdmin,
+          requestAccess: (req) => requestAccess(req),
+          resolveCovers: resolveLtxLibraryCovers,
           coverUrl: (value) => {
             try {
               const cover = new URL(value);
-              return cover.protocol === "https:" && isAllowedRemoteImageUrl(cover) ? proxiedRemoteImageUrl(cover.href) : "";
+              return cover.protocol === "https:" && isAllowedRemoteImageUrl(cover) ? ltxRemoteCoverUrl(cover.href) : "";
             } catch { return ""; }
           }
         },
-        taste: { dbPath: CORE_DB_PATH, requireLocalAdmin, sendJson },
         duplicates: { dbPath: CORE_DB_PATH, roots: [...LIBRARY_ROOTS, ...WESTERN_LIBRARY_ROOTS],
           resolveWork: resolveLibraryWorkByPublicId, resolveVideo: resolveVideoFileByPublicId,
           getCoreDb, onIndexChanged: refreshLibrary,
@@ -1134,11 +1130,10 @@ const moduleRegistry = await discoverFanHaoModules({
           resolveWork: resolveLibraryWorkByPublicId, resolveVideo: resolveVideoFileByPublicId,
           requireLocalAdmin, readJsonBody, sendJson },
         workflows: {
-          dataDir: DATA_DIR, roots: SERVER_CONFIG.FILE_WORKFLOW_ROOTS,
-          indexedPaths: () => getCoreDb().prepare("SELECT file_path FROM local_files").all().map((row) => row.file_path),
           requireLocalAdmin, requestAccess: (req) => requestAccess(req), readJsonBody, sendJson,
           intake: {
             getDb: getCoreDb, sourceRoots: SERVER_CONFIG.MEDIA_INTAKE_ROOTS, libraryRoots: LIBRARY_ROOTS,
+            isWesternPath: peopleScopeService.sourcePathInWesternRoots,
             resolveWork: resolveLibraryWorkByPublicId,
             subtitleBackupRoot: path.join(DATA_DIR, "subtitle-backups"),
             relativeFromRoot: (...args) => relativeFromRoot(...args), onIndexChanged: refreshLibrary,
@@ -1356,20 +1351,6 @@ const moduleRegistry = await discoverFanHaoModules({
         roots: MUSIC_ROOTS,
         sendJson,
         serveDownloadFile
-      },
-      tools: {
-        cwd: PROJECT_ROOT,
-        maxBodyBytes: TXT_TOOL_MAX_BODY_BYTES,
-        maxFileBytes: TXT_TOOL_MAX_FILE_BYTES,
-        previewBytes: TXT_TOOL_PREVIEW_BYTES,
-        readJsonBody,
-        requireLocalAdmin,
-        sendJson,
-        toolDownloadDir: TOOL_DOWNLOAD_DIR,
-        ttlMs: TOOL_DOWNLOAD_TTL_MS
-      },
-      marketDashboard: {
-        sendJson
       }
     }
   },
@@ -1411,7 +1392,6 @@ const {
 } = createAuthServices({
   authSecretPath: AUTH_SECRET_PATH,
   accountsDbPath: path.join(DATA_DIR, "accounts.sqlite"),
-  remoteWebPassword: REMOTE_WEB_PASSWORD,
   ensureDataDir,
   readBodyText,
   sendJson,
@@ -2063,6 +2043,10 @@ function publicRemoteUrl(value) {
 
 function isAllowedRemoteImageUrl(parsed) {
   const hostname = String(parsed.hostname || "").toLowerCase();
+  if (parsed.username || parsed.password || parsed.port) return false;
+  if (hostname === "pics.dmm.co.jp") {
+    return parsed.protocol === "https:" && /^\/(?:digital|mono)\/video\/[a-z\d_-]+\/[a-z\d_-]+\.(?:jpe?g|png|webp)$/i.test(parsed.pathname);
+  }
   return (
     (parsed.protocol === "https:" || parsed.protocol === "http:") &&
     (hostname === "jdbstatic.com" ||
@@ -2070,6 +2054,24 @@ function isAllowedRemoteImageUrl(parsed) {
       hostname === "javdb.com" ||
       hostname.endsWith(".javdb.com"))
   );
+}
+
+function resolveLtxLibraryCovers(ids) {
+  const rows = workImageService.prewarmCoreWorkCoverMetadata(ids);
+  return new Map(ids.map((id) => {
+    const key = String(id);
+    const row = rows.get(key);
+    const work = library.worksById.get(key);
+    const cached = row?.has_image_blob ? workImageService.coreImageUrl(row) : "";
+    const local = work?.coverId ? `/media/image/${encodeURIComponent(work.coverId)}` : "";
+    const originals = [row?.remote_url, work?.infoSummary?.imageUrl, work?.remoteCoverUrl]
+      .map((url) => remoteImageTargetUrl(url)).filter(Boolean).map(ltxRemoteCoverUrl);
+    return [key, [cached, local, ...originals].filter(Boolean)];
+  }));
+}
+
+function ltxRemoteCoverUrl(url) {
+  return `${proxiedRemoteImageUrl(url)}&wait=1`;
 }
 
 function proxiedRemoteImageUrl(value) {
@@ -2478,7 +2480,7 @@ function pagedWorksPayload(works, url, extra = {}) {
 
 function requireTrustedNetworkPage(req, res, errorMessage) {
   const auth = requestAuthState(req, new URL(req.url || "/", "http://localhost"));
-  if (auth.reason === "expired-account" || (auth.accountLoginRequired && !auth.user) || (auth.user && auth.user.role !== "admin")) {
+  if (auth.user?.role !== "admin" && !auth.localAdministrator) {
     sendJson(res, 403, { error: "需要管理员权限" });
     return false;
   }
@@ -2494,6 +2496,14 @@ function requireLocalAdmin(req, res) {
   return requireTrustedNetworkPage(req, res, "后台管理只能在本机或局域网同源页面使用");
 }
 
+function canUseLanGuestSleep(req, url) {
+  const auth = requestAuthState(req, url);
+  if (auth.reason !== "app" || auth.user || !auth.access.clientIsLan || !auth.access.hostIsLan) return false;
+  if (!req.headers.origin || !isSameTrustedNetworkOrigin(req, auth.access)) return false;
+  return !Object.keys(req.headers).some(header => header.startsWith("x-forwarded-")
+    || ["forwarded", "via", "x-real-ip", "cf-connecting-ip"].includes(header));
+}
+
 function requireTrustedFileMutation(req, res) {
   return requireTrustedNetworkPage(req, res, "删除本地文件只能在本机或局域网同源页面使用");
 }
@@ -2503,6 +2513,8 @@ async function routeApi(req, res, url) {
 }
 
 async function routeMedia(req, res, url) {
+  if (["/admin", "/admin/", "/admin.html"].includes(url.pathname) && ["GET", "HEAD"].includes(req.method)
+    && !requireLocalAdmin(req, res)) return true;
   return moduleRegistry.routeMedia(req, res, url);
 }
 

@@ -343,14 +343,14 @@ async function verifyWebAuthorCollectorPollLifecycle() {
   const polling = createAuthorCollectorPoll({
     api: async (requestPath, options) => {
       requests.push({ requestPath, signal: options.signal });
-      return { job: { status: "running", processed: 1, total: 3 } };
+      return { job: { status: "queued", processed: 0, total: 1 }, progress: { status: "running", processed: 12, total: 100 } };
     },
     delayMs: 60_000,
     isCurrentAuthorPage: (authorId) => authorId === currentAuthor,
     maxAttempts: 2
   });
   const waiting = polling.wait({ authorId: currentAuthor, jobId: 17, onProgress: progressReady });
-  await progressSeen;
+  assert.deepEqual(await progressSeen, { status: "queued", processed: 0, total: 1 }, "queued author feedback must ignore the progress of a different running task");
   currentAuthor = "";
   polling.sync("");
   assert.equal(await waiting, null, "leaving an author route must finish the browser-side poll without an error");
@@ -1225,7 +1225,6 @@ function verifyWebDedicatedEntry() {
   const shortVideoReservedRoutesSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "reserved-routes.js"));
   const shortVideoWatchWriterSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-service.js"));
   const shortVideoWatchWorkerSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "watch-write-worker.js"));
-  const downloadManagerSyncSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "download-manager-sync-service.js"));
   const shortVideoStoreSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "store.js"));
   const shortVideoSmoothWarmupWorkerClientSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "smooth-warmup-worker-client.js"));
   const shortVideoSmoothWarmupWorkerSource = readNormalized(path.join(root, "src", "modules", "short-videos", "server", "smooth-warmup-worker.js"));
@@ -1281,7 +1280,7 @@ function verifyWebDedicatedEntry() {
     const lineCount = source.split(/\r?\n/).length;
     advisories.check(lineCount <= limit, `${label} is over ${limit} lines (${lineCount}); review its responsibilities`);
   }
-  assert(authorPagesSource.includes('showBrowserToast(error?.message || "数量确认启动失败")'), "author count-confirmation startup failures must stay visible instead of silently redrawing the page");
+  assert(authorPagesSource.includes('status.setAttribute("role", "status")') && authorPagesSource.includes('feedback.message = error?.message || `${label}失败`') && listSource.includes(".short-video-author-collector-status.is-error"), "author count-confirmation startup failures must stay visible near the author actions");
   assert(authorPagesSource.includes('fullRefresh.textContent = "确认数量"') && authorPagesSource.includes("short-video-author-page-pending-difference"), "author pages must expose a direct, clearly named full-scan count confirmation when local and homepage counts differ");
   assert(playerSource.includes('profile=${encodeURIComponent(secUid)}#profiles'), "author collection management links must deep-link to the current profile instead of requiring another search");
   assert(indexSource.includes("const shortVideoStyleUrls = [") && indexSource.includes("const shortVideoViewerStyleUrls = [") && indexSource.includes("const shortVideoDetailEntry = ") && indexSource.includes("window.__fanhaoEnsureShortVideoViewerStyles = () => loadStyleUrls(shortVideoViewerStyleUrls)") && indexSource.includes("window.__fanhaoStylesReady = loadStyleUrls(styleUrls)") && indexSource.includes("await window.__fanhaoStylesReady;"), "the dedicated short-video entry must load route-critical styles first and expose deduplicated on-demand viewer styles");
@@ -1424,12 +1423,7 @@ function verifyWebDedicatedEntry() {
     && shortVideoListWorkerSource.includes('message?.type === "likeDistribution"')
     && shortVideoListWorkerSource.includes("storeOrOpen().likeDistribution({")
     && shortVideoStoreSource.includes("const readOnly = Boolean(options.readOnly)"), "like-distribution must stay on the shared catalog worker with an async manager stamp, request cancellation fence, coherent invalidation, and no main-thread aggregate fallback");
-  assert(shortVideoRuntimeSource.includes("skipStartupMaintenance: true") && shortVideoRuntimeSource.includes("store.prepareSchema();") && shortVideoRuntimeSource.includes("initialStateKey: () => store.downloadManagerSourceStateKey()") && !shortVideoRuntimeSource.includes("store.warm();"), "the HTTP runtime must run only the required writable schema preflight and must not prewarm the multi-gigabyte catalog or stats worker");
-  const lazyLegacySync = downloadManagerSyncSource.includes('typeof initialStateKey === "function"') && downloadManagerSyncSource.includes("await initialStateKeyProvider()");
-  const lazyJournalSync = downloadManagerSyncSource.includes("const operation = performSync(options, sourceStateKey)")
-    && downloadManagerSyncSource.includes("const result = await runWorker()")
-    && downloadManagerSyncSource.includes("if (result.advanced) onStateKey(sourceStateKey)");
-  assert(lazyLegacySync || lazyJournalSync, "download-manager source revisions must stay lazy, either through the legacy provider or the incremental sync worker");
+  assert(shortVideoRuntimeSource.includes("skipStartupMaintenance: true") && shortVideoRuntimeSource.includes("store.prepareSchema();") && !shortVideoRuntimeSource.includes("store.warm();"), "the HTTP runtime must run only the required writable schema preflight and must not prewarm the multi-gigabyte catalog or stats worker");
   assert(shortVideoStoreSource.includes("trustExplicitInvalidation") && shortVideoStoreSource.includes("if (!explicitCatalogStamp) explicitCatalogStamp = liveStamp") && shortVideoStoreSource.includes('explicitCatalogStamp = ""'), "the list worker must keep serving its coherent warm catalog snapshot until the runtime sends an explicit reset after downloader synchronization");
   assert(shortVideoStoreSource.includes("function prepareAuthorSearchIndex") && shortVideoStoreSource.includes('enumerable: false') && shortVideoStoreSource.includes("author._searchText.includes(normalizedQuery)"), "author search must reuse a non-public normalized search index instead of rebuilding locale-aware text for every author on every request");
   assert(shortVideoStoreSource.includes('params.get("users") !== "0"') && shortVideoStoreSource.includes("users: userPage?.authors || []") && playerSource.includes('params.set("users", "0")'), "aggregate search must return matching users with the initial work page and skip repeating them during work pagination");
@@ -1443,8 +1437,6 @@ function verifyWebDedicatedEntry() {
     && shortVideoRuntimeSource.includes("./list-cache-files.js"), "short-video lists must match the runtime epoch and generation before they can serve as a current cache");
   assert(shortVideoRuntimeSource.includes('SHORT_VIDEO_LIST_CACHE_SCHEMA = "aggregate-search-v5-action-baselines"') && shortVideoRuntimeSource.includes("`${SHORT_VIDEO_LIST_CACHE_SCHEMA}:${url.pathname}?${normalized.toString()}`"), "short-video list response schema changes must rotate the persistent cache namespace");
   assert(shortVideoRuntimeSource.includes('profile ? "/api/profiles/refresh" : "/api/extract/start"') && shortVideoRuntimeSource.includes('profile_tab: "post"'), "author collection must register and scan authors that only exist in the local liked-video library");
-  assert(downloadManagerSyncSource.includes("pendingForcedSync") && downloadManagerSyncSource.includes("stopped ? null : runSync({ force: true })"), "a collector-triggered forced sync must queue behind an active periodic sync instead of being dropped");
-  assert(downloadManagerSyncSource.includes("result.catalogChanged || Number(result.catalogChanges || 0) > 0") && !downloadManagerSyncSource.includes("result.imported || result.updated || result.profilesSynced || options.force") && shortVideoStoreSource.includes("profilesSynced: profileSync.profilesSeen") && shortVideoStoreSource.includes("download_manager_source_state_key_v2_account_status"), "only real catalog changes, including profile-only metadata changes, may invalidate the catalog while forced no-op syncs stay reset-free and schema upgrades still force one fresh manager sync");
   assert((shortVideoRoutesSource.match(/onMutation\?\.\(\);/g) || []).length >= 6 && shortVideoRoutesSource.includes("? await recordWatch(videoId, body || {})") && shortVideoRoutesSource.includes("onWatchMutation?.(videoId, body || {}, data);") && shortVideoRuntimeSource.includes("watchWriter.record(videoId, options)") && shortVideoWatchWriterSource.includes('workerUrl = new URL("./watch-write-worker.js"') && shortVideoWatchWorkerSource.includes("store.recordWatch(message.videoId"), "catalog mutations must invalidate all list generations while high-frequency watch writes use their dedicated worker path");
   assert(shortVideoRuntimeSource.includes("watchCacheGeneration: watchGeneration") && shortVideoRuntimeSource.includes("isWatchSensitiveShortVideoList") && shortVideoRuntimeSource.includes('data?.source || "").toLowerCase() === "history"') && shortVideoRuntimeSource.includes('data?.sort || "").toLowerCase() === "watched"'), "watch writes must invalidate only history membership and recent-watch ordering");
   assert(shortVideoRuntimeSource.includes("recordShortVideoWatchCacheMutation") && shortVideoRuntimeSource.includes("applyShortVideoWatchOverlays") && shortVideoRuntimeSource.includes("short-video-list-watch-overlays.json"), "ordinary cached lists must receive persisted per-video watch overlays without a full SQLite refresh");

@@ -85,7 +85,7 @@ assert.equal(scopeService.workMatches(regularWork, "main"), true);
 assert.equal(scopeService.workMatches(animeWork, "main"), false);
 assert.equal(scopeService.personMatches(westernPerson, "main"), false);
 assert.equal(scopeService.personMatches(regularPerson, "main"), true);
-assert.equal(scopeService.personMatches(sharedPerson, "main"), true);
+assert.equal(scopeService.personMatches(sharedPerson, "main"), false);
 assert.equal(scopeService.personMatches(profileOnlyPerson, "main"), true);
 assert.equal(scopeService.personMatches(animePerson, "main"), false);
 assert.equal(scopeService.workMatches(westernWork, "western"), true);
@@ -95,6 +95,9 @@ assert.equal(scopeService.personMatches(regularPerson, "western"), false);
 assert.equal(scopeService.personMatches(sharedPerson, "western"), true);
 assert.equal(scopeService.personMatches(profileOnlyPerson, "western"), false);
 assert.equal(scopeService.personMatches(animePerson, "western"), false);
+assert.equal(scopeService.personWorkMatcher("main")(westernWork), false);
+assert.equal(scopeService.personWorkMatcher("main")(regularWork), true);
+assert.equal(scopeService.personWorkMatcher("western")(westernWork), true);
 
 assert.deepEqual(
   galleryMediaSources({ FANHAO_MOVIE_ROOTS: "Z:/", FANHAO_TV_ROOTS: "Y:/" }).map((item) => item.kind),

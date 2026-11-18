@@ -2,8 +2,12 @@ import crypto from "node:crypto";
 
 import { LOCAL_SHORT_VIDEO_USER_ID } from "./constants.js";
 
+export function shortVideoCommentOwner(user) {
+  return user?.id ? `account:${user.id}` : LOCAL_SHORT_VIDEO_USER_ID;
+}
+
 export function createShortVideoCommentsRepository({ database, resolveVideo }) {
-  function localComments(id) {
+  function localComments(id, owner = LOCAL_SHORT_VIDEO_USER_ID) {
     const db = database();
     const currentVideo = resolveVideo(db, id);
     if (!currentVideo?.id) return null;
@@ -13,7 +17,7 @@ export function createShortVideoCommentsRepository({ database, resolveVideo }) {
       WHERE local_user_id = ? AND video_id = ?
       ORDER BY created_at DESC, id DESC
       LIMIT 200
-    `).all(LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id);
+    `).all(owner, currentVideo.id);
     const remoteRows = db.prepare(`
       SELECT id, parent_id, user_id, user_name, user_avatar_url, body,
              digg_count, reply_count, ip_label, created_at, synced_at
@@ -92,11 +96,11 @@ export function createShortVideoCommentsRepository({ database, resolveVideo }) {
       ok: true,
       imported,
       availableTotal: Math.max(imported, Number(options.availableTotal || 0)),
-      ...localComments(currentVideo.id)
+      ...localComments(currentVideo.id, options.owner)
     };
   }
 
-  function createLocalComment(id, options = {}) {
+  function createLocalComment(id, options = {}, owner = LOCAL_SHORT_VIDEO_USER_ID) {
     const db = database();
     const currentVideo = requireVideo(db, id);
     const body = normalizeLocalCommentBody(options.body ?? options.text);
@@ -108,28 +112,28 @@ export function createShortVideoCommentsRepository({ database, resolveVideo }) {
         id, local_user_id, video_id, body, created_at, updated_at
       )
       VALUES (?, ?, ?, ?, ?, ?)
-    `).run(commentId, LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id, body, now, now);
+    `).run(commentId, owner, currentVideo.id, body, now, now);
     return {
       ok: true,
       videoId: currentVideo.id,
       comment: publicLocalComment({ id: commentId, body, created_at: now, updated_at: now }),
-      ...localComments(currentVideo.id)
+      ...localComments(currentVideo.id, owner)
     };
   }
 
-  function deleteLocalComment(id, commentId) {
+  function deleteLocalComment(id, commentId, owner = LOCAL_SHORT_VIDEO_USER_ID) {
     const db = database();
     const currentVideo = requireVideo(db, id);
     const normalizedCommentId = String(commentId || "").trim();
     const result = db.prepare(`
       DELETE FROM short_video_local_comments
       WHERE id = ? AND local_user_id = ? AND video_id = ?
-    `).run(normalizedCommentId, LOCAL_SHORT_VIDEO_USER_ID, currentVideo.id);
+    `).run(normalizedCommentId, owner, currentVideo.id);
     if (!Number(result.changes || 0)) throw httpError("本地评论不存在", 404);
     return {
       ok: true,
       deletedId: normalizedCommentId,
-      ...localComments(currentVideo.id)
+      ...localComments(currentVideo.id, owner)
     };
   }
 

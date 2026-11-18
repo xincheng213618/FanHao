@@ -1,6 +1,6 @@
 import { classificationQuery, parseClassificationQuery } from "../modules/fanhao/browse-traits.js?v=20261112-classification-01";
 
-export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "manga", "novels", "shortVideos", "music", "tools"]);
+export const URL_VIEW_NAMES = new Set(["people", "codes", "studios", "vr", "favorites", "history", "rankings", "gallery", "manga", "novels", "shortVideos", "music"]);
 export const GALLERY_MODE_NAMES = new Set(["photo", "manga", "western", "media", "movie", "tv"]);
 export const PEOPLE_SCOPE_NAMES = new Set(["main", "western"]);
 export const DEFAULT_GALLERY_PHOTO_CATEGORY = "all";
@@ -129,8 +129,7 @@ const VIEW_PATHS = {
   manga: "/manga",
   novels: "/novels",
   shortVideos: "/short-videos",
-  music: "/music",
-  tools: "/tools"
+  music: "/music"
 };
 
 const PATH_VIEWS = new Map(Object.entries(VIEW_PATHS).map(([view, pathname]) => [pathname, view]));
@@ -298,8 +297,9 @@ export function normalizeRoute(route = {}) {
     galleryPhotoSite: galleryBrowse && galleryMode === "photo" ? String(route.galleryPhotoSite || "").trim() : "",
     gallerySort: galleryBrowse ? normalizeGallerySort(route.gallerySort, galleryPhotoView, galleryMode === "photo" && galleryPhotoCollection ? "issue" : "updated") : "updated",
     gallerySortDirection: galleryBrowse && galleryMode === "photo" ? normalizeGallerySortDirection(route.gallerySortDirection) : "",
-    mangaComicId: view === "manga" ? String(route.mangaComicId || "").trim() : "",
-    mangaChapterIndex: view === "manga" ? String(route.mangaChapterIndex || "").trim() : "",
+    ...(view === "manga" && route.mangaUser === true ? { mangaUser: true } : {}),
+    mangaComicId: view === "manga" && route.mangaUser !== true ? String(route.mangaComicId || "").trim() : "",
+    mangaChapterIndex: view === "manga" && route.mangaUser !== true ? String(route.mangaChapterIndex || "").trim() : "",
     mangaQuery: view === "manga" ? String(route.mangaQuery || route.q || "").trim() : "",
     mangaSort: view === "manga" && ["updated", "title", "chapters"].includes(route.mangaSort) ? route.mangaSort : "updated",
     ...(view === "manga" && route.mangaFavorites === true ? { mangaFavorites: true } : {}),
@@ -364,7 +364,7 @@ export function routeUrl(route, options = {}) {
     if (value) params.set(key, value);
   }
   const pathname = routePath(next);
-  if (next.view && !VIEW_PATHS[next.view] && !["people", "search", "gallery", "manga", "novels", "shortVideos", "music", "tools"].includes(next.view)) {
+  if (next.view && !VIEW_PATHS[next.view] && !["people", "search", "gallery", "manga", "novels", "shortVideos", "music"].includes(next.view)) {
     params.set("view", next.view);
   }
   if (next.personId) params.set("personId", next.personId);
@@ -408,7 +408,7 @@ export function routeUrl(route, options = {}) {
       : "updated";
     if (next.gallerySort && next.gallerySort !== defaultGallerySort) params.set("sort", next.gallerySort);
     if (photo && next.gallerySortDirection) params.set("dir", next.gallerySortDirection);
-  } else if (next.view === "manga") {
+  } else if (next.view === "manga" && !next.mangaUser) {
     if (next.mangaQuery) params.set("q", next.mangaQuery);
     if (next.mangaSort && next.mangaSort !== "updated") params.set("sort", next.mangaSort);
     if (next.mangaFavorites) params.set("favorites", "1");
@@ -741,12 +741,14 @@ function mangaRouteFromPath(routePath, params = new URLSearchParams()) {
   const legacy = ["photo", "gallery"].includes(segments[0]) && segments[1] === "manga";
   if (!direct && !legacy) return null;
   const rest = segments.slice(direct ? 1 : 2);
+  const userPage = direct && rest.length === 1 && rest[0] === "user";
   const searchPage = rest.length === 1 && rest[0] === "search";
   const reader = rest[1] === "read";
   return {
     view: "manga",
     galleryMode: "",
-    mangaComicId: searchPage ? "" : decodeRouteSegment(rest[0] || ""),
+    ...(userPage ? { mangaUser: true } : {}),
+    mangaComicId: searchPage || userPage ? "" : decodeRouteSegment(rest[0] || ""),
     mangaChapterIndex: decodeRouteSegment(reader ? rest[2] || "" : legacy ? rest[1] || "" : ""),
     mangaQuery: params.get("q") || params.get("search") || "",
     mangaSort: ["updated", "title", "chapters"].includes(params.get("sort")) ? params.get("sort") : "updated",
@@ -905,6 +907,7 @@ function musicRouteFromPath(routePath, params = new URLSearchParams()) {
 
 function routePath(route) {
   if (route.view === "manga") {
+    if (route.mangaUser) return "/manga/user";
     if (route.mangaComicId && route.mangaChapterIndex) {
       return `/manga/${encodeRouteSegment(route.mangaComicId)}/read/${encodeRouteSegment(route.mangaChapterIndex)}`;
     }

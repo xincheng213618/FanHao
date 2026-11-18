@@ -65,6 +65,42 @@ body.people-index-view .toolbar { padding: 20px 0 18px; }
 .person-profile-source-note { flex-basis: 100%; font-size: 12px; }
 .person-profile-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 12px; }
 .person-profile-actions .folder-button { min-height: 38px; font-weight: 500; }
+.person-profile:has(> .person-work-search-form) {
+  grid-template-columns: 160px minmax(0, 1fr) clamp(240px, 25vw, 320px);
+}
+.person-work-search-form { min-width: 0; align-self: start; }
+.person-work-search-field { display: flex; gap: 8px; }
+.person-work-search-field input {
+  flex: 1 1 0;
+  height: 40px;
+  padding: 0;
+  font: inherit;
+  font-size: 16px;
+  text-overflow: ellipsis;
+}
+.person-work-search-field input::-webkit-search-cancel-button { display: none; }
+.person-work-search-clear {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin-inline-end: -8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 20px;
+  cursor: pointer;
+}
+.person-work-search-clear:hover { background: var(--panel-soft); color: var(--ink); }
+.person-work-search-status {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: end;
+}
+.person-work-search-status:empty { margin-top: 0; }
 .person-detail-view .stats-row { gap: 10px; padding-block: 8px 18px; }
 .browse-result-summary { width: 100%; color: var(--muted); font-size: 13px; }
 .stat-quick-filters { gap: 12px 18px; align-items: start; padding: 14px; }
@@ -153,6 +189,9 @@ body.people-index-view .toolbar { padding: 20px 0 18px; }
   padding: 0;
   cursor: pointer;
 }
+.person-detail-view .work-browse-controls > .stat-sort-group { padding-top: 0; }
+.person-detail-view .person-work-sort { padding-block: 2px; }
+.person-detail-view .person-work-sort > :is(.person-sort-option, .person-sort-more) { min-height: 28px; }
 .stat-quick-filters .bulk-delete-controls { flex-basis: 100%; }
 .browse-traits { flex: 1 0 100%; min-width: 0; display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
 .browse-traits-note { color: var(--muted); font-size: 11px; line-height: 1.5; }
@@ -188,6 +227,11 @@ body.studio-index-view .work-grid { grid-template-columns: repeat(auto-fill, min
 .browse-filter-controls button:focus-visible, .person-profile-actions button:focus-visible,
 .fanhao-navigation-button:focus-visible,
 .fanhao-navigation-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 1250px) {
+  .person-detail-view .work-browse-controls > .browse-filter-controls { flex-basis: 100%; }
+  .person-detail-view .work-browse-controls > .browse-advanced-toggle { margin-inline-start: auto; }
+  .person-detail-view .work-browse-controls > .browse-advanced-toggle + .stat-sort-group { margin-inline-start: 0; }
+}
 @media (max-width: 900px) {
   .fanhao-sidebar { padding: 8px 14px; overflow: visible; }
   .fanhao-navigation-button { display: inline-flex; align-items: center; align-self: start; }
@@ -198,6 +242,8 @@ body.studio-index-view .work-grid { grid-template-columns: repeat(auto-fill, min
   .person-detail-view .toolbar-controls .toggle-control { flex: 1 1 auto; font-size: 12px; }
   .person-detail-view .toolbar-controls .filter-rule-button { flex: 0 1 auto; }
   .person-profile { grid-template-columns: 96px minmax(0, 1fr); gap: 14px; padding-block: 16px; }
+  .person-profile:has(> .person-work-search-form) { grid-template-columns: 96px minmax(0, 1fr); }
+  .person-work-search-form { grid-column: 1 / -1; }
   .person-profile .person-avatar { width: 96px; height: 96px; min-height: 0; align-self: start; }
   .person-profile-copy { display: block; min-height: 0; }
   .person-profile-actions { margin-top: 12px; padding-top: 0; }
@@ -207,6 +253,10 @@ body.studio-index-view .work-grid { grid-template-columns: repeat(auto-fill, min
   .stat-quick-filters .stat-sort-group { margin-left: 0; }
   .browse-filter-controls.stat-filter-list { flex-basis: 100%; }
   .browse-filter-controls .stat-filter-chip { min-height: 40px; }
+  .person-detail-view .work-browse-controls > .browse-advanced-toggle { margin-inline-start: 0; }
+  .person-detail-view .work-browse-controls > :is(.browse-advanced-toggle, .browse-select-works) { min-height: 40px; }
+  .person-detail-view .person-work-sort { padding-block: 3px; }
+  .person-detail-view .person-work-sort > :is(.person-sort-option, .person-sort-more) { min-height: 32px; }
   .browse-trait-row { grid-template-columns: 65px minmax(0, 1fr); gap: 6px; }
   .browse-trait-heading { padding-top: 16px; font-size: 11px; }
   .browse-trait-chip { min-height: 40px; }

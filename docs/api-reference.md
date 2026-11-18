@@ -181,13 +181,6 @@
 | GET | `/api/android/update` | 公开 | 返回 APK 更新清单（debug / release 通道）。 |
 | GET / HEAD | `/api/android/update/apk/:channel/:file` | 公开 | 下载指定通道的 APK 文件。 |
 
-## 工具（Tools）
-
-| 方法 | 路径 | 权限 | 说明 |
-| --- | --- | --- | --- |
-| POST | `/api/tools/txt-format` | 公开 | 提交 TXT 文本，格式化后返回下载令牌。 |
-| GET | `/api/tools/txt-format/download/:id` | 公开 | 下载格式化后的 TXT（带 TTL）。 |
-
 ## 管理（Admin）
 
 以下接口均需 `requireLocalAdmin`（仅本机 / 局域网）。

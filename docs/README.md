@@ -27,7 +27,6 @@
 | [模块开发](./module-development.md) | 新增业务形态时的目录、描述符、运行时协议和校验流程 |
 | [模块文档](./modules/README.md) | 按注册模块拆分的职责、代码入口、接口、数据和验证说明 |
 | [核心数据库](./fanhao-core-database.md) | `fanhao-core-v2.sqlite` 的表设计与原则（已有） |
-| [开源小游戏审计](./open-source-games-audit.md) | 集成到 WebView 的离线小游戏的选型与合规记录（已有） |
 
 ## 目录约定
 
@@ -44,7 +43,6 @@ FanHao/
 │   ├── media/             # 影视
 │   ├── novels/            # 小说
 │   ├── short-videos/      # 短视频
-│   ├── tools/             # 小工具
 │   ├── music/             # 音乐（现有附加模块）
 │   └── system/            # 不展示的系统模块
 ├── src/platform/          # 与业务形态无关的 HTTP、鉴权、文件和媒体基础设施
@@ -60,7 +58,7 @@ FanHao/
 
 模块文档与代码目录一一对应，适合在修改某个业务形态前先阅读：
 
-- 可见业务模块：`fanhao`、`photos`、`media`、`novels`、`short-videos`、`music`、`tools`、`market-dashboard`。
+- 可见业务模块：`fanhao`、`photos`、`media`、`novels`、`short-videos`、`music`。
 - 隐藏基础模块：`system`、`content-index`。
 - `disk-usage` 是 `fanhao` 内部的磁盘用量子能力，不是独立注册模块。
 

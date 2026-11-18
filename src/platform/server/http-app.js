@@ -26,7 +26,7 @@ export function createRequestHandler({
         res.setHeader("Access-Control-Allow-Origin", allowedCorsOrigin);
         res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,PUT,PATCH,DELETE,OPTIONS");
         res.setHeader("Access-Control-Allow-Headers", "Content-Type,Accept,Authorization,Range,If-Range,X-FanHao-Client,X-FanHao-Media-Cache,X-FanHao-Account-Owner");
-        res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,ETag,Last-Modified,X-FanHao-Media-Cache,X-FanHao-Playback-Rendition,X-FanHao-Playback-Prepare,X-FanHao-Playback-Wait-Ms,X-FanHao-Account-Owner");
+        res.setHeader("Access-Control-Expose-Headers", "Content-Length,Content-Range,Accept-Ranges,ETag,Last-Modified,X-FanHao-Media-Cache,X-FanHao-Playback-Rendition,X-FanHao-Playback-Prepare,X-FanHao-Playback-Wait-Ms,X-FanHao-Account-Owner,X-FanHao-Account-Role,X-FanHao-Library-Admin");
       }
 
       if (req.method === "OPTIONS") {
@@ -72,12 +72,17 @@ export function createRequestHandler({
       // This is a stale-client assertion, never a source of authentication identity.
       const expectedOwner = req.headers["x-fanhao-account-owner"];
       const actualOwner = authState.user?.id ? `account:${authState.user.id}` : "guest";
-      if (url.pathname.startsWith("/api/")) res.setHeader("X-FanHao-Account-Owner", actualOwner);
+      if (url.pathname.startsWith("/api/")) {
+        res.setHeader("X-FanHao-Account-Owner", actualOwner);
+        res.setHeader("X-FanHao-Account-Role", authState.user?.role || "guest");
+        res.setHeader("X-FanHao-Library-Admin", authState.user?.role === "admin" || authState.localAdministrator ? "1" : "0");
+      }
       if (url.pathname.startsWith("/api/") && expectedOwner !== undefined && expectedOwner !== actualOwner) {
         sendJson(res, 409, { code: "ACCOUNT_CHANGED", error: "账号已切换，请刷新后重试" });
         return;
       }
 
+      req.authenticatedUser = authState.user || null;
       await runForUser(authState.user || null, async () => {
         if (await routeApi(req, res, url)) return;
         if (await routeMedia(req, res, url)) return;

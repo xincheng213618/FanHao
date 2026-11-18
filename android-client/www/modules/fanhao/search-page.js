@@ -1,6 +1,6 @@
 import { formatNumber } from "../../js/format.js";
-import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-06c1d7f13464";
-import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-06c1d7f13464";
+import { absoluteUrl, imageUrlForWork, portraitUrlForPerson } from "../../js/image.js?v=assets-78764ed05056";
+import { compactWorkCardTitle, workGridMeta, workGridPerson } from "./features/works/card-presentation.js?v=assets-78764ed05056";
 import { captureAccountOwner, isAccountOwnerCurrent } from "../../js/account-owner.js";
 
 const SEARCH_HISTORY_STORAGE_KEY = "fanhao.android.searchHistory";

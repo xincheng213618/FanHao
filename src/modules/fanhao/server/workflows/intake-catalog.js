@@ -48,20 +48,26 @@ export function catalogForIntake(db, code) {
 export function intakeLibraryPartGroups(videos) {
   const series = new Map();
   for (const video of videos) {
-    if (pathKey(path.dirname(video.file_path)) !== pathKey(video.folder)) continue;
+    const folder = intakeLibraryFolder(video);
+    if (!folder) continue;
+    const flat = pathKey(video.file_path) === pathKey(video.folder);
     const { name, ext } = path.parse(video.file_path.toLowerCase());
     const tagged = /^(.*[-_. ](?:cd|disc|part)[-_. ]*)(\d{1,2})([-_. ].*)?$/.exec(name);
     // Legacy NoDRM WMVs append hhb1, hhb2, ... to the padded work code.
     const legacy = ext === ".wmv" && /^(?:\[nodrm\][-_ ]*)?([a-z]+)0*(\d+)hhb(\d{1,2})$/.exec(name);
+    const lettered = ext === ".wmv" && /^(.+?)[ ._-]*([a-z])$/.exec(name);
     let key, part;
     if (tagged) {
-      key = [tagged[1], tagged[3] || "", ext];
+      key = ["numbered", tagged[1], tagged[3] || "", ext];
       part = Number(tagged[2]);
     } else if (legacy && workCodeKey(`${legacy[1]}-${legacy[2]}`) === workCodeKey(video.work.code)) {
       key = [legacy[1], legacy[2], "hhb", ext];
       part = Number(legacy[3]);
+    } else if (lettered && workCodeKey(intakeNameCode(lettered[1])) === workCodeKey(video.work.code)) {
+      key = ["lettered", lettered[1], ext];
+      part = lettered[2].charCodeAt(0) - "a".charCodeAt(0) + 1;
     } else continue;
-    const groupKey = JSON.stringify([video.work.id, video.local_work_id, ...key]);
+    const groupKey = JSON.stringify([video.work.id, flat ? pathKey(folder) : video.local_work_id, ...key]);
     if (!series.has(groupKey)) series.set(groupKey, []);
     series.get(groupKey).push({ id: Number(video.id), part });
   }
@@ -73,6 +79,13 @@ export function intakeLibraryPartGroups(videos) {
     for (const id of ids) groups.set(id, ids);
   }
   return groups;
+}
+
+export function intakeLibraryFolder(video) {
+  if (!path.isAbsolute(video.file_path || "") || !path.isAbsolute(video.folder || "")) return null;
+  const parent = path.dirname(video.file_path);
+  const indexed = pathKey(video.folder);
+  return indexed === pathKey(parent) || indexed === pathKey(video.file_path) ? parent : null;
 }
 
 export function assertUnindexed(db, file) {
@@ -227,14 +240,22 @@ export function commitIntakeCatalog(db, plan, relativeFromRoot) {
   const additionalOld = plan.additionalOld || [];
   if (additionalOld.length) {
     const remove = db.prepare("DELETE FROM local_files WHERE id=? AND local_work_id=? AND file_id=?");
+    const removePin = db.prepare("DELETE FROM intake_video_playback_ids WHERE local_work_id=? AND work_id=? AND file_id=?");
+    const removeEmptyLocal = db.prepare(`DELETE FROM local_works WHERE id=? AND work_id=? AND coalesce(source_info_path,'')=''
+      AND NOT EXISTS (SELECT 1 FROM local_files WHERE local_work_id=local_works.id)`);
     const removeProbe = hasIdentityTable(db, "video_probe_cache")
       ? db.prepare("DELETE FROM video_probe_cache WHERE file_path=? OR file_path=?") : null;
     for (const old of additionalOld) {
-      if (remove.run(old.id, localId, old.fileId).changes !== 1) throw intakeError("馆藏分段索引已改变");
+      const oldLocalId = old.localId ?? localId;
+      if (remove.run(old.id, oldLocalId, old.fileId).changes !== 1) throw intakeError("馆藏分段索引已改变");
+      removePin.run(oldLocalId, workId, old.fileId);
+      if (oldLocalId !== localId) removeEmptyLocal.run(oldLocalId, workId);
       removeProbe?.run(old.path, old.dbPath);
     }
   }
   let order = orderIntakeVideos(db, localId, plan, timestamp);
+  const subtitleReplacements = new Map((plan.subtitleConflicts || []).filter(({ backup }) => backup)
+    .map((item) => [pathKey(item.target), item]));
   for (const [index, item] of plan.files.entries()) {
     if (item.retainedSubtitle && updateIndexedFileName(db, item, localId, relativeFromRoot, timestamp)) continue;
     const stat = regular(item.target);
@@ -242,10 +263,16 @@ export function commitIntakeCatalog(db, plan, relativeFromRoot) {
     const modified = new Date(stat.mtimeMs).toISOString();
     const playable = Number(item.type === "video" && VIDEO_PLAYABLE.has(ext));
     const old = index === 0 ? plan.old : null;
+    const subtitle = item.type === "info" ? subtitleReplacements.get(pathKey(item.target)) : null;
     if (old && item.type === "video") {
       db.prepare(`UPDATE local_files SET file_path=?,name=?,title=?,ext=?,relative_path=?,size=?,modified_at=?,playable=?,updated_at=? WHERE id=?`)
         .run(item.target, name, title, ext, relativeFromRoot(item.target), stat.size, modified, playable, timestamp, old.id);
       if (hasIdentityTable(db, "video_probe_cache")) db.prepare("DELETE FROM video_probe_cache WHERE file_path=? OR file_path=?").run(old.path, old.dbPath || old.path);
+    } else if (subtitle?.indexId != null) {
+      const updated = db.prepare(`UPDATE local_files SET file_path=?,name=?,title=?,ext=?,relative_path=?,size=?,modified_at=?,updated_at=?
+        WHERE id=? AND local_work_id=? AND file_id=? AND file_type='info'`)
+        .run(item.target, name, title, ext, relativeFromRoot(item.target), stat.size, modified, timestamp, subtitle.indexId, localId, subtitle.fileId);
+      if (updated.changes !== 1) throw intakeError("馆藏字幕索引已改变，请重新核对");
     } else {
       db.prepare(`INSERT INTO local_files (work_id,local_work_id,file_id,file_type,file_path,name,title,ext,relative_path,size,modified_at,playable,sort_order,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(workId, localId, makeFileId(item.type, item.target), item.type, item.target, name, title, ext,
@@ -256,6 +283,11 @@ export function commitIntakeCatalog(db, plan, relativeFromRoot) {
       db.prepare(`INSERT OR REPLACE INTO video_probe_cache (file_id,file_path,source_size,source_mtime,schema_version,status,probe_json,updated_at)
         VALUES (?,?,?,?,1,'ok',?,?)`).run(fileId, item.target, stat.size, `library:${modified}`, JSON.stringify(item.probe || plan.probe), timestamp);
     }
+  }
+  if (plan.flatReplacement) {
+    const stat = regular(plan.files[0].target);
+    db.prepare("UPDATE local_works SET local_path=?,source_size=?,source_mtime=?,updated_at=? WHERE id=?")
+      .run(plan.folder, stat.size, new Date(stat.mtimeMs).toISOString(), timestamp, localId);
   }
   return { workId, localId, target: plan.files[0].target };
 }

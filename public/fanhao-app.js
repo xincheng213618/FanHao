@@ -1,2 +1,2 @@
 document.documentElement.dataset.appModule = "fanhao";
-await import("./app.js?v=20261113-search-route-01");
+await import("./app.js?v=20261114-person-search-01");

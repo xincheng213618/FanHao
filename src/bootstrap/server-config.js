@@ -28,7 +28,6 @@ export function createServerConfig({
   const DATA_DIR = productDataDirectory(projectRoot, env);
   const MANGA_LIBRARY_ROOT = env.FANHAO_MANGA_ROOT || "E:\\https-smtt6-com-man-hua-yue";
   const FFMPEG_PATH = env.FFMPEG_PATH || "ffmpeg";
-  const TXT_TOOL_MAX_FILE_BYTES = 24 * 1024 * 1024;
 
   return {
     PRODUCT: profile,
@@ -40,7 +39,6 @@ export function createServerConfig({
     LIBRARY_ROOTS: parseLibraryRoots(env),
     PUBLIC_DIR: path.join(projectRoot, "public"),
     DATA_DIR,
-    FILE_WORKFLOW_ROOTS: parseRootList(env.FANHAO_WORKFLOW_ROOTS, parseLibraryRoots(env).join(";")),
     MEDIA_INTAKE_ROOTS: parseRootList(env.FANHAO_INTAKE_ROOTS, process.platform === "win32" ? "D:\\" : ""),
     MANGA_LIBRARY_ROOT,
     MANGA_DATABASE_PATH: env.FANHAO_MANGA_DATABASE || path.join(MANGA_LIBRARY_ROOT, "manga.sqlite"),
@@ -69,13 +67,11 @@ export function createServerConfig({
     ADMIN_TASKS_PATH: path.join(DATA_DIR, "admin-tasks.json"),
     DOUBAN_COOKIE_PATH: path.join(DATA_DIR, "douban-cookie.txt"),
     JAVDB_115_COOKIE_PROFILE_DIR: path.join(env.LOCALAPPDATA || "", "115Chrome", "User Data"),
-    TOOL_DOWNLOAD_DIR: path.join(DATA_DIR, "tool-downloads"),
     ANDROID_UPDATE_DIR: path.join(DATA_DIR, "android-update"),
     IMAGE_READER_CACHE_DIR: path.join(DATA_DIR, "image-reader-cache"),
     FFMPEG_PATH,
     FFPROBE_PATH: env.FFPROBE_PATH || "ffprobe",
     PYTHON_PATH: env.PYTHON || "python",
-    REMOTE_WEB_PASSWORD: String(env.FANHAO_WEB_PASSWORD || "").trim(),
     EXCLUDED_DIRS: new Set(["$RECYCLE.BIN", "System Volume Information", "Recovery"]),
     VIDEO_EXTS: new Set([".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".m4v", ".ts", ".m2ts", ".webm", ".iso"]),
     PLAYABLE_VIDEO_EXTS: new Set([".mp4", ".m4v", ".mov", ".webm"]),
@@ -112,10 +108,6 @@ export function createServerConfig({
     MAX_FAVORITE_FOLDERS: 30,
     RECENT_WATCHED_DAYS: 30,
     ADMIN_TASK_HISTORY_LIMIT: 100,
-    TOOL_DOWNLOAD_TTL_MS: 10 * 60 * 1000,
-    TXT_TOOL_MAX_FILE_BYTES,
-    TXT_TOOL_MAX_BODY_BYTES: Math.ceil(TXT_TOOL_MAX_FILE_BYTES * 1.4) + 128 * 1024,
-    TXT_TOOL_PREVIEW_BYTES: 256 * 1024,
     PHOTO_COLLECTION_ROOT_VALUE: "__fanhao_photo_collection_root__",
     MIME_TYPES: {
       ".html": "text/html; charset=utf-8",

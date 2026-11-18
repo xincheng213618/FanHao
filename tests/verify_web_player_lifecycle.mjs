@@ -235,6 +235,75 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
     });
   }
   try {
+    if (realPlyr) await run("real Plyr YouTube-style playback chrome stays in sync", async () => {
+      const page = await open();
+      const remux = hold("B", info("B", { mode: "remux" }));
+      const stage = page.locator(".player-stage");
+      const controls = stage.locator(".plyr__controls");
+      const speed = controls.locator("#playerPlaybackRate");
+      const waitForChrome = visible => page.waitForFunction(expected => {
+        const overlays = [document.querySelector(".player-page-header"), document.querySelector(".player-stage .plyr__controls")];
+        return overlays.every(node => node && Number(getComputedStyle(node).opacity) === Number(expected));
+      }, visible, { timeout: 5500 });
+      const assertBottomLayout = async progressSelector => {
+        const placement = await controls.evaluate((bar, progressSelector) => {
+          const progress = bar.querySelector(progressSelector).getBoundingClientRect();
+          const play = bar.querySelector('[data-plyr="play"]').getBoundingClientRect();
+          const fullscreen = bar.querySelector('[data-plyr="fullscreen"]').getBoundingClientRect();
+          const group = bar.querySelector("#playerBottomControls");
+          const right = group.getBoundingClientRect();
+          const tools = ["#playerSubtitles", "#playerPlaybackRate", "#toggleSidebarButton"];
+          return {
+            progressesAcrossBar: progress.width >= bar.clientWidth * 0.9 && progress.bottom <= play.top + 2,
+            actionsOnRight: right.left >= play.right && fullscreen.right <= bar.getBoundingClientRect().right,
+            toolsAreGrouped: tools.every(selector => group.querySelector(selector)?.getBoundingClientRect().width > 0)
+          };
+        }, progressSelector);
+        assert.deepEqual(placement, { progressesAcrossBar: true, actionsOnRight: true, toolsAreGrouped: true });
+      };
+      try {
+        await page.evaluate(() => { __emitMedia("loadedmetadata"); __emitMedia("canplay"); });
+        await assertBottomLayout(".plyr__progress__container");
+        await page.evaluate(async () => { await document.querySelector("#playerVideo").play(); __emitMedia("playing"); });
+        await waitForChrome(false);
+        assert.equal(await speed.evaluate(node => {
+          const rect = node.getBoundingClientRect();
+          return node === document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        }), false, "visually hidden controls must not capture pointer input");
+
+        await stage.hover({ position: { x: 30, y: 100 } });
+        await waitForChrome(true);
+        await waitForChrome(false);
+        await page.keyboard.press("Shift");
+        await speed.focus();
+        assert.equal(await speed.evaluate(node => node.matches(":focus-visible")), true);
+        await waitForChrome(true);
+        await speed.selectOption("1.5");
+        assert.equal(await page.locator("#playerVideo").evaluate(node => node.playbackRate), 1.5);
+        await speed.blur();
+        await waitForChrome(false);
+        await page.locator("#playerVideo").evaluate(video => video.pause());
+        await waitForChrome(true);
+
+        await choose(page, "B");
+        await remux.requested;
+        remux.release();
+        await controls.locator("#playerSeekControl").waitFor({ state: "visible" });
+        await assertBottomLayout("#playerSeekControl");
+        await page.setViewportSize({ width: 320, height: 460 });
+        await assertBottomLayout("#playerSeekControl");
+        await controls.locator("#playerSubtitles summary").click();
+        const subtitlePanel = controls.getByLabel("字幕设置", { exact: true });
+        await subtitlePanel.waitFor();
+        const panel = await subtitlePanel.boundingBox();
+        assert.ok(panel.x >= 0 && panel.y >= 0 && panel.x + panel.width <= 320 && panel.y + panel.height <= 460,
+          `the bottom subtitle panel must fit the narrow viewport, got ${JSON.stringify(panel)}`);
+        await subtitlePanel.getByRole("button", { name: "重新读取" }).click();
+      } finally {
+        remux.release();
+        await page.close();
+      }
+    });
     if (realPlyr) await run("real Plyr details float over the video at desktop and mobile widths", async () => {
       const page = await open();
       try {
@@ -1447,6 +1516,115 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
           { time: 0.25, paused: true, plays });
       } finally { remux.release(); await page.close(); }
     });
+    await run("tag correction distinguishes the selected video from the work and restores playback", async () => {
+      const workPath = "/api/works/fixture-work";
+      const videoPath = `${workPath}/video-markers`;
+      const aPath = `${workPath}/local-marker`;
+      const tagWork = structuredClone({ ...work, localMarkers: ["A"] });
+      tagWork.videos[0].name = "Video A-C.mp4";
+      tagWork.videos[1].name = "Video B-LTX-U.mp4";
+      const tags = { A: { ltx: false, c: true, u: false }, B: { ltx: true, c: false, u: true } };
+      const requests = [];
+      let failA = true;
+      let finishRename;
+      const rename = new Promise(resolve => { finishRename = resolve; });
+      const page = await open(true, "&videoId=B", { beforeNavigate: async page => {
+        await page.route(url => url.pathname === workPath, route => route.fulfill({ json: { work: tagWork } }));
+        await page.route(url => url.pathname === videoPath, async route => {
+          const request = route.request();
+          if (request.method() === "POST") {
+            const body = request.postDataJSON();
+            requests.push({ path: videoPath, body });
+            return route.fulfill({ status: 202, json: {
+              job: { id: "retag-b", state: "pending", active: true, error: "" },
+              videoId: "B", name: "Video B-LTXC.mp4", tags: body.tags, changed: true
+            } });
+          }
+          const query = new URL(request.url()).searchParams;
+          if (query.get("jobId") === "retag-b") {
+            await rename;
+            tagWork.videos[1].name = "Video B-LTXC.mp4";
+            tags.B = requests.find(item => item.path === videoPath).body.tags;
+            return route.fulfill({ json: { job: { id: "retag-b", state: "completed", active: false, error: "" } } });
+          }
+          const id = query.get("videoId");
+          return route.fulfill({ json: { videoId: id, name: tagWork.videos.find(video => video.id === id)?.name, tags: tags[id] } });
+        });
+        await page.route(url => url.pathname === aPath, route => {
+          requests.push({ path: aPath, body: route.request().postDataJSON() });
+          if (failA) return route.fulfill({ status: 409, json: { error: "Synthetic A correction conflict" } });
+          tagWork.localMarkers = [];
+          return route.fulfill({ json: { ok: true, changed: true, work: tagWork } });
+        });
+      } });
+      const video = page.locator("#playerVideo");
+      const launch = page.locator("#correctTagsButton");
+      const dialog = page.locator("#playerTagsDialog");
+      const marker = key => dialog.getByRole("checkbox", { name: new RegExp(`^${key}(?:\\b|[（( ])`) });
+      const save = dialog.getByRole("button", { name: "保存", exact: true });
+      const waitForChecked = key => page.waitForFunction(value => {
+        const input = document.querySelector(`#playerTagsDialog input[value="${value}"]`);
+        return input?.checked && !input.matches(":disabled");
+      }, key);
+      try {
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        await video.evaluate(node => { node.currentTime = 87.25; node.pause(); node.muted = true; node.volume = 0.42; });
+        assert.equal(await page.locator("#markerAButton").count(), 0, "A is edited with the other tags");
+        await launch.click();
+        await dialog.waitFor();
+        await waitForChecked("LTX");
+        assert.equal(await marker("A").isChecked(), true);
+        assert.equal(await marker("LTX").isChecked(), true);
+        assert.equal(await marker("C").isChecked(), false, "C from video A must not appear on video B");
+        assert.equal(await marker("U").isChecked(), true);
+        assert.equal(await save.isDisabled(), true, "unchanged tags need no write");
+        await marker("A").uncheck();
+        await marker("C").check();
+        await marker("U").uncheck();
+        const queued = page.waitForResponse(response => new URL(response.url()).pathname === videoPath && response.request().method() === "POST");
+        queued.catch(() => {});
+        await save.click();
+        await queued;
+        assert.equal(await dialog.locator('button[type="submit"]').isDisabled(), true, "saving must not allow another tag write");
+        finishRename();
+        await dialog.getByText(/Synthetic A correction conflict/).waitFor();
+        assert.equal(await marker("A").isChecked(), false, "the failed edit stays available for retry");
+        assert.equal(await marker("C").isChecked(), true, "the completed file edit remains committed");
+        assert.equal(await marker("U").isChecked(), false);
+        failA = false;
+        await save.click();
+        await dialog.waitFor({ state: "hidden" });
+        await sourceIs(page, "B");
+        await page.evaluate(() => __emitMedia("loadedmetadata"));
+        assert.deepEqual(await video.evaluate(node => [node.currentTime, node.paused, node.muted, node.volume]), [87.25, true, true, 0.42]);
+        assert.deepEqual(requests, [
+          { path: videoPath, body: { videoId: "B", name: "Video B-LTX-U.mp4", tags: { ltx: true, c: true, u: false } } },
+          { path: aPath, body: { marker: "A", enabled: false } },
+          { path: aPath, body: { marker: "A", enabled: false } }
+        ], "retry only the failed work-level edit");
+
+        await launch.click();
+        await waitForChecked("C");
+        assert.equal(await marker("A").isChecked(), false);
+        assert.equal(await marker("C").isChecked(), true);
+        assert.equal(await marker("U").isChecked(), false);
+        await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "hidden" });
+        await choose(page, "A");
+        await sourceIs(page, "A");
+        await launch.click();
+        await waitForChecked("C");
+        assert.equal(await marker("C").isChecked(), true);
+        assert.equal(await marker("LTX").isChecked(), false, "LTX on video B must not appear on video A");
+        await page.keyboard.press("Escape");
+        const gallery = new URL(page.url());
+        gallery.searchParams.delete("videoId");
+        gallery.searchParams.set("mediaId", "media-fixture");
+        await page.goto(gallery.href);
+        await sourceIs(page, "A");
+        assert.equal(await launch.isVisible(), false, "gallery videos do not expose FanHao tag correction");
+      } finally { finishRename(); await page.close(); }
+    });
     await run("playback rate changes in place and survives compatibility stream reload and page return", async () => {
       const page = await open(), remux = hold("B", info("B", { mode: "remux" }));
       const rate = page.getByRole("combobox", { name: "播放倍速" });
@@ -1792,6 +1970,9 @@ export async function runWebPlayerFixture({ sourceOverride = null, sourceOverrid
         assert.equal(await page.evaluate(() => __media.pending.length), 2);
         await page.evaluate(() => __media.pending[1].resolve()); await tick(page);
         await page.locator("#toggleSidebarButton").click();
+        assert.equal(await page.locator("#playerVideo").evaluate(video => video.muted), true, "opening or closing a toolbar panel keeps autoplay muted");
+        assert.equal(await page.evaluate(() => __media.pending.length), 2);
+        await page.locator("#playerVideo").click();
         assert.equal(await page.locator("#playerVideo").evaluate(video => video.muted), false);
         assert.equal(await page.locator("#playerVideo").getAttribute("data-autoplay-muted"), null);
         assert.equal(await page.evaluate(() => __media.pending.length), 3);

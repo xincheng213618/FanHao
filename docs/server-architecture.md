@@ -15,7 +15,6 @@ flowchart TD
   Registry --> Media["media 影视"]
   Registry --> Novels["novels 小说"]
   Registry --> Short["short-videos 短视频"]
-  Registry --> Tools["tools 小工具"]
   Registry --> Music["music 音乐"]
   Shell --> Platform["platform 通用基础设施"]
   Platform --> Registry
@@ -29,7 +28,7 @@ flowchart TD
 - `src/modules/<id>/server/`：模块自己的路由、运行时、存储和领域服务。
 - `src/platform/server/`：HTTP、鉴权、文件响应、静态资源和媒体流等通用能力。
 - `public/modules/<id>/`：Web 页面控制器。
-- `public/app.js`：只负责 FanHao 番号页面；`public/standalone-app.js` 与 `public/js/standalone-host.js` 为图库/影视、小说、音乐和小工具提供独立页面宿主。
+- `public/app.js` 负责 FanHao 番号页面。`public/standalone-app.js` 与 `public/js/standalone-host.js` 为图库/影视、小说和音乐提供独立页面宿主。
 - `android-client/www/modules/<id>/`：Android WebView 页面控制器和模块样式。
 
 旧的 `src/server/` 已不再承载源码；`npm run verify:modules` 会阻止代码重新流回该目录。
@@ -63,7 +62,7 @@ flowchart TD
 
 ## Web 宿主边界
 
-顶层 Web 页面按产品形态选择入口：`public/fanhao-app.js` 加载 `public/app.js`，后者只拥有 FanHao 番号状态与交互；图库/影视、小说、音乐和小工具统一经 `public/standalone-app.js` 启动，由 `public/js/standalone-host.js` 按当前路由动态加载对应页面模块。短视频保留自己的独立入口 `public/short-video-app.js`。宿主只提供路由、共享 UI 依赖和生命周期，不应重新吸收模块领域状态。
+`public/fanhao-app.js` 加载负责番号状态与交互的 `public/app.js`。图库/影视、小说和音乐经 `public/standalone-app.js` 启动，由 `public/js/standalone-host.js` 按路由动态加载页面模块。短视频使用 `public/short-video-app.js`。宿主提供路由、共享 UI 依赖和生命周期。
 
 ## 模块边界
 
@@ -76,7 +75,6 @@ flowchart TD
 | `media` | 影视 | 电影/电视剧元数据、详情、封面和媒体播放 |
 | `novels` | 小说 | 小说 SQLite、书库、章节和阅读进度 |
 | `short-videos` | 短视频 | 短视频 SQLite、来源同步、信息流、作者和播放 |
-| `tools` | 小工具 | TXT 格式化和离线小游戏入口 |
 | `music` | 音乐 | 音乐 SQLite、扫描、播放队列和歌单 |
 
 `content-index` 是套图与影视复用的隐藏只读索引模块；`system` 是状态、管理、更新和本机能力的隐藏模块。共享不是把业务重新揉在一起：隐藏模块只提供明确的底层能力，可见模块仍拥有自己的 API 和媒体路由。

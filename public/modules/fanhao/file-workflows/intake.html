@@ -6,22 +6,14 @@
   <link rel="icon" href="/app-icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/modules/fanhao/file-workflows/styles.css">
   <link id="libraryCardStyles" rel="stylesheet" href="/modules/fanhao/work-cards.css" media="not all">
-  <link rel="stylesheet" href="/modules/fanhao/file-workflows/intake.css?v=19">
+  <link rel="stylesheet" href="/modules/fanhao/file-workflows/intake.css?v=24">
 </head>
 <body>
-  <main id="bench" class="bench" data-view="drop" data-mode="wash">
+  <main id="bench" class="bench" data-view="drop">
     <div id="dropArea" class="drop">
       <div class="drop-card">
-        <div id="dropLibrarySearchSlot"></div>
         <strong>把视频或文件夹拖到这里</strong>
         <div class="drop-controls">
-          <div id="dropModeSlot"><div id="reviewMode" class="review-entry">
-            <div class="review-mode" role="group" aria-label="工作台模式">
-              <button type="button" data-mode="wash" aria-pressed="true">洗版</button>
-              <button type="button" data-mode="subtitle" aria-pressed="false">字幕</button>
-            </div>
-            <a class="link-button" href="/fanhao/file-workflows/intake?mode=subtitle" target="_blank" rel="noopener">独立字幕工作台 ↗</a>
-          </div></div>
           <div id="dropQueueDraftSlot">
             <section id="queueDraft" class="queue-draft" aria-label="恢复洗版待核对清单" hidden>
               <p id="queueDraftStatus" role="status"></p>
@@ -42,8 +34,6 @@
     <input id="filePicker" type="file" multiple hidden><input id="folderPicker" type="file" webkitdirectory multiple hidden>
 
     <aside class="side">
-      <div id="sideModeSlot"></div>
-      <div id="sideLibrarySearchSlot"></div>
       <div id="sideQueueDraftSlot"></div>
       <div class="side-head">
         <h2>待核对 <span id="queueCount" class="badge">0</span></h2>
@@ -117,6 +107,7 @@
 
   <dialog id="sourceSubtitles" class="history-dialog" aria-labelledby="sourceSubtitlesTitle">
     <div class="history-head"><h2 id="sourceSubtitlesTitle">源视频字幕</h2><form method="dialog"><button id="closeSourceSubtitles">关闭</button></form></div>
+    <p id="librarySubtitleVideo" class="subtitle-path" hidden></p>
     <div id="dialogSubtitleSlot"><div id="sourceSubtitleContent">
       <div class="actions">
         <button id="downloadSourceSubtitle" type="button" class="primary">一键下载字幕</button>
@@ -127,6 +118,7 @@
         <input id="sourceSubtitlePicker" type="file" accept=".srt" hidden>
       </div>
       <p id="sourceSubtitleStatus" class="subtitle-status" role="status"></p>
+      <div id="librarySubtitleCopies" class="job-list" aria-label="从待迁移复制" hidden></div>
       <div id="sourceSubtitleAttachments" class="job-list" aria-label="已匹配字幕" hidden></div>
       <div id="sourceSubtitleResults" class="job-list"></div>
     </div></div>
@@ -208,6 +200,6 @@
       </div>
     </div>
   </section>
-  <script type="module" src="/modules/fanhao/file-workflows/intake.js?v=39"></script>
+  <script type="module" src="/modules/fanhao/file-workflows/intake.js?v=48"></script>
 </body>
 </html>

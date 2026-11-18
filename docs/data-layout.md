@@ -21,7 +21,6 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 | `library-index.json` | JSON | 旧版扫描索引缓存（核心库时代已被 `fanhao-core-v2.sqlite` 取代，但兼容读取）。 |
 | `android-update/` | 目录 | 安卓 APK 更新通道文件（debug / release）。 |
 | `image-reader-cache/` | 目录 | 图片读取器运行时缓存（受 `app-config` 上限约束，可随时清理）。 |
-| `tool-downloads/` | 目录 | 工具临时下载（如 TXT 格式化结果，带 TTL）。 |
 | `novel-collection/` | 目录 | 小说采集任务配置、结构化结果、TXT 输出和逐任务日志。 |
 
 > 日志不在 `data/` 下，而在项目根 `logs/`（`access.log`、`fanhao.out.log`、`fanhao.err.log`）。
@@ -97,7 +96,6 @@ FanHao 把本地状态放在项目根下的 `data/` 目录，包含若干 SQLite
 - **图片读取器缓存**（`image-reader-cache/`）：手机端图库浏览的图片缓存，大小受 `app-config` 约束，
   可通过 `POST /api/image-reader/cache/cleanup` 清理。
 - **本地 / 远端图片缓存**：演员头像、作品封面等，由 `cache-local-images` / `cache-remote-images` 作业填充。
-- **工具下载**（`tool-downloads/`）：TXT 格式化等临时产物，带 TTL 自动过期。
 
 ## 数据安全提示
 

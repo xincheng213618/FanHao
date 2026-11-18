@@ -69,7 +69,7 @@ export function createLibraryPeopleFilter({ input, status, list, retry, readCata
     status.textContent = "正在读取人物…";
     try {
       const { people = [], totals } = await readCatalog("/api/library");
-      rows = people.filter((person) => person.workCount > 0 && person.name?.trim())
+      rows = people.filter((person) => !person.isWestern && person.workCount > 0 && person.name?.trim())
         .sort((left, right) => right.workCount - left.workCount || left.name.localeCompare(right.name, "zh-CN"))
         .map((person) => {
           const id = String(person.id);
@@ -78,11 +78,14 @@ export function createLibraryPeopleFilter({ input, status, list, retry, readCata
           const avatar = person.avatarUrl || (person.coverId ? `/media/image/${encodeURIComponent(person.coverId)}` : "");
           return { id, count: Number(person.workCount), names: [name, person.name, ...aliases].map(normalize), button: personButton(id, name, person.workCount, avatar) };
         });
+      const removedSelection = current && !rows.some((row) => row.id === current);
+      if (removedSelection) current = "";
       allCount = totals?.works ?? rows.reduce((count, row) => count + row.count, 0);
       all = personButton("", "全部人物", allCount);
       list.replaceChildren(all, ...rows.map((row) => row.button));
       input.disabled = false;
       updateCounts();
+      if (removedSelection) select("");
     } catch {
       status.textContent = "人物读取失败。";
       retry.hidden = false;
@@ -100,9 +103,10 @@ export function createLibraryPeopleFilter({ input, status, list, retry, readCata
       updateCounts();
     },
     setSelection(id) {
-      current = id;
-      all?.setAttribute("aria-pressed", String(!id));
-      for (const row of rows) row.button.setAttribute("aria-pressed", String(row.id === id));
+      current = !all || rows.some((row) => row.id === id) ? id : "";
+      all?.setAttribute("aria-pressed", String(!current));
+      for (const row of rows) row.button.setAttribute("aria-pressed", String(row.id === current));
+      return current;
     }
   };
 }

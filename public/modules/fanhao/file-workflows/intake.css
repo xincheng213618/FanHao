@@ -21,12 +21,6 @@ html, body { height: 100%; }
 
 .bench[data-view="work"] { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); height: 100dvh; }
 .side { display: flex; flex-direction: column; gap: 10px; min-width: 0; min-height: 0; padding: 14px; background: #fff; border-right: 1px solid #dce3da; }
-.review-mode { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid #dce3da; border-radius: 9px; background: #f1f5ef; }
-.review-mode button { padding: 4px 12px; border-color: transparent; background: transparent; font-size: 12px; }
-.review-mode button[aria-pressed="true"] { border-color: #c0d6c8; background: #fff; color: #28533f; }
-.review-entry { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.review-entry .link-button { align-self: center; }
-#dropLibrarySearchSlot, #sideLibrarySearchSlot { min-width: 0; }
 #dropQueueDraftSlot:empty, #sideQueueDraftSlot:empty,
 #dropQueueDraftSlot:has(> [hidden]), #sideQueueDraftSlot:has(> [hidden]) { display: none; }
 .queue-draft { display: grid; gap: 6px; max-width: 100%; padding: 9px 10px; border: 1px solid #c0d6c8; border-radius: 8px; background: #edf6ee; text-align: left; color: #315743; font-size: 12px; }
@@ -34,16 +28,9 @@ html, body { height: 100%; }
 .queue-draft-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .queue-draft button { padding: 5px 8px; font-size: 12px; }
 .queue-draft ul { max-height: 120px; margin: 5px 0 0; padding-left: 18px; overflow: auto; overflow-wrap: anywhere; }
-#dropLibrarySearchSlot:empty, #sideLibrarySearchSlot:empty,
-.bench[data-mode="wash"] #dropLibrarySearchSlot,
-.bench[data-mode="wash"] #sideLibrarySearchSlot { display: none; }
-.bench[data-dedicated-subtitle] #dropModeSlot,
-.bench[data-dedicated-subtitle] #sideModeSlot,
 .bench[data-dedicated-subtitle] .open-history { display: none; }
 .subtitle-workbench-title { font-size: 24px; letter-spacing: normal; margin: 0 0 12px; }
-.side .subtitle-workbench-title { font-size: 17px; }
 .library-search { width: min(460px, calc(100vw - 70px)); max-width: 100%; }
-.side .library-search { width: 100%; }
 .library-search .path-form button { flex: 0 0 auto; font-size: 13px; }
 .library-search-status { color: #526b5d; font-size: 12px; margin: 8px 0 0; text-align: left; overflow-wrap: anywhere; }
 .library-search-status.error { color: #a14639; }
@@ -150,6 +137,7 @@ body.subtitle-workbench { background: #101114; }
 .library-search-results[data-layout="cards"] { grid-template-columns: repeat(auto-fill, minmax(min(100%, 188px), 1fr)); gap: 14px; }
 .library-search-results[data-layout="cards"][data-size="compact"] { grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr)); }
 .library-search-results .work-card { --cover-aspect: 2 / 3; padding: 0; border: 1px solid var(--workbench-border); font: inherit; }
+.bench[data-dedicated-subtitle] .library-search-results .work-cover > img { object-position: right center; }
 .library-search-results .work-card .work-title { color: #ececf1; font-weight: 650; }
 .library-search-results .work-card .placeholder-cover { background: #252831; color: var(--workbench-muted); }
 .library-search-results .work-card[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--accent); }
@@ -238,6 +226,9 @@ body.subtitle-workbench { background: #101114; }
 .versions label:has(input:checked) { border-color: #57836b; background: #e3efe6; }
 .versions label:has(input:disabled) { opacity: .55; cursor: default; }
 .versions input { accent-color: #28533f; margin: 0; }
+.versions label { max-width: 100%; min-width: 0; }
+.versions label > span { flex: none; }
+.versions label > .version-name { flex: 0 1 auto; min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .cmp { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; background: #fff; border: 1px solid #dce3da; border-radius: 10px; font-size: 13px; }
 .cmp th, .cmp td { position: static; padding: 7px 10px; border-bottom: 1px solid #eef1ec; vertical-align: top; overflow-wrap: anywhere; color: inherit; }
@@ -310,7 +301,8 @@ dialog form .actions { justify-content: flex-end; margin-top: 16px; }
 .subtitle-path { margin: 4px 0 0; color: #6c7d72; font-size: 12px; overflow-wrap: anywhere; }
 #sourceSubtitleAttachments:not([hidden]) + #sourceSubtitleResults:not(:empty) { margin-top: 10px; }
 #sourceSubtitleResults { max-height: 48vh; overflow-y: auto; }
-#sourceSubtitleResults .job-row, #sourceSubtitleAttachments .job-row { flex-wrap: wrap; }
+#sourceSubtitleContent .job-row { flex-wrap: wrap; }
+#librarySubtitleCopies:not([hidden]) { margin-bottom: 10px; }
 .subtitle-list { margin: 0; padding-left: 1.3em; }
 .subtitle-list li + li { margin-top: 3px; }
 .subtitle-list-action { margin-top: 6px; padding: 4px 8px; font-size: 11px; }

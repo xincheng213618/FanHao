@@ -13,7 +13,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$source = 'https://ltx.libray.workers.dev/api/items'
+$source = 'https://ltxlib.dpdns.org/api/items'
 $cachePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CachePath)
 
 if ($Refresh) {
@@ -21,7 +21,14 @@ if ($Refresh) {
     if ($PSVersionTable.PSVersion -ge [version]'7.4') {
         $request.OperationTimeoutSeconds = 25
     }
-    $response = Invoke-WebRequest @request
+    try {
+        $response = Invoke-WebRequest @request
+    } catch {
+        if ($null -ne $_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 428) {
+            throw 'The LTX site requires a browser security session. Open Update Catalog in FanHao. The local snapshot was kept.'
+        }
+        throw
+    }
     $catalog = [Text.Encoding]::UTF8.GetString($response.RawContentStream.ToArray()) | ConvertFrom-Json
     if ($catalog.items -isnot [array] -or $catalog.items.Count -eq 0) {
         throw 'LTX returned no catalog items. The local snapshot was kept.'

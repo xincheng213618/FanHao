@@ -1,7 +1,7 @@
 import { createLatestRequestGate } from "./latest-request.js?v=20260717-fanhao-latest-request-01";
 import { createPrefetchCache } from "./prefetch-cache.js?v=20261004-fanhao-requests-01";
 import { resolveWorkPage } from "./features/works/work-page-state.js";
-import { createPersonShortcutStore, resolvePersonShortcuts } from "./person-shortcuts.js?v=20261113-people-shortcuts-01";
+import { createPersonShortcutStore, resolvePinnedPeople } from "./person-shortcuts.js?v=20261113-people-shortcuts-01";
 
 const PERSON_DETAIL_DESKTOP_PAGE_SIZE = 64;
 const PERSON_DETAIL_MOBILE_PAGE_SIZE = 48;
@@ -122,55 +122,38 @@ function renderPeopleIndexStats() {
 
 function renderPersonShortcuts(people) {
   const scope = state.peopleScope || "main";
-  const { pinned, recent } = resolvePersonShortcuts(people, personShortcuts.list(scope));
-  if (!pinned.length && !recent.length) return;
+  const pinned = resolvePinnedPeople(people, personShortcuts.list(scope).pinned);
+  if (!pinned.length) return;
   const nav = document.createElement("nav");
   nav.className = "person-shortcuts";
   nav.setAttribute("aria-label", "人物快捷入口");
   const isCurrent = () => nav.isConnected && state.activeView === "people" && !state.selectedPersonId
     && (state.peopleScope || "main") === scope;
-  for (const [label, entries] of [["已固定", pinned], ["最近浏览", recent]]) {
-    if (!entries.length) continue;
-    const row = document.createElement("div");
-    row.className = "person-shortcut-row";
-    row.setAttribute("role", "group");
-    row.setAttribute("aria-label", label);
-    const heading = document.createElement("span");
-    heading.textContent = label;
-    row.append(heading);
-    for (const person of entries) {
-      const shortcut = document.createElement("button");
-      shortcut.type = "button";
-      shortcut.className = "stat-filter-chip person-shortcut";
-      shortcut.textContent = displayPersonName(person);
-      shortcut.addEventListener("click", () => {
-        if (!isCurrent()) return;
-        clearWorkSearch();
-        void selectPerson(person.id).catch((error) => {
-          if (state.activeView !== "people" || String(state.selectedPersonId) !== String(person.id)
-            || error?.code === "ACCOUNT_CHANGED") return;
-          els.workGrid.innerHTML = "";
-          appendEmpty(error.message || "人物读取失败，请返回索引重试。");
-        });
+  const row = document.createElement("div");
+  row.className = "person-shortcut-row";
+  row.setAttribute("role", "group");
+  row.setAttribute("aria-label", "已固定");
+  const heading = document.createElement("span");
+  heading.textContent = "已固定";
+  row.append(heading);
+  for (const person of pinned) {
+    const shortcut = document.createElement("button");
+    shortcut.type = "button";
+    shortcut.className = "stat-filter-chip person-shortcut";
+    shortcut.textContent = displayPersonName(person);
+    shortcut.addEventListener("click", () => {
+      if (!isCurrent()) return;
+      clearWorkSearch();
+      void selectPerson(person.id).catch((error) => {
+        if (state.activeView !== "people" || String(state.selectedPersonId) !== String(person.id)
+          || error?.code === "ACCOUNT_CHANGED") return;
+        els.workGrid.innerHTML = "";
+        appendEmpty(error.message || "人物读取失败，请返回索引重试。");
       });
-      row.append(shortcut);
-    }
-    if (label === "最近浏览") {
-      const clear = document.createElement("button");
-      clear.type = "button";
-      clear.className = "person-shortcuts-clear";
-      clear.textContent = "清除";
-      clear.setAttribute("aria-label", "清除最近浏览人物");
-      clear.addEventListener("click", () => {
-        if (!isCurrent()) return;
-        personShortcuts.clearRecent(scope);
-        renderPeopleIndexStats();
-        (els.statsRow.querySelector(".person-shortcut") || els.workGrid.querySelector(".person-index-card"))?.focus({ preventScroll: true });
-      });
-      row.append(clear);
-    }
-    nav.append(row);
+    });
+    row.append(shortcut);
   }
+  nav.append(row);
   els.statsRow.append(nav);
 }
 

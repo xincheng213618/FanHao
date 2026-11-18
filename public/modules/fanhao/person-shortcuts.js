@@ -56,23 +56,17 @@ export function createPersonShortcutStore(getOwner) {
       if (pinned.length >= PIN_LIMIT) return `已固定 ${PIN_LIMIT} 位人物，请先取消一位`;
       write(storageKey, { ...value, pinned: [...pinned, id] });
       return "";
-    },
-    clearRecent(scope) {
-      const storageKey = key(scope);
-      if (storageKey) write(storageKey, { ...read(storageKey), recent: [] });
     }
   };
 }
 
-export function resolvePersonShortcuts(people, { pinned, recent }) {
-  const wanted = new Set([...pinned, ...recent]);
+export function resolvePinnedPeople(people, pinned) {
+  const wanted = new Set(pinned);
   const matching = new Map();
   for (const person of people) {
     if (!wanted.size) break;
     const id = String(person.id);
     if (wanted.delete(id)) matching.set(id, person);
   }
-  const fixed = new Set(pinned);
-  const resolve = (entries) => entries.map((id) => matching.get(id)).filter(Boolean);
-  return { pinned: resolve(pinned), recent: resolve(recent.filter((id) => !fixed.has(id))) };
+  return pinned.map((id) => matching.get(id)).filter(Boolean);
 }

@@ -1,12 +1,37 @@
 import { constants as zlibConstants, brotliCompress, gzip } from "node:zlib";
 
 const JSON_COMPRESSION_MIN_BYTES = 4 * 1024;
+const MAX_CACHED_JSON_BYTES = 16 * 1024 * 1024;
 
 export function sendJson(res, status, payload) {
   sendJsonParts(res, status, [Buffer.from(JSON.stringify(payload))]);
 }
 
 export function sendJsonParts(res, status, parts) {
+  writeJsonParts(res, status, parts);
+}
+
+// Use only for payloads that are replaced rather than mutated. Encodings are
+// released with their payload, and clients still receive Cache-Control: no-store.
+export function createCachedJsonSender() {
+  const cache = new WeakMap();
+  return (res, status, payload) => {
+    if (res.destroyed || res.writableEnded) return;
+    let prepared = cache.get(payload);
+    if (!prepared) {
+      const body = Buffer.from(JSON.stringify(payload));
+      if (body.length > MAX_CACHED_JSON_BYTES) {
+        sendJsonParts(res, status, [body]);
+        return;
+      }
+      prepared = { parts: [body], variants: new Map() };
+      cache.set(payload, prepared);
+    }
+    writeJsonParts(res, status, prepared.parts, prepared.variants);
+  };
+}
+
+function writeJsonParts(res, status, parts, variants) {
   if (res.destroyed || res.writableEnded) return;
   const size = parts.reduce((bytes, part) => bytes + part.length, 0);
   const { encoding, identityAllowed } = acceptedJsonEncoding(res, size);
@@ -30,6 +55,27 @@ export function sendJsonParts(res, status, parts) {
     }
     writeJson(res, status, [compressed], compressed.length, encoding);
   };
+  if (!variants) {
+    compressJson(body, encoding, finish);
+    return;
+  }
+  const variant = variants.get(encoding);
+  if (variant?.body) {
+    finish(null, variant.body);
+  } else if (variant) {
+    variant.waiters.push(finish);
+  } else {
+    const waiters = [finish];
+    variants.set(encoding, { waiters });
+    compressJson(body, encoding, (error, compressed) => {
+      if (error) variants.delete(encoding);
+      else variants.set(encoding, { body: compressed });
+      for (const waiter of waiters) waiter(error, compressed);
+    });
+  }
+}
+
+function compressJson(body, encoding, finish) {
   if (encoding === "br") {
     brotliCompress(body, {
       params: {

@@ -1,5 +1,5 @@
 import { formatNumber } from "./format.js";
-import { openMobileActionSheet } from "./mobile-action-sheet.js?v=assets-06c1d7f13464";
+import { openMobileActionSheet } from "./mobile-action-sheet.js?v=assets-78764ed05056";
 
 const COMPACT_PRIMARY_FILTERS = Object.freeze(["all", "playable", "progress"]);
 

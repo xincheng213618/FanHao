@@ -837,140 +837,23 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.evaluate(key => JSON.parse(localStorage.getItem(key)).length, key), 45);
       } finally { await page.close(); }
     });
-    await run('media continue watching refreshes on browser restore and links directly to the correct player', async () => {
-      const matches = url => url.pathname === '/api/gallery-media/continue-watching' && url.searchParams.get('kind') === 'all';
-      const first = hold(matches, '', { items: [{ id: 'old-film', title: 'Synthetic old film', percent: 53 }] });
-      const resumed = { id: 'current-episode', title: 'Synthetic series', episodeTitle: 'Synthetic episode 3', percent: 71.2 };
-      const fresh = hold(matches, '', { items: [resumed, ...[1, 2, 3, 4, 5].map(id => ({ id: `film-${id}`, title: `Film ${id}`, percent: 30 }))] });
-      const page = await newPage({ real: true, route: '/media?sort=title', waitReady: false });
-      try {
-        await requested(first);
-        await page.locator('.gallery-movie-list-item').first().waitFor({ state: 'visible' });
-        assert.equal(await page.locator('.media-continue:visible').count(), 0, 'slow progress does not block the catalog');
-        await settle(page, first);
-        await page.getByRole('link', { name: /Synthetic old film/ }).waitFor();
-        await page.evaluate(() => {
-          window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
-          window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
-        });
-        await requested(fresh);
-        assert.equal(await page.getByRole('link', { name: /Synthetic old film/ }).count(), 0);
-        await settle(page, fresh);
-        await page.setViewportSize({ width: 320, height: 780 });
-        const list = page.locator('.media-continue-list');
-        assert(await list.evaluate(node => getComputedStyle(node).display === 'grid' && node.clientWidth < node.scrollWidth
-          && node.getBoundingClientRect().right <= innerWidth), 'shelf scrolls inside the narrow viewport');
-        const link = page.getByRole('link', { name: /Synthetic series Synthetic episode 3 已看 71%/ });
-        await page.route(/\/player\.html\?/, route => route.fulfill({ contentType: 'text/html', body: '<title>Synthetic player</title>' }));
-        await link.press('Enter');
-        await page.waitForURL(url => url.pathname === '/player.html' && url.searchParams.get('mediaId') === resumed.id);
-        assert.equal(new URL(page.url()).searchParams.get('returnTo'), '/media?sort=title');
-      } finally { releaseSummaryGates(first, fresh); await page.close(); }
-    });
-
-    await run('media continue watching retries the current kind and ignores a late previous shelf', async () => {
-      const matches = kind => url => url.pathname === '/api/gallery-media/continue-watching' && url.searchParams.get('kind') === kind;
-      const old = hold(matches('all'), '', { items: [{ id: 'outdated', title: 'Outdated film', percent: 25 }] });
-      const failed = hold(matches('anime'), 'Synthetic progress read unavailable');
-      const retry = hold(matches('anime'), '', { items: [{ id: 'anime-1', title: 'Synthetic anime', percent: 43 }] });
-      const page = await newPage({ real: true, route: '/media', waitReady: false });
-      try {
-        await requested(old);
-        await page.getByRole('button', { name: /^动漫/ }).click();
-        await requested(failed);
-        await settle(page, old);
-        assert.equal(await page.getByText('Outdated film', { exact: true }).count(), 0);
-        await settle(page, failed);
-        await page.locator('.media-continue').getByRole('button', { name: '重试' }).press('Enter');
-        await requested(retry);
-        await settle(page, retry);
-        assert(await page.getByRole('link', { name: /Synthetic anime/ }).evaluate(node => node === document.activeElement));
-        await page.locator('.gallery-search').fill('Synthetic query');
-        await page.locator('.gallery-search').press('Enter');
-        assert.equal(await page.locator('.media-continue').count(), 0);
-      } finally { releaseSummaryGates(old, failed, retry); await page.close(); }
-    });
-
-    await run('media continue watching hides and restores local entries, fills gaps and reveals newer progress', async () => {
-      const matches = url => url.pathname === '/api/gallery-media/continue-watching' && url.searchParams.get('kind') === 'all';
-      const items = Array.from({ length: 8 }, (_, i) => ({ id: `resume-${i + 1}`, title: `Resume film ${i + 1}`,
-        percent: 31, progressRevision: `old-${i + 1}` }));
-      const initial = hold(matches, '', { items });
-      const page = await newPage({ real: true, route: '/media', waitReady: false, accountOwner: 'account:resume-first' });
-      const gates = [initial];
-      const shelf = page.getByRole('region', { name: '继续观看', exact: true });
-      const first = shelf.getByRole('link', { name: /^Resume film 1 已看/ });
-      const hide = shelf.getByRole('button', { name: '隐藏「Resume film 1」', exact: true });
-      const manage = shelf.getByRole('button', { name: '已隐藏 1 项', exact: true });
-      const ids = () => shelf.locator('.media-continue-card').evaluateAll(links => links.map(link => link.dataset.mediaId));
-      async function reload(owner, latest = items) {
-        const read = hold(matches, '', { items: latest }); gates.push(read);
-        await page.setExtraHTTPHeaders({ 'X-Fixture-Owner': owner });
-        await page.reload({ waitUntil: 'domcontentloaded' });
-        await requested(read); await settle(page, read);
-      }
-      try {
-        await requested(initial);
-        const url = new URL(initial.url, base);
-        assert.equal(url.searchParams.get('limit'), '24');
-        assert.equal(url.searchParams.get('includeProgressRevision'), '1');
-        await settle(page, initial);
-        await first.waitFor();
-        await page.setViewportSize({ width: 320, height: 780 });
-        assert.deepEqual(await ids(), ['resume-1', 'resume-2', 'resume-3', 'resume-4', 'resume-5', 'resume-6']);
-        assert(await hide.evaluate(node => {
-          const rect = node.getBoundingClientRect();
-          return rect.width >= 44 && rect.height >= 44 && node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
-        }), 'the hide button is a separate touch target on mobile');
-        const reads = countRequests(matches);
-        await hide.press('Enter');
-        assert.equal(await first.count(), 0);
-        assert.deepEqual(await ids(), ['resume-2', 'resume-3', 'resume-4', 'resume-5', 'resume-6', 'resume-7']);
-        assert.equal(await shelf.getByRole('link', { name: /^Resume film 2 已看/ }).evaluate(link => link === document.activeElement), true);
-        await manage.press('Enter');
-        assert.deepEqual(await ids(), ['resume-1']);
-        await shelf.getByRole('button', { name: '恢复「Resume film 1」', exact: true }).press('Enter');
-        await first.waitFor();
-        assert.equal(await manage.count(), 0);
-        await hide.press('Enter');
-        assert.equal(countRequests(matches), reads, 'hiding, filling and restoring do not fetch or change progress');
-        await reload('account:resume-first');
-        await manage.waitFor();
-        assert.equal(await first.count(), 0);
-        await reload('account:resume-other');
-        await first.waitFor();
-        assert.equal(await manage.count(), 0, 'the other account does not inherit this browser account’s hidden list');
-        await reload('account:resume-first', [{ ...items[0], progressRevision: 'new-1' }]);
-        await first.waitFor();
-        assert.equal(await manage.count(), 0, 'new recorded progress must show again even when its percentage is the same');
-        await hide.press('Enter');
-        assert.deepEqual(await ids(), []);
-        await manage.press('Enter');
-        await shelf.getByRole('button', { name: '恢复「Resume film 1」', exact: true }).press('Enter');
-        await first.waitFor();
-      } finally { releaseSummaryGates(...gates); await page.close(); }
-    });
-
-    await run('media continue watching scopes movie and TV roots and skips individual detail links', async () => {
+    await run('media catalogues omit continue watching and do not request account history', async () => {
       const matches = url => url.pathname === '/api/gallery-media/continue-watching';
-      for (const [route, kind] of [['/movies', 'movie'], ['/tv', 'tv']]) {
-        const shelf = hold(matches, '', { items: [{ id: `${kind}-1`, title: 'Synthetic saved video', percent: 25 }] });
-        const page = await newPage({ real: true, route, waitReady: false });
-        try {
-          await requested(shelf);
-          assert.equal(new URL(shelf.url, base).searchParams.get('kind'), kind);
-          await settle(page, shelf);
-          await page.getByRole('link', { name: /Synthetic saved video/ }).waitFor();
-        } finally { releaseSummaryGates(shelf); await page.close(); }
-      }
       const before = countRequests(matches);
-      const detail = hold(url => url.pathname === '/api/gallery-media/W');
-      const page = await newPage({ real: true, route: '/media/W', waitReady: false });
-      try {
-        await requested(detail);
-        await settle(page, detail);
-        assert.equal(countRequests(matches), before);
-      } finally { releaseSummaryGates(detail); await page.close(); }
+      for (const route of ['/media', '/movies', '/tv']) {
+        const page = await newPage({ real: true, route, waitReady: false, accountOwner: 'account:resume-fixture' });
+        try {
+          await page.locator('.gallery-media-controls').waitFor();
+          await page.waitForFunction(() => !document.documentElement.classList.contains('app-module-loading'));
+          await page.evaluate(() => {
+            window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+            window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+          });
+          await tick(page);
+          assert.equal(await page.locator('.media-continue').count(), 0);
+          assert.equal(countRequests(matches), before);
+        } finally { await page.close(); }
+      }
     });
 
     await run('media episode card opens the player with the series and its directory position', async () => {
@@ -1914,7 +1797,7 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
     await run("photo reading resume follows scroll and single-page reading across reload", async () => {
       const page = await newPage({ real: true });
       const archive = { revision: "1".repeat(24), total: 210 };
-      const shelfEntry = page.locator('.gallery-photo-continue [data-photo-list-card="resume:A"]');
+      const shelf = page.locator(".gallery-photo-continue");
       const resume = page.locator('.gallery-photo-resume-button');
       try {
         await mockReadingArchive(page, archive);
@@ -1946,18 +1829,15 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         await page.waitForFunction(total => document.querySelector(".gallery-image-pager-counter")?.textContent === `第 ${total} / ${total} 张`, archive.total);
         await page.keyboard.press("Escape");
         await page.locator(".gallery-reader-back").click();
-        await shelfEntry.waitFor();
-        assert.equal(await shelfEntry.locator("span").textContent(), `第 ${archive.total} 张`);
+        assert.equal(await shelf.count(), 0, "catalogue does not render saved reading positions");
 
         await page.setViewportSize({ width: 360, height: 760 });
-        await page.goto(`${base}/photo`);
-        await shelfEntry.waitFor();
+        await page.goto(`${base}/photo?photoView=albums`);
         await page.reload();
-        await shelfEntry.waitFor();
-        const bounds = await shelfEntry.boundingBox();
-        assert(bounds.x >= 0 && bounds.x + bounds.width <= 360);
+        await clickAlbum(page, "A");
+        await readerTitle(page, "Album A");
         archive.error = "Synthetic reading catalog unavailable";
-        await shelfEntry.press("Enter");
+        await resume.click();
         await page.getByText(archive.error, { exact: true }).waitFor();
         assert.equal(await page.locator(".gallery-image-pager").count(), 0);
         assert.equal(await resume.isEnabled(), true);
@@ -1967,22 +1847,17 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
         assert.equal(await page.locator(".gallery-image-pager-stage img").evaluate(img => new URL(img.src).pathname), `/synthetic/A/${archive.total}.svg`);
         await page.keyboard.press("Escape");
         await page.locator(".gallery-reader-back").click();
-        await shelfEntry.waitFor();
-        await page.waitForFunction(() => document.activeElement?.dataset.photoListCard === "resume:A");
-
-        await page.route(/\/api\/image-library\/summary(?:\?|$)/, route => route.fulfill({
-          headers: { "X-FanHao-Account-Owner": "account:reading-fixture" },
-          json: { totals: { photoSets: 2 }, facets: {} }
-        }));
+        await page.setExtraHTTPHeaders({ "X-Fixture-Owner": "account:reading-fixture" });
         await page.reload();
-        await page.locator(".gallery-collections-grid").waitFor({ state: "attached" });
-        assert.equal(await shelfEntry.count(), 0, "another owner must not see guest reading positions");
+        await clickAlbum(page, "A");
+        await readerTitle(page, "Album A");
+        assert.equal(await resume.count(), 0, "another owner must not see guest reading positions");
       } finally { await page.close(); }
     });
     await run("photo reading resume yields to Back and invalidates a replaced archive", async () => {
       const page = await newPage({ real: true });
       const archive = { revision: "1".repeat(24), total: 210 };
-      const shelfEntry = page.locator('.gallery-photo-continue [data-photo-list-card="resume:A"]');
+      const resume = page.locator(".gallery-photo-resume-button");
       const requestedFull = Promise.withResolvers();
       const releaseFull = Promise.withResolvers();
       try {
@@ -1991,10 +1866,12 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
           JSON.stringify([{ id: "A", title: "Album A", archive: revision, page: total }])), archive);
         await page.reload();
         archive.hold = async () => { requestedFull.resolve(); await releaseFull.promise; };
-        await shelfEntry.click();
+        await clickAlbum(page, "A");
+        await readerTitle(page, "Album A");
+        await resume.click();
         await requestedFull.promise;
         await page.locator(".gallery-reader-back").click();
-        await shelfEntry.waitFor();
+        await page.locator(".gallery-card").first().waitFor();
         releaseFull.resolve();
         await page.waitForFunction(() => __transport.settled.some(entry => entry.url === "/api/photo-sets/A?imageLimit=all"));
         assert.equal(await page.locator(".gallery-image-pager").count(), 0);
@@ -2002,14 +1879,14 @@ export async function runGalleryReaderFixture({ timings = false, legacy = false,
 
         archive.hold = null;
         archive.revision = "2".repeat(24);
-        await shelfEntry.click();
+        await clickAlbum(page, "A");
         await readerTitle(page, "Album A");
         await page.getByText("套图已变化，已清除旧阅读位置", { exact: true }).waitFor();
         assert.equal(await page.locator(".gallery-photo-resume-button").count(), 0);
         assert.equal(await page.locator(".gallery-image-pager").count(), 0);
         await page.locator(".gallery-reader-back").click();
         await page.locator(".gallery-card").first().waitFor();
-        assert.equal(await shelfEntry.count(), 0);
+        assert.equal(await page.locator(".gallery-photo-continue").count(), 0);
       } finally { releaseFull.resolve(); await page.close(); }
     });
     for (const error of ["", "old reader error"]) {

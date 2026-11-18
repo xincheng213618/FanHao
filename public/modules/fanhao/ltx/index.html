@@ -6,10 +6,25 @@
   <meta name="theme-color" content="#0f1013">
   <meta name="fanhao-ltx" content="1">
   <title>LTX 资源库 · FanHao</title>
+  <script>
+    {
+      const filters = new URLSearchParams(location.search);
+      const recent = filters.get("sort") === "recent"
+        && !["q", "actor", "status", "local", "subtitle", "order"].some((key) => filters.has(key));
+      const catalog = document.createElement("link");
+      catalog.id = "catalogPreload";
+      catalog.rel = "preload";
+      catalog.as = "fetch";
+      catalog.crossOrigin = "";
+      catalog.href = recent ? "/api/fanhao/ltx?preview=recent" : "/api/fanhao/ltx";
+      document.head.append(catalog);
+    }
+  </script>
   <link rel="icon" href="/app-icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/modules/fanhao/ltx/source-ui.css">
-  <link rel="stylesheet" href="/modules/fanhao/ltx/styles.css?v=20261113-ltx-filter-views-01">
-  <script type="module" src="/modules/fanhao/ltx/page.js?v=20261113-ltx-filter-views-01"></script>
+  <link rel="stylesheet" href="/modules/fanhao/ltx/styles.css?v=20261117-ltx-scroll">
+  <link rel="modulepreload" href="/modules/fanhao/ltx/filter-views.js?v=20261113-ltx-filter-views-01">
+  <script type="module" src="/modules/fanhao/ltx/page.js?v=20261117-ltx-preview-verified"></script>
 </head>
 <body>
   <div id="app" class="ready">
@@ -35,7 +50,9 @@
             <option value="present">本地有视频</option>
             <option value="marked">文件已标 LTX</option>
             <option value="ltx-local">LTX 本地</option>
-            <option value="unmarked">本地有视频，文件未标 LTX</option>
+            <option value="unmarked" hidden>本地有视频，文件未标 LTX</option>
+            <option value="unmarked-non4k">本地有视频 · 非 4K · 文件未标 LTX</option>
+            <option value="unmarked-4k">本地有视频 · 4K 及以上 · 文件未标 LTX</option>
             <option value="remote-larger">远端 LTX 体积大于本地</option>
             <option value="missing">当前未发现视频</option>
           </select>
@@ -91,6 +108,34 @@
       </main>
     </div>
   </div>
+
+  <dialog id="catalogImport" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="catalogImportTitle">
+    <div class="inner" data-v-942e16ed>
+      <div class="top" data-v-942e16ed>
+        <h2 id="catalogImportTitle" data-v-942e16ed>更新目录</h2>
+        <form method="dialog"><button class="close" data-v-942e16ed aria-label="关闭目录导入">×</button></form>
+      </div>
+      <p class="note" data-v-942e16ed>官网已换域名，请更新同步脚本。按官网提示完成验证，FanHao 收到可用目录后会自动导入。</p>
+      <div class="fanhao-import-actions">
+        <button id="openCatalogSync" class="btn primary" data-v-942e16ed type="button">打开并同步</button>
+        <button id="catalogImportClipboard" class="btn" data-v-942e16ed type="button">从剪贴板导入目录</button>
+        <a class="btn" data-v-942e16ed href="/modules/fanhao/ltx/fanhao-ltx-sync-v2.user.js?v=2.0.0" target="_blank" rel="noopener">安装或更新同步脚本</a>
+      </div>
+      <details id="catalogImportManual">
+        <summary>手动导入 JSON</summary>
+        <div class="fanhao-import-actions">
+          <a class="btn" data-v-942e16ed href="https://ltxlib.dpdns.org/" target="_blank" rel="noopener noreferrer">打开官网</a>
+          <button id="catalogImportChoose" class="btn" data-v-942e16ed type="button">选择 JSON 文件</button>
+          <input id="catalogImportFile" type="file" accept=".json,application/json" hidden>
+        </div>
+        <form id="catalogImportForm" class="fanhao-view-form">
+          <label>目录 JSON <textarea id="catalogImportJson" class="fanhao-view-input" rows="4" required spellcheck="false"></textarea></label>
+          <button id="catalogImportSubmit" class="btn primary" data-v-942e16ed type="submit">导入目录</button>
+        </form>
+      </details>
+      <p id="catalogImportStatus" class="note fanhao-dialog-status" data-v-942e16ed role="status"></p>
+    </div>
+  </dialog>
 
   <dialog id="filterViews" class="dialog fanhao-dialog" data-v-942e16ed aria-labelledby="filterViewsTitle">
     <div class="inner" data-v-942e16ed>

@@ -8,9 +8,9 @@ let createQuery = createWorkQueryService;
 if (process.argv.includes("--legacy-key")) {
   const url = new URL("../src/modules/fanhao/server/works/work-query-service.js", import.meta.url);
   const text = fs.readFileSync(url, "utf8");
-  const slot = "JSON.stringify([scope, category, filter, sort, limit, offset])";
+  const slot = "JSON.stringify([scope, category, filter, sort, limit, offset, excludeWestern])";
   assert.equal(text.split(slot).length, 2);
-  const previous = text.replace(slot, "`${scope}:${category}:${filter}:${sort}:${limit}:${offset}`")
+  const previous = text.replace(slot, "`${scope}:${category}:${filter}:${sort}:${limit}:${offset}:${excludeWestern}`")
     .replace(/from "(\.\/[^"]+)"/gu, (_, relative) => `from "${new URL(relative, url).href}"`);
   createQuery = (await import(`data:text/javascript;base64,${Buffer.from(previous).toString("base64")}`)).createWorkQueryService;
 }

@@ -9,8 +9,6 @@ export function createDownloadManagerSyncService({
   WorkerCtor = Worker,
   syncTimeoutMs = 60_000,
   workerCloseTimeoutMs = 2_000,
-  initialStateKey = "",
-  onStateKey = () => {},
   onCatalogChanged = () => {},
   onItemsImported = () => {}
 }) {
@@ -107,7 +105,7 @@ export function createDownloadManagerSyncService({
 
   async function performSync(options, intent) {
     try {
-      const { result, sourceStateKey } = await runWorker();
+      const result = await runWorker();
       if (!result || stopped || intent !== generation) return null;
       if (result.requiresJournalUpgrade) {
         if (!journalUpgradeReported) console.warn("[short-video-sync]", result.message);
@@ -115,7 +113,6 @@ export function createDownloadManagerSyncService({
         return result;
       }
       journalUpgradeReported = false;
-      if (result.advanced) onStateKey(sourceStateKey);
       if (result.catalogChanged || Number(result.catalogChanges || 0) > 0) onCatalogChanged(result, options);
       if (result.imported || result.updated) onItemsImported(result);
       if (result.hasMore && !stopped && intent === generation) {
@@ -158,7 +155,7 @@ export function createDownloadManagerSyncService({
         confirmExit();
         if (current.retiring) { refreshUnconfirmedCatalog(); return; }
         if (code !== 0) { reject(new Error(`短视频后台同步线程异常退出 (${code})`)); return; }
-        if (!message || message.ok) { resolve(message || {}); return; }
+        if (!message || message.ok) { resolve(message?.result ?? null); return; }
         const error = new Error(message.error || "短视频后台同步失败");
         if (message.stack) error.stack = message.stack;
         reject(error);

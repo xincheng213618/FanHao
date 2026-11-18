@@ -18,8 +18,9 @@ const requests = [];
 const uploaded = [];
 let mode = "direct", failList = false, delaySearch = false, probedDuration = 60;
 const extraTracks = new Map();
+const fixtureTrackLists = new Map();
 function track(id, label, language = "zh", autoSelect = false) { return { id, label, language, autoSelect, format: "srt", match: "exact", source: "local", url: `/api/works/subtitle-work/subtitles/vtt/${id}?videoId=subtitle-a`, downloadUrl: `/api/works/subtitle-work/subtitles/original/${id}?videoId=subtitle-a` }; }
-function tracks(videoId) { return videoId === "subtitle-a" ? [track("zh", "简体中文 · 精确匹配", "zh-Hans", true), track("en", "English", "en"), track("ambiguous", "中文 · 待核对", "zh", false), ...extraTracks.values()] : []; }
+function tracks(videoId) { return fixtureTrackLists.get(videoId) ?? (videoId === "subtitle-a" ? [track("zh", "简体中文 · 精确匹配", "zh-Hans", true), track("en", "English", "en"), { ...track("ambiguous", "中文 · 待核对"), match: "manual" }, ...extraTracks.values()] : []); }
 function time(seconds) { const value = Math.max(0, seconds); return `00:00:${String(Math.floor(value)).padStart(2, "0")}.000`; }
 function vtt(id, offset) {
   const text = id === "en" ? "English subtitle fixture" : id === "uploaded" ? "本地字幕验证" : "中文字幕测试";
@@ -119,6 +120,38 @@ try {
     } finally { await element?.dispose(); }
   }
 
+  fixtureTrackLists.set("subtitle-a", [
+    { ...track("ambiguous", "中文 · 手动选择"), match: "manual" },
+    track("en", "English", "en"),
+    { ...track("zh", "简体中文 · 匹配文件名", "zh-Hans"), match: "language" }
+  ]);
+  fixtureTrackLists.set("subtitle-b", [track("en", "English · 同文件名", "en")]);
+  await page.goto(`${address}/player.html?workId=subtitle-work`);
+  await waitTrack("zh");
+  await pauseAt(6);
+  await openControls();
+  const subtitleSelect = page.getByRole("combobox", { name: "字幕轨道" });
+  await subtitleSelect.selectOption("");
+  const refresher = page.getByRole("button", { name: "重新读取", exact: true });
+  await refresher.click();
+  await page.getByRole("status").filter({ hasText: "当前关闭" }).waitFor();
+  assert.equal(await subtitleSelect.inputValue(), "", "refresh must retain the user's explicit off choice");
+  assert.equal(await page.locator("video track[data-subtitle-id]").count(), 0);
+  await page.locator(".subtitle-controls > summary").click();
+  if (await page.locator("#toggleSidebarButton").getAttribute("aria-expanded") === "false") await page.locator("#toggleSidebarButton").click();
+  await page.locator("#playerFiles button").nth(1).click();
+  await waitTrack("en");
+  await pauseAt(6);
+  await page.locator("#playerFiles button").first().click();
+  await page.locator(".subtitle-status").filter({ hasText: "3 条字幕，当前关闭" }).waitFor({ state: "attached" });
+  assert.equal(await page.locator("video track[data-subtitle-id]").count(), 0, "returning to a previously played file must retain its off choice");
+  fixtureTrackLists.set("subtitle-a", [{ ...track("ambiguous", "中文 · 手动选择"), match: "manual" }]);
+  await page.goto(`${address}/player.html?workId=subtitle-work`);
+  await page.locator(".subtitle-status").filter({ hasText: "当前关闭" }).waitFor({ state: "attached" });
+  assert.equal(await page.locator("video track[data-subtitle-id]").count(), 0, "manual-only candidates must stay available without auto-selection");
+  fixtureTrackLists.clear();
+  console.log("PASS standalone subtitles default to a matched Chinese or other-language track and preserve explicit off");
+
   for (const scenario of [{ hint: 60, steps: 6 }, { hint: 600, steps: 9 }]) {
     probedDuration = scenario.hint;
     let release;
@@ -203,7 +236,7 @@ try {
   await waitTrack("zh");
   await previousTrack.dispose();
   assert.equal(await page.getByRole("searchbox", { name: "字幕搜索番号" }).inputValue(), "CUSTOM-999", "reloading tracks preserves a manually edited query");
-  assert.equal(await page.getByRole("combobox", { name: "字幕轨道" }).inputValue(), "zh", "only explicitly safe Chinese tracks auto-select");
+  assert.equal(await page.getByRole("combobox", { name: "字幕轨道" }).inputValue(), "zh", "the server's suggested Chinese track is preferred");
   await page.getByRole("combobox", { name: "字幕轨道" }).selectOption("");
   assert.equal(await page.locator("video track[data-subtitle-id]").count(), 0);
   assert.equal(await page.locator(".fanhao-subtitle-cues").innerText(), "");
@@ -257,6 +290,7 @@ try {
   await page.getByRole("button", { name: "开始播放", exact: true }).click();
   await page.waitForFunction(() => document.querySelector("video").readyState >= 2 && !document.querySelector("video").paused);
   await pauseAt(2); await checkCaption("English subtitle fixture");
+  await openControls();
   assert.equal(await page.getByRole("combobox", { name: "字幕轨道" }).inputValue(), "en");
   await page.getByRole("combobox", { name: "字幕轨道" }).selectOption("");
   await page.locator("#playerSeekRange").evaluate((seek) => { seek.value = "30"; seek.dispatchEvent(new Event("change", { bubbles: true })); });
@@ -334,7 +368,7 @@ try {
   } finally { await continuous.close(); }
   assert.deepEqual(errors, []);
   assert(requests.some(({ url }) => url.pathname.includes("/subtitles/vtt/en") && url.searchParams.get("offsetSeconds") === "-20"));
-  console.log("Subtitle browser checks passed: both players render real VTT cues on synthetic media, safe Chinese auto-selection, off/manual tracks, online search/download, original-byte upload, download, retry, cancellation, file switching, 390px panel and segmented seek offsets.");
+  console.log("Subtitle browser checks passed: both players render real VTT cues on synthetic media, default matched subtitles, off/manual tracks, online search/download, original-byte upload, download, retry, cancellation, file switching, 390px panel and segmented seek offsets.");
 } finally {
   await browser?.close(); await new Promise((resolve) => server.close(resolve));
   fs.unlinkSync(mediaPath); fs.rmdirSync(temporary);
